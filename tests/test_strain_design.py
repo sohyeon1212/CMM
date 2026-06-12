@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import pytest
-from cmm.core.solvers import SolverCapabilityError
-from cmm.features.strain_design import optknock, robustknock
+
+# OptKnock/RobustKnock delegate the bilevel MILP to the optional ``straindesign`` package
+# (the ``design`` extra). Skip this module gracefully where it is not installed so CI on a
+# platform without it stays green instead of erroring at call time.
+pytest.importorskip("straindesign")
+
+from cmm.core.solvers import SolverCapabilityError  # noqa: E402
+from cmm.features.strain_design import optknock, robustknock  # noqa: E402
 
 SUCC = "EX_succ_e"
 

@@ -1,5 +1,7 @@
 # CMM — Cellular Metabolic Modeling Workbench
 
+[![CI](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml/badge.svg)](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml)
+
 CMM is a desktop workbench and Python library for genome-scale metabolic modeling: flux
 simulation, omics integration, metabolic-engineering design, and publication-quality
 visualization. It is built on [COBRApy](https://opencobra.github.io/cobrapy/) and runs every
@@ -27,19 +29,34 @@ scripts.
 
 ## Installation
 
-CMM requires Python ≥ 3.10. A QP/MILP solver (Gurobi or CPLEX) is recommended — the open
-GLPK solver runs FBA/pFBA/FVA, but MOMA, ROOM, revert-metabolism (QP), OptKnock (MILP), and
-original-MTA (MIQP) need a commercial solver.
+CMM requires Python ≥ 3.10 and runs on **Windows, macOS, and Linux** — it is pure Python
+(no platform-specific build), so one universal wheel installs everywhere. A QP/MILP solver
+(Gurobi or CPLEX) is recommended: the open GLPK solver runs FBA/pFBA/FVA, but MOMA, ROOM,
+revert-metabolism (QP), OptKnock (MILP), and original-MTA (MIQP) need a QP/MILP/MIQP-capable
+solver. `pip install gurobipy` ships a free size-limited license that already covers small
+models such as `e_coli_core`.
+
+### Install a release (easiest)
+
+Each tagged version is published as a [GitHub Release](https://github.com/jyryu3161/CMM/releases)
+with a prebuilt wheel attached. Install it — with optional extras — on any OS:
 
 ```bash
-# core library
-python -m pip install -e .
+# from a release wheel (replace the version)
+pip install "cmm[desktop,design] @ https://github.com/jyryu3161/CMM/releases/download/v0.1.0/cmm-0.1.0-py3-none-any.whl"
 
-# desktop GUI (Qt + matplotlib) and strain design
-python -m pip install -e ".[desktop,design]"
+# or straight from the repository at a tag (or @main for the latest)
+pip install "cmm[desktop,design] @ git+https://github.com/jyryu3161/CMM.git@v0.1.0"
+```
 
-# development (tests)
-python -m pip install -e ".[dev]"
+### Install from source (development)
+
+```bash
+git clone https://github.com/jyryu3161/CMM.git && cd CMM
+
+python -m pip install -e .                     # core library
+python -m pip install -e ".[desktop,design]"   # desktop GUI (Qt + matplotlib) + strain design
+python -m pip install -e ".[dev]"              # tests + ruff
 ```
 
 Launch the GUI:
@@ -49,6 +66,16 @@ python -m cmm.app
 ```
 
 The Config menu reports the active solver and warns when it cannot run the full toolkit.
+
+### Releasing (maintainers)
+
+Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the sdist + wheel and
+attaches them to a new GitHub Release. Every push and PR is validated by
+`.github/workflows/ci.yml` (ruff + the full test suite on Ubuntu, Windows, and macOS).
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
 
 ## Quick start (Python API)
 

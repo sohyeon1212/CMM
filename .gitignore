@@ -18,6 +18,9 @@ dist/
 .bkit/
 docs/.pdca-status.json
 docs/.bkit-memory.json
+# uv lockfile: the project ships via pyproject/pip (CI uses pip); the local venv is uv-managed
+# but the lockfile is not part of the distributed project.
+uv.lock
 
 # Generated scenario figure outputs (reproducible via cmm.app.* scenarios)
 temp_figures/

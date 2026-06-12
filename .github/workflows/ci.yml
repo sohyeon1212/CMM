@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.12"]
+        # Also exercise the minimum supported Python (pyproject requires-python >= 3.10).
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # PyQt5's offscreen platform plugin needs a few system libraries on Linux. Windows and
+      # macOS ship everything the wheels need.
+      - name: Install Qt offscreen system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libxkbcommon0 libdbus-1-3
+
+      - name: Install package + desktop + dev tooling
+        run: |
+          python -m pip install --upgrade pip
+          # gurobipy ships a free size-limited (<= 2000 vars/constraints) license that needs
+          # no signup; every test model (toy / branched / e_coli_core, 95 reactions) is well
+          # within it, so this provides the QP/MILP/MIQP solver the science tests require.
+          pip install -e ".[desktop,dev]" gurobipy
+
+      # OptKnock / RobustKnock use the optional `straindesign` package. Best-effort so a
+      # platform-specific install hiccup does not fail the whole matrix; tests/test_strain_design.py
+      # skips itself (pytest.importorskip) when it is absent.
+      - name: Install strain-design extra (optional, best-effort)
+        continue-on-error: true
+        run: pip install straindesign
+
+      - name: Lint (ruff)
+        run: ruff check src tests
+
+      - name: Test (pytest, offscreen Qt)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q

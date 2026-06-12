@@ -1,0 +1,48 @@
+name: Release
+
+# Build the distribution and publish it as a GitHub Release whenever a version tag is pushed:
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# CMM is pure Python, so a single universal wheel (cmm-<version>-py3-none-any.whl) installs on
+# Windows, macOS, and Linux. No PyPI account or secrets are required — the artifacts are
+# attached to the GitHub Release and installed from there or directly from the repo:
+#
+#     pip install https://github.com/jyryu3161/CMM/releases/download/v0.1.0/cmm-0.1.0-py3-none-any.whl
+#     pip install "cmm[desktop,design] @ https://github.com/jyryu3161/CMM/releases/download/v0.1.0/cmm-0.1.0-py3-none-any.whl"
+#     pip install "git+https://github.com/jyryu3161/CMM.git@v0.1.0"
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # required for softprops/action-gh-release to create the release
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Verify the built distribution
+        run: |
+          python -m pip install --upgrade twine
+          twine check dist/*
+
+      - name: Publish GitHub Release with artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

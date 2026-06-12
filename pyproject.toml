@@ -28,6 +28,7 @@ design = [
 ]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.15,<0.16",
 ]
 
 [project.scripts]
