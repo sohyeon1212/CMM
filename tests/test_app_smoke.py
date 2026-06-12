@@ -155,7 +155,7 @@ def test_revert_tab_runs_loaded_expressions(app):
     assert "g2" in window.revert_summary.text()
 
 
-def test_media_pfba_comparison_in_gui(app, ecoli_core):
+def test_media_pfba_comparison_in_gui(app, ecoli_core, unrestricted_qp_solver):
     window = CmmMainWindow(ecoli_core)
 
     # Apply a preset medium and confirm it changed the model's exchange bounds.

@@ -35,7 +35,7 @@ def test_reference_flux_omics_requires_expression(ecoli_core):
         reference_flux(ecoli_core, "eflux2")
 
 
-def test_moma_uses_chosen_template_as_reference(ecoli_core):
+def test_moma_uses_chosen_template_as_reference(ecoli_core, unrestricted_qp_solver):
     # Different templates -> different MOMA reference -> different perturbed distance.
     fba_ref = reference_flux(ecoli_core, "fba")
     pfba_ref = reference_flux(ecoli_core, "pfba")

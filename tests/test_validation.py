@@ -45,7 +45,7 @@ def test_fva_matches_cobra(ecoli_core):
         assert cmm_ranges[rid].maximum == pytest.approx(cobra_table.loc[rid, "maximum"], abs=1e-5)
 
 
-def test_moma_matches_cobra(ecoli_core):
+def test_moma_matches_cobra(ecoli_core, unrestricted_qp_solver):
     reference = ecoli_core.optimize()
     cmm_reference = FluxState(dict(reference.fluxes), name="wt")
     with ecoli_core:
