@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# OS / editor junk
+.DS_Store
+
+# Tooling state (regenerated; not part of the project)
+.omc/
+.bkit/
+docs/.pdca-status.json
+docs/.bkit-memory.json
+
+# Generated scenario figure outputs (reproducible via cmm.app.* scenarios)
+temp_figures/
+
+# Large legacy expression data (58 MB, unused by any code/test)
+test_data/log_tpm_qc.csv

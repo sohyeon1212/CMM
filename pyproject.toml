@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cmm"
+version = "0.1.0"
+description = "A metabolic modeling workbench for flux simulation and metabolic engineering."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "CMM Contributors" }]
+dependencies = [
+    "cobra>=0.30",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+desktop = [
+    "matplotlib>=3.8",
+    "qtpy>=2.4",
+    "PyQt5>=5.15",
+]
+design = [
+    "straindesign>=1.9",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+cmm = "cmm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
