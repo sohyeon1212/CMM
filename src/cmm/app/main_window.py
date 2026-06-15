@@ -62,24 +62,107 @@ from cmm.visualization import (
     production_envelope_figure,
 )
 
+# "Oxford Slate" — an academic / scientific-software palette: a deep-navy header with a
+# restrained steel-blue accent over a cool-paper canvas. Every interactive widget (menus,
+# combos, spin boxes, the flux slider, scrollbars, the status strip, tooltips) is styled so
+# the workbench reads as one cohesive professional tool rather than default Qt chrome.
+#
+#   navy  #1b2b44   accent #2f5e8f (hover #274f79 / pressed #1f3f61)
+#   canvas #eef1f5  panels #ffffff  text #1a2433  muted #5c6b7e  border #d2dae4
 _STYLE = """
-QMainWindow, QWidget { background: #f4f6f8; color: #1c2733; font-size: 12px; }
-QLabel { background: transparent; }
-QLabel#title { color: white; font-size: 19px; font-weight: 600; }
-QLabel#subtitle { color: #d7e3ef; font-size: 12px; }
-QWidget#header { background: #1f6feb; }
-QGroupBox { font-weight: 600; border: 1px solid #d0d7de; border-radius: 6px;
-            margin-top: 10px; padding: 8px; background: white; }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
-QPushButton { background: #1f6feb; color: white; border: none; border-radius: 5px;
-              padding: 6px 14px; font-weight: 600; }
-QPushButton:hover { background: #1a5fd0; }
-QTableWidget { background: white; gridline-color: #e4e8ec;
-               selection-background-color: #cfe3ff; selection-color: #11243b; }
-QHeaderView::section { background: #eaeef2; padding: 5px; border: none;
-                       border-right: 1px solid #d8dde2; font-weight: 600; }
-QTabBar::tab { padding: 7px 16px; background: #e7ebef; }
-QTabBar::tab:selected { background: white; border-top: 2px solid #1f6feb; }
+QMainWindow, QWidget {
+    background: #eef1f5; color: #1a2433; font-size: 12px;
+    font-family: "Helvetica Neue", "Segoe UI", "Arial", sans-serif;
+}
+
+/* Title band */
+QWidget#header { background: #1b2b44; border-bottom: 2px solid #2f5e8f; }
+QLabel { background: transparent; color: #1a2433; }
+QLabel#title { color: #ffffff; font-size: 18px; font-weight: 700; }
+QLabel#subtitle { color: #9fb3cc; font-size: 12px; }
+QLabel#statusbar { background: #e3e9f1; color: #4a5a70;
+                   border-top: 1px solid #cdd6e1; padding: 5px 12px; font-size: 11px; }
+
+/* Menu bar */
+QMenuBar { background: #e8edf3; color: #27374b; border-bottom: 1px solid #d4dce6; padding: 2px 6px; }
+QMenuBar::item { background: transparent; padding: 5px 12px; border-radius: 4px; }
+QMenuBar::item:selected { background: #d6e3f2; color: #16324f; }
+QMenu { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1; padding: 4px; }
+QMenu::item { padding: 6px 26px 6px 18px; border-radius: 4px; }
+QMenu::item:selected { background: #2f5e8f; color: #ffffff; }
+QMenu::item:disabled { color: #8a98a8; }
+QMenu::separator { height: 1px; background: #dde3ea; margin: 4px 8px; }
+
+/* Cards */
+QGroupBox { font-weight: 600; color: #27374b; border: 1px solid #d2dae4; border-radius: 8px;
+            margin-top: 12px; padding: 12px 10px 10px 10px; background: #ffffff; }
+QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #2f5e8f; }
+
+/* Buttons */
+QPushButton { background: #2f5e8f; color: #ffffff; border: 1px solid #2a557f;
+              border-radius: 6px; padding: 6px 14px; font-weight: 600; }
+QPushButton:hover { background: #274f79; }
+QPushButton:pressed { background: #1f3f61; }
+QPushButton:disabled { background: #c2cedd; color: #eef1f5; border-color: #c2cedd; }
+QPushButton:focus { border: 1px solid #7da3c8; }
+
+/* Combo boxes */
+QComboBox { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
+            border-radius: 6px; padding: 4px 8px; min-height: 22px; }
+QComboBox:hover { border-color: #9bb4d0; }
+QComboBox:focus { border-color: #2f5e8f; }
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox::down-arrow { image: none; width: 0; height: 0; margin-right: 9px;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 5px solid #5c6b7e; }
+QComboBox QAbstractItemView { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
+    selection-background-color: #2f5e8f; selection-color: #ffffff; outline: none; }
+
+/* Spin boxes */
+QDoubleSpinBox, QSpinBox { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
+    border-radius: 6px; padding: 3px 6px; min-height: 22px; }
+QDoubleSpinBox:focus, QSpinBox:focus { border-color: #2f5e8f; }
+
+/* Flux-range slider */
+QSlider::groove:horizontal { height: 5px; background: #d2dae4; border-radius: 3px; }
+QSlider::sub-page:horizontal { background: #2f5e8f; border-radius: 3px; }
+QSlider::handle:horizontal { background: #ffffff; border: 2px solid #2f5e8f;
+    width: 14px; height: 14px; margin: -6px 0; border-radius: 8px; }
+QSlider::handle:horizontal:hover { border-color: #274f79; }
+
+/* Tables */
+QTableWidget { background: #ffffff; alternate-background-color: #f5f8fb; color: #1a2433;
+    gridline-color: #e4e9f0; border: 1px solid #d2dae4; border-radius: 6px;
+    selection-background-color: #d6e3f2; selection-color: #16324f; }
+QTableWidget::item { padding: 3px 6px; }
+QHeaderView::section { background: #e8edf3; color: #34465c; padding: 6px 8px; border: none;
+    border-right: 1px solid #d8dfe8; border-bottom: 1px solid #d2dae4; font-weight: 600; }
+
+/* Tabs */
+QTabWidget::pane { border: 1px solid #d2dae4; border-radius: 6px; top: -1px; background: #ffffff; }
+QTabBar::tab { background: #e6ebf2; color: #54637a; padding: 8px 18px; margin-right: 2px;
+    border: 1px solid #d8dfe8; border-bottom: none;
+    border-top-left-radius: 6px; border-top-right-radius: 6px; }
+QTabBar::tab:hover { background: #eef2f7; color: #2f5e8f; }
+QTabBar::tab:selected { background: #ffffff; color: #1b2b44; font-weight: 600;
+    border-bottom: 2px solid #2f5e8f; margin-bottom: -1px; }
+
+/* Scrollbars */
+QScrollBar:vertical { background: transparent; width: 11px; margin: 0; }
+QScrollBar::handle:vertical { background: #c2cedd; border-radius: 5px; min-height: 28px; }
+QScrollBar::handle:vertical:hover { background: #a9b9cc; }
+QScrollBar:horizontal { background: transparent; height: 11px; margin: 0; }
+QScrollBar::handle:horizontal { background: #c2cedd; border-radius: 5px; min-width: 28px; }
+QScrollBar::handle:horizontal:hover { background: #a9b9cc; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* Splitter + tooltips */
+QSplitter::handle { background: #dde3ea; }
+QSplitter::handle:horizontal { width: 6px; }
+QSplitter::handle:hover { background: #c2cedd; }
+QToolTip { background: #1b2b44; color: #ffffff; border: 1px solid #12203a;
+    padding: 5px 8px; border-radius: 4px; }
 """
 
 
@@ -145,7 +228,7 @@ class CmmMainWindow(QMainWindow):
         outer.addWidget(body, 1)
 
         self.status_label = QLabel("Ready.")
-        self.status_label.setContentsMargins(12, 4, 12, 4)
+        self.status_label.setObjectName("statusbar")
         outer.addWidget(self.status_label)
 
     def _build_menus(self) -> None:
@@ -271,7 +354,7 @@ class CmmMainWindow(QMainWindow):
         self.reaction_table.itemChanged.connect(self._on_bound_edited)
         layout.addWidget(self.reaction_table, 1)
         hint = QLabel("Double-click a Lower/Upper cell to edit a bound, then re-run FBA.")
-        hint.setStyleSheet("color: #5a6b7b; font-style: italic;")
+        hint.setStyleSheet("color: #5c6b7e; font-style: italic;")
         layout.addWidget(hint)
         return box
 
@@ -794,7 +877,7 @@ class CmmMainWindow(QMainWindow):
         for row in range(self.reaction_table.rowCount()):
             rid = self.reaction_table.item(row, 0).text()
             active = abs(self._fluxes.get(rid, 0.0)) >= threshold and threshold >= 0
-            color = QColor("#d7f0dd") if active and value > 0 else QColor("white")
+            color = QColor("#dce9d6") if active and value > 0 else QColor("white")
             for col in range(4):
                 item = self.reaction_table.item(row, col)
                 if item is not None:
@@ -1083,7 +1166,7 @@ class CmmMainWindow(QMainWindow):
             self.revert_table.setItem(i, 2, QTableWidgetItem(f"{record['score']:.4g}"))
             if i == 0:
                 for col in range(3):
-                    self.revert_table.item(i, col).setBackground(QColor("#d7f0dd"))
+                    self.revert_table.item(i, col).setBackground(QColor("#dce9d6"))
         best = ranking.best()
         if best is not None:
             self.revert_summary.setText(
