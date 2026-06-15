@@ -43,10 +43,10 @@ with a prebuilt wheel attached. Install it — with optional extras — on any O
 
 ```bash
 # from a release wheel (replace the version)
-pip install "cmm[desktop,design] @ https://github.com/jyryu3161/CMM/releases/download/v0.2.0/cmm-0.2.0-py3-none-any.whl"
+pip install "cmm[desktop,design] @ https://github.com/jyryu3161/CMM/releases/download/v0.2.1/cmm-0.2.1-py3-none-any.whl"
 
 # or straight from the repository at a tag (or @main for the latest)
-pip install "cmm[desktop,design] @ git+https://github.com/jyryu3161/CMM.git@v0.2.0"
+pip install "cmm[desktop,design] @ git+https://github.com/jyryu3161/CMM.git@v0.2.1"
 ```
 
 ### Install from source with one command
@@ -99,7 +99,7 @@ attaches them to a new GitHub Release. Every push and PR is validated by
 `.github/workflows/ci.yml` (ruff + the full test suite on Ubuntu, Windows, and macOS).
 
 ```bash
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.2.1 && git push origin v0.2.1
 ```
 
 ## Quick start (Python API)
