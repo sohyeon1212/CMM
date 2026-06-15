@@ -1,7 +1,7 @@
-"""Launch the CMM desktop workbench: ``python -m cmm.app [model.xml]``.
+"""Launch the CMM desktop platform: ``python -m cmm.app [model.xml]``.
 
 Loads an SBML model from the first argument, or the public e_coli_core textbook model when no
-path is given, and opens the workbench window.
+path is given, and opens the platform window.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Feature module boundaries and service entry points for the CMM workbench."""
+"""Feature module boundaries and service entry points for the CMM platform."""
 
 from cmm.features.comparison import ComparisonResult, moma, reference_flux, room
 from cmm.features.production import (
@@ -17,7 +17,7 @@ from cmm.features.strain_design import (
 from cmm.features.transformation import direction_from_states, transformation_targets
 
 # Features with a shipped, tested service in ``src/cmm``. Keep this list in sync with the
-# actual modules — it is the public contract for what the workbench provides.
+# actual modules — it is the public contract for what the platform provides.
 INCLUDED_FEATURES = (
     "flux_visualization_slider",
     "fba",

@@ -8,7 +8,7 @@ public e_coli_core textbook model so the demo is self-contained)::
 
 Drives the GUI through FBA, a glucose bound edit, succinate production design, and omics
 integration, capturing offscreen screenshots to ``CMM_OUTPUT_DIR`` or CMM/temp_figures/.
-This validates the workbench at the scale of a user-supplied genome-scale reconstruction.
+This validates the platform at the scale of a user-supplied genome-scale reconstruction.
 """
 
 from __future__ import annotations

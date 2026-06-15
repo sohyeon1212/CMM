@@ -1,14 +1,14 @@
-# CMM — Cellular Metabolic Modeling Workbench
+# CMM — Cellular Metabolic Modeling Platform
 
 [![CI](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml/badge.svg)](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml)
 
-CMM is a desktop workbench and Python library for genome-scale metabolic modeling: flux
+CMM is a desktop platform and Python library for genome-scale metabolic modeling: flux
 simulation, omics integration, metabolic-engineering design, and publication-quality
 visualization. It is built on [COBRApy](https://opencobra.github.io/cobrapy/) and runs every
 analysis through small, solver-neutral services so the same code powers both the GUI and
 scripts.
 
-![CMM workbench](docs/images/overview.png)
+![CMM platform](docs/images/overview.png)
 
 ## Features
 
@@ -61,7 +61,7 @@ git clone https://github.com/jyryu3161/CMM.git && cd CMM
 ./install.sh                # macOS / Linux (and Windows Git Bash / WSL)
 #   .\install.ps1           # Windows PowerShell
 
-# then launch the workbench:
+# then launch the platform:
 .venv/bin/python -m cmm.app          # Windows: .venv\Scripts\python -m cmm.app
 ```
 
@@ -161,7 +161,7 @@ log_fc = flux_log_change(fluxes.fluxes("condition_A"), fluxes.fluxes("condition_
 
 ## Correctness
 
-Every workbench service is validated against direct COBRApy computations on `e_coli_core`
+Every platform service is validated against direct COBRApy computations on `e_coli_core`
 (see `tests/test_validation.py`): FBA, pFBA, FVA, MOMA, theoretical yield, and media all match
 the cobra reference to numerical tolerance, so GUI results equal scripted results.
 

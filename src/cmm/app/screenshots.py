@@ -7,7 +7,7 @@ Run with the project venv and the offscreen Qt platform::
 
 Each scenario performs real GUI actions (FBA, FVA, the flux-range slider, revert-metabolism
 prediction) and saves a rendered PNG to ``CMM_OUTPUT_DIR`` or CMM/temp_figures/. This is
-the project's GUI test: the captures are inspected to confirm the workbench renders and the
+the project's GUI test: the captures are inspected to confirm the platform renders and the
 services drive the views.
 """
 

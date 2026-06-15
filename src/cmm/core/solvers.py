@@ -108,7 +108,7 @@ class SolverStatus:
 
     @property
     def warning(self) -> str | None:
-        """A human warning when the solver cannot run the full workbench, else None."""
+        """A human warning when the solver cannot run the full platform, else None."""
 
         missing = sorted({"QP", "MILP", "MIQP"} - set(self.capabilities))
         if not missing:

@@ -1,7 +1,7 @@
 """Production-design services: theoretical yield, production envelope, FSEOF.
 
 These answer "how do we make more of a target product?" — the metabolic-engineering side of
-the workbench. They run on plain cobra models and return solver-neutral, serializable
+the platform. They run on plain cobra models and return solver-neutral, serializable
 results so the visualization layer and the GUI can render them without re-solving.
 """
 

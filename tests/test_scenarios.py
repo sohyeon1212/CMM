@@ -23,7 +23,7 @@ from qtpy.QtWidgets import QApplication  # noqa: E402
 from cmm.app import genome_scale_scenario, screenshots, succinate_scenario  # noqa: E402
 from cmm.core import fba  # noqa: E402
 
-# A rendered workbench grab is tens of KB; a blank/solid-colour PNG compresses to ~1-2 KB.
+# A rendered platform grab is tens of KB; a blank/solid-colour PNG compresses to ~1-2 KB.
 # This threshold is a non-blank proxy: well above blank, well below the real ~60 KB+ captures.
 _MIN_PNG_BYTES = 5000
 

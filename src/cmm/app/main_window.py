@@ -65,7 +65,7 @@ from cmm.visualization import (
 # "Oxford Slate" — an academic / scientific-software palette: a deep-navy header with a
 # restrained steel-blue accent over a cool-paper canvas. Every interactive widget (menus,
 # combos, spin boxes, the flux slider, scrollbars, the status strip, tooltips) is styled so
-# the workbench reads as one cohesive professional tool rather than default Qt chrome.
+# the platform reads as one cohesive professional tool rather than default Qt chrome.
 #
 #   navy  #1b2b44   accent #2f5e8f (hover #274f79 / pressed #1f3f61)
 #   canvas #eef1f5  panels #ffffff  text #1a2433  muted #5c6b7e  border #d2dae4
@@ -186,7 +186,7 @@ def _read_expression_vector(path: str) -> dict[str, float]:
 
 
 class CmmMainWindow(QMainWindow):
-    """Main workbench window over a single cobra model."""
+    """Main platform window over a single cobra model."""
 
     def __init__(self, model: Model, parent=None, *, default_product: str | None = None,
                  map_path: str | None = None):
@@ -199,7 +199,7 @@ class CmmMainWindow(QMainWindow):
         self._map_path = map_path
         self._revert_source_expression: dict[str, float] | None = None
         self._revert_target_expression: dict[str, float] | None = None
-        self.setWindowTitle("CMM — Cellular Metabolic Modeling Workbench")
+        self.setWindowTitle("CMM — Cellular Metabolic Modeling Platform")
         self.resize(1180, 740)
         self.setStyleSheet(_STYLE)
         self._build_ui()
@@ -232,7 +232,7 @@ class CmmMainWindow(QMainWindow):
         outer.addWidget(self.status_label)
 
     def _build_menus(self) -> None:
-        """A desktop-style menu bar: Analysis / Model / Config drive the workbench."""
+        """A desktop-style menu bar: Analysis / Model / Config drive the platform."""
 
         bar = self.menuBar()
 
@@ -312,7 +312,7 @@ class CmmMainWindow(QMainWindow):
         header.setObjectName("header")
         layout = QVBoxLayout(header)
         layout.setContentsMargins(16, 12, 16, 12)
-        title = QLabel("CMM — Cellular Metabolic Modeling Workbench")
+        title = QLabel("CMM — Cellular Metabolic Modeling Platform")
         title.setObjectName("title")
         self.subtitle = QLabel("")
         self.subtitle.setObjectName("subtitle")

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cmm"
 version = "0.2.0"
-description = "A metabolic modeling workbench for flux simulation and metabolic engineering."
+description = "A metabolic modeling platform for flux simulation and metabolic engineering."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }

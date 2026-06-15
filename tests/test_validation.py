@@ -1,6 +1,6 @@
 """Validation: CMM services must equal direct cobrapy computations on e_coli_core.
 
-These guard against the workbench silently diverging from the underlying cobra reference —
+These guard against the platform silently diverging from the underlying cobra reference —
 the GUI runs exactly these services, so matching cobra here means the GUI numbers are right.
 """
 
