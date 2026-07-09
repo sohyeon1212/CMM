@@ -126,3 +126,61 @@ def test_room_counts_changed_reactions(branched_model):
     # Rerouting changes R2 (off), R3 (on), R5 (on): a small, positive switch count.
     assert result.distance >= 2
     assert result.fluxes["R3"] > 1.0
+
+
+# --- gene / multi / batch knockouts ----------------------------------------
+
+
+def test_blocked_reactions_for_genes_joint(branched_model):
+    from cmm.features._perturbation import blocked_reactions_for_genes
+
+    assert blocked_reactions_for_genes(branched_model, ["g2"]) == ("R2",)
+    # Knocking out g2 and g3 together blocks both their reactions.
+    assert set(blocked_reactions_for_genes(branched_model, ["g2", "g3"])) == {"R2", "R3"}
+    assert blocked_reactions_for_genes(branched_model, []) == ()
+
+
+def test_knockout_comparison_gene_and_reaction_agree(branched_model):
+    from cmm.features._perturbation import blocked_reactions_for_genes
+    from cmm.features.comparison import knockout_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    # Gene g2 disables exactly R2, so a gene KO and the equivalent reaction KO match.
+    gene_rxns = blocked_reactions_for_genes(branched_model, ["g2"])
+    by_gene = knockout_comparison(branched_model, reference, gene_rxns, method="moma_l2")
+    by_reaction = knockout_comparison(branched_model, reference, ["R2"], method="moma_l2")
+    assert by_gene.status == "optimal"
+    assert by_gene.distance == pytest.approx(by_reaction.distance, abs=1e-6)
+    assert by_gene.fluxes["R3"] > 1.0  # rerouted through the healthy branch
+    # Model restored after the knockout context.
+    assert branched_model.reactions.R2.bounds == (0.0, 1000.0)
+
+
+def test_knockout_comparison_multi_reaction(branched_model):
+    from cmm.features.comparison import knockout_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    # Knocking out both branches (R2 and R3) leaves no route to product -> lethal/infeasible.
+    result = knockout_comparison(branched_model, reference, ["R2", "R3"], method="moma_l2")
+    assert result.status != "optimal" or result.fluxes.get("BIOMASS", 0.0) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_batch_comparison_ranks_targets(branched_model):
+    from cmm.features._perturbation import gene_perturbations
+    from cmm.features.comparison import batch_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    rows = {r.target_id: r for r in batch_comparison(
+        branched_model, reference, gene_perturbations(branched_model), method="moma_l2"
+    )}
+    # Every non-inert gene is scored.
+    assert {"g1", "g2", "g3", "g5", "gb"} <= set(rows)
+    # g3/g5 (unused healthy branch at the pFBA optimum) have no effect: distance ~0.
+    assert rows["g3"].distance == pytest.approx(0.0, abs=1e-6)
+    # g2 (the used disease branch) forces a reroute: nonzero distance. MOMA minimizes the
+    # deviation from the reference (not growth), so the predicted biomass drops to 6 (the
+    # point closest to the reference's R2=10, R3=R5=0), staying positive.
+    assert rows["g2"].distance > 0
+    assert rows["g2"].objective == pytest.approx(6.0, abs=1e-6)
+    assert rows["g2"].kind == "gene"
+    assert rows["g2"].n_reactions == 1

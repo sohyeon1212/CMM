@@ -195,10 +195,20 @@ Predicts the flux state after a knockout as the one closest to a reference templ
 1. **Method**: `MOMA (L2)` (QP), `MOMA (L1)` (LP), or `ROOM` (MILP).
 2. **Reference template**: the wild-type flux the perturbed state is compared against —
    `fba`, `pfba`, `lad`, or `eflux2`.
-3. **Knock out**: the reaction to force to zero.
-4. **Run.** The table shows every changed reaction (reference vs perturbed flux); the summary
-   reports status and distance. A lethal knockout is reported as *infeasible* rather than
-   crashing.
+3. **Knockout level**: `reaction` or `gene` (a gene knockout is resolved to the reactions it
+   disables through the model's GPR — a multi-gene selection is resolved jointly, so a complex
+   that needs two knocked-out subunits is blocked correctly).
+4. **Knock out (select one or more):** pick targets in the list — Ctrl/Shift-click to select
+   several.
+5. **Run (selected as one KO)** knocks out all selected targets *together* (single- or
+   multi-knockout). The table shows every changed reaction (reference vs perturbed flux); a
+   lethal knockout is reported as *infeasible* rather than crashing. For a gene knockout the
+   summary also reports how many reactions it blocked.
+6. **Batch (each separately)** runs MOMA/ROOM once per target as its *own* single knockout —
+   the CNApy-style batch deletion / essentiality scan — and fills a table of *Target, Kind,
+   #reactions, Status, Distance, Objective* sorted most-disrupted first (with no selection it
+   scans every gene/reaction of the chosen level). Export it with **File → Export Table to
+   CSV…**. On genome-scale models this is many solves; it runs in the background (§3).
 
 > **LAD / E-Flux2 templates.** These use the gene expression you loaded on the **Omics** tab
 > (**Load expression CSV…**). If no expression is loaded, the tab falls back to synthetic
@@ -263,7 +273,10 @@ also scriptable and reproducible.
 from cobra.io import load_model
 from cmm.core import fba, pfba, fva, apply_medium, solver_status
 from cmm.features.production import theoretical_yield, production_envelope, fseof, fvseof
-from cmm.features.comparison import moma, room, reference_flux
+from cmm.features.comparison import (
+    moma, room, reference_flux, knockout_comparison, batch_comparison,
+)
+from cmm.features._perturbation import gene_perturbations, blocked_reactions_for_genes
 from cmm.features.strain_design import optknock, robustknock
 from cmm.features.transformation import transformation_targets
 from cmm.omics.expression import integrate_expression
@@ -293,6 +306,14 @@ ref = reference_flux(model, "pfba")
 with model:
     model.reactions.PFK.knock_out()
     print(moma(model, ref, linear=False).distance)
+
+# Gene / multi / batch knockouts
+gene_rxns = blocked_reactions_for_genes(model, ["b0726"])          # gene -> reactions (GPR)
+print(knockout_comparison(model, ref, gene_rxns, method="moma_l2").distance)   # ~129.9
+print(knockout_comparison(model, ref, ["PFK", "TPI"], method="moma_l2").distance)  # multi-KO
+batch = batch_comparison(model, ref, gene_perturbations(model), method="moma_l2")
+for row in sorted(batch, key=lambda r: -r.distance)[:5]:            # most-disrupted first
+    print(row.target_id, row.status, round(row.distance, 3), round(row.objective, 3))
 
 # Multi-condition omics comparison (log2 fold-change of flux magnitude)
 # preds = predict_condition_fluxes(model, expression_dataframe, method="eflux2")

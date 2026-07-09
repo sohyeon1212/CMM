@@ -28,6 +28,15 @@ def app():
     return instance
 
 
+def _select_ko(window, ids):
+    """Select the given target ids in the Comparison tab's knockout list."""
+
+    window.ko_list.clearSelection()
+    for i in range(window.ko_list.count()):
+        if window.ko_list.item(i).text() in ids:
+            window.ko_list.item(i).setSelected(True)
+
+
 def test_window_builds_and_drives_services(app):
     window = CmmMainWindow(build_demo_model())
 
@@ -173,7 +182,8 @@ def test_media_pfba_comparison_in_gui(app, ecoli_core, unrestricted_qp_solver):
     window.apply_selected_medium()
     window.comparison_method_combo.setCurrentText("MOMA (L2)")
     window.template_combo.setCurrentText("pfba")
-    window.ko_combo.setCurrentText("PFK")  # reroutable aerobically
+    window.ko_level_combo.setCurrentText("reaction")
+    _select_ko(window, ["PFK"])  # reroutable aerobically
     window.run_comparison()
     assert "MOMA" in window.comparison_summary.text()
     assert window.comparison_table.rowCount() > 0
@@ -181,7 +191,7 @@ def test_media_pfba_comparison_in_gui(app, ecoli_core, unrestricted_qp_solver):
     # A lethal knockout is reported as infeasible, not a crash.
     window.medium_combo.setCurrentText("glucose_anaerobic")
     window.apply_selected_medium()
-    window.ko_combo.setCurrentText("PFK")
+    _select_ko(window, ["PFK"])
     window.run_comparison()
     assert "infeasible" in window.comparison_summary.text()
 
@@ -276,6 +286,57 @@ def test_export_table_csv(app, tmp_path):
     assert out.exists()
     header = out.read_text().splitlines()[0]
     assert header.startswith("Reaction")
+
+
+def test_comparison_gene_knockout(app):
+    window = CmmMainWindow(build_demo_model())
+    window._goto_tab("Comparison")
+    window.comparison_method_combo.setCurrentText("MOMA (L2)")
+    window.template_combo.setCurrentText("pfba")
+    window.ko_level_combo.setCurrentText("gene")
+    _select_ko(window, ["g2"])  # disease-branch gene -> blocks R2 -> reroute through R3/R5
+    window.run_comparison()
+    assert "gene g2" in window.comparison_summary.text()
+    assert "1 reactions blocked" in window.comparison_summary.text()
+    assert window.comparison_table.rowCount() > 0
+
+
+def test_comparison_multi_knockout(app):
+    window = CmmMainWindow(build_demo_model())
+    window._goto_tab("Comparison")
+    window.ko_level_combo.setCurrentText("reaction")
+    _select_ko(window, ["R1", "R2"])
+    window.run_comparison()
+    # Both reactions named in the summary; knocking out R1 is lethal (no substrate route).
+    text = window.comparison_summary.text()
+    assert "R1" in text and "R2" in text
+
+
+def test_comparison_requires_a_selection(app):
+    window = CmmMainWindow(build_demo_model())
+    window._goto_tab("Comparison")
+    window.ko_list.clearSelection()
+    window.run_comparison()
+    assert "Select one or more" in window.comparison_summary.text()
+
+
+def test_comparison_batch_over_genes(app):
+    window = CmmMainWindow(build_demo_model())
+    window._goto_tab("Comparison")
+    window.comparison_method_combo.setCurrentText("MOMA (L2)")
+    window.template_combo.setCurrentText("pfba")
+    window.ko_level_combo.setCurrentText("gene")
+    window.ko_list.clearSelection()  # no selection -> batch over all genes
+    window.run_batch_comparison()
+    assert window.comparison_table.columnCount() == 6
+    assert window.comparison_table.rowCount() == len(window.model.genes)
+    assert "Batch" in window.comparison_summary.text()
+    # The batch table carries a per-target row with a status column.
+    headers = [
+        window.comparison_table.horizontalHeaderItem(c).text()
+        for c in range(window.comparison_table.columnCount())
+    ]
+    assert headers[:2] == ["Target", "Kind"]
 
 
 def test_background_execution_runs_off_thread_and_stays_responsive(app):

@@ -16,6 +16,7 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as Navigation
 from qtpy.QtCore import QEventLoop, QObject, Qt, QThread, QTimer, Signal
 from qtpy.QtGui import QColor, QFont
 from qtpy.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -24,6 +25,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -48,7 +50,16 @@ from cmm.core import (
     reference_state_pfba,
     solver_status,
 )
-from cmm.features.comparison import moma, reference_flux, room
+from cmm.features._perturbation import (
+    blocked_reactions_for_genes,
+    gene_perturbations,
+    reaction_perturbations,
+)
+from cmm.features.comparison import (
+    batch_comparison,
+    knockout_comparison,
+    reference_flux,
+)
 from cmm.features.production import (
     fseof,
     fvseof,
@@ -817,7 +828,9 @@ class CmmMainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         controls = QGroupBox("Perturbation response (MOMA / ROOM vs a reference template)")
-        row = QHBoxLayout(controls)
+        controls_layout = QVBoxLayout(controls)
+
+        row = QHBoxLayout()
         row.addWidget(QLabel("Method:"))
         self.comparison_method_combo = QComboBox()
         self.comparison_method_combo.addItems(["MOMA (L2)", "MOMA (L1)", "ROOM"])
@@ -830,19 +843,44 @@ class CmmMainWindow(QMainWindow):
             "LAD/E-Flux2 use expression loaded on the Omics tab (synthetic demo data if none)."
         )
         row.addWidget(self.template_combo)
-        row.addWidget(QLabel("Knock out:"))
-        self.ko_combo = QComboBox()
-        self.ko_combo.setMinimumWidth(140)
-        row.addWidget(self.ko_combo)
-        run_btn = QPushButton("Run")
-        run_btn.clicked.connect(self.run_comparison)
-        row.addWidget(run_btn)
+        row.addWidget(QLabel("Knockout level:"))
+        self.ko_level_combo = QComboBox()
+        self.ko_level_combo.addItems(["reaction", "gene"])
+        self.ko_level_combo.setToolTip("Knock out reactions, or genes (resolved to reactions via GPR)")
+        self.ko_level_combo.currentTextChanged.connect(self._populate_ko_list)
+        row.addWidget(self.ko_level_combo)
         row.addStretch(1)
+        controls_layout.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Knock out (select one or more):"))
+        run_btn = QPushButton("Run (selected as one KO)")
+        run_btn.setToolTip("MOMA/ROOM with all selected targets knocked out together")
+        run_btn.clicked.connect(self.run_comparison)
+        batch_btn = QPushButton("Batch (each separately)")
+        batch_btn.setToolTip(
+            "Run MOMA/ROOM once per target as a separate single knockout "
+            "(all targets of this level if none selected)."
+        )
+        batch_btn.clicked.connect(self.run_batch_comparison)
+        row2.addWidget(run_btn)
+        row2.addWidget(batch_btn)
+        row2.addStretch(1)
+        controls_layout.addLayout(row2)
+
+        self.ko_list = QListWidget()
+        self.ko_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.ko_list.setMaximumHeight(120)
+        self.ko_list.setToolTip(
+            "Ctrl/Shift-click to select multiple targets. Selecting several then 'Run' knocks "
+            "them out together; 'Batch' runs each on its own."
+        )
+        controls_layout.addWidget(self.ko_list)
         layout.addWidget(controls)
 
         self.comparison_summary = QLabel(
-            "Pick a reference template (FBA/pFBA/LAD/E-Flux2), a reaction to knock out, "
-            "and a method to predict the perturbed flux state."
+            "Pick a reference template (FBA/pFBA/LAD/E-Flux2), a knockout level (reaction/gene), "
+            "one or more targets, and a method to predict the perturbed flux state."
         )
         self.comparison_summary.setWordWrap(True)
         layout.addWidget(self.comparison_summary)
@@ -857,51 +895,103 @@ class CmmMainWindow(QMainWindow):
         layout.addWidget(self.comparison_table, 1)
         return tab
 
+    def _populate_ko_list(self) -> None:
+        """Fill the knockout list with the model's genes or reactions for the current level."""
+
+        if not hasattr(self, "ko_list"):
+            return
+        level = self.ko_level_combo.currentText()
+        self.ko_list.clear()
+        if level == "gene":
+            self.ko_list.addItems([g.id for g in self.model.genes])
+        else:
+            self.ko_list.addItems([r.id for r in self.model.reactions])
+
+    def _selected_ko_targets(self) -> list[str]:
+        return [item.text() for item in self.ko_list.selectedItems()]
+
+    def _comparison_method_key(self) -> str:
+        label = self.comparison_method_combo.currentText()
+        if label == "ROOM":
+            return "room"
+        return "moma_l1" if label == "MOMA (L1)" else "moma_l2"
+
+    def _comparison_expression(self):
+        """Expression for a LAD/E-Flux2 template: real if loaded, else synthetic (flagged)."""
+
+        template = self.template_combo.currentText()
+        if template not in ("lad", "eflux2"):
+            return None, False
+        if self._omics_expression is not None:
+            return self._omics_expression, False
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        return {g.id: float(rng.uniform(1, 100)) for g in self.model.genes}, True
+
+    @staticmethod
+    def _ko_label(targets: list[str]) -> str:
+        shown = ", ".join(targets[:4])
+        return shown if len(targets) <= 4 else f"{shown}, +{len(targets) - 4} more"
+
     def run_comparison(self) -> None:
         method_label = self.comparison_method_combo.currentText()
         template = self.template_combo.currentText()
-        ko = self.ko_combo.currentText()
-        synthetic_expression = False
+        level = self.ko_level_combo.currentText()
+        targets = self._selected_ko_targets()
+        if not targets:
+            self.comparison_summary.setText(
+                f"Select one or more {level}s to knock out (Ctrl/Shift-click for several)."
+            )
+            return
+        method_key = self._comparison_method_key()
+        expression, synthetic_expression = self._comparison_expression()
+        ko_label = self._ko_label(targets)
+
+        # Restore the single/multi-KO table shape (a prior batch run reshapes it).
+        self.comparison_table.setColumnCount(3)
+        self.comparison_table.setHorizontalHeaderLabels(
+            ["Reaction", "Reference flux", "Perturbed flux"]
+        )
+
+        def _compute():
+            reference = reference_flux(self.model, template, gene_expression=expression)
+            if level == "gene":
+                reaction_ids = blocked_reactions_for_genes(self.model, targets)
+            else:
+                reaction_ids = tuple(targets)
+            result = knockout_comparison(self.model, reference, reaction_ids, method=method_key)
+            return reference, result, reaction_ids
+
         try:
-            expression = None
-            if template in ("lad", "eflux2"):
-                # Prefer real expression loaded on the Omics tab; only fall back to synthetic
-                # data if none is loaded — and flag it so the result is never mistaken for a
-                # data-driven template.
-                expression = self._omics_expression
-                if expression is None:
-                    import numpy as np
-
-                    rng = np.random.default_rng(0)
-                    expression = {g.id: float(rng.uniform(1, 100)) for g in self.model.genes}
-                    synthetic_expression = True
-
-            def _compute():
-                reference = reference_flux(self.model, template, gene_expression=expression)
-                with self.model:
-                    self.model.reactions.get_by_id(ko).bounds = (0.0, 0.0)
-                    if method_label == "ROOM":
-                        result = room(self.model, reference)
-                    else:
-                        result = moma(self.model, reference, linear=method_label == "MOMA (L1)")
-                return reference, result
-
-            reference, result = self._run_in_background(
+            reference, result, reaction_ids = self._run_in_background(
                 _compute, label=f"Running {method_label}…"
             )
         except Exception as exc:
             self.comparison_summary.setText(f"Comparison failed: {html.escape(str(exc))}")
             return
+
         synthetic_note = (
             " <span style='color:#b45309'>⚠ synthetic demo expression — load a CSV on the "
             "Omics tab for a data-driven template.</span>"
             if synthetic_expression else ""
         )
+        blocked_note = (
+            f" ({len(reaction_ids)} reactions blocked)" if level == "gene" else ""
+        )
+        if level == "gene" and not reaction_ids:
+            self.comparison_table.setRowCount(0)
+            self.comparison_summary.setText(
+                f"Knocking out gene(s) {html.escape(ko_label)} blocks no reactions "
+                "(no GPR effect) — nothing to compare." + synthetic_note
+            )
+            self.status_label.setText("Comparison: knockout has no effect.")
+            return
         if result.status != "optimal":
             self.comparison_table.setRowCount(0)
             self.comparison_summary.setText(
                 f"<b>{method_label}</b> vs <b>{template}</b>: knocking out "
-                f"{html.escape(ko)} makes the model <b>infeasible</b> "
+                f"{html.escape(ko_label)}{blocked_note} makes the model <b>infeasible</b> "
                 "(e.g. it cannot meet maintenance demand)." + synthetic_note
             )
             self.status_label.setText("Comparison: infeasible perturbation.")
@@ -915,10 +1005,70 @@ class CmmMainWindow(QMainWindow):
             self.comparison_table.setItem(i, 2, QTableWidgetItem(f"{flux:.4g}"))
         self.comparison_summary.setText(
             f"<b>{method_label}</b> vs <b>{template}</b> template after knocking out "
-            f"{html.escape(ko)}: status {result.status}, distance {result.distance:.4g}, "
-            f"{len(changed)} reactions changed." + synthetic_note
+            f"{level} {html.escape(ko_label)}{blocked_note}: status {result.status}, "
+            f"distance {result.distance:.4g}, {len(changed)} reactions changed." + synthetic_note
         )
         self.status_label.setText(f"Comparison complete ({method_label}, {template}).")
+
+    def run_batch_comparison(self) -> None:
+        """Run MOMA/ROOM once per target (each a separate single knockout) into a batch table."""
+
+        method_label = self.comparison_method_combo.currentText()
+        template = self.template_combo.currentText()
+        level = self.ko_level_combo.currentText()
+        selected = self._selected_ko_targets()  # empty -> all targets of this level
+        method_key = self._comparison_method_key()
+        expression, synthetic_expression = self._comparison_expression()
+
+        def _compute():
+            reference = reference_flux(self.model, template, gene_expression=expression)
+            if level == "gene":
+                perts = gene_perturbations(self.model, selected or None)
+            else:
+                perts = reaction_perturbations(self.model, selected or None)
+            return batch_comparison(self.model, reference, perts, method=method_key), len(perts)
+
+        self.status_label.setText(f"Running batch {method_label} ({level})…")
+        try:
+            rows, n = self._run_in_background(
+                _compute, label=f"Batch {method_label} over {level}s…"
+            )
+        except Exception as exc:
+            self.comparison_summary.setText(f"Batch comparison failed: {html.escape(str(exc))}")
+            self.status_label.setText("Batch comparison failed.")
+            return
+
+        # Most-disrupted first; infeasible (NaN distance) sorted last.
+        def _sort_key(r):
+            import math
+
+            return (0, -r.distance) if math.isfinite(r.distance) else (1, 0.0)
+
+        rows = sorted(rows, key=_sort_key)
+        self.comparison_table.setColumnCount(6)
+        self.comparison_table.setHorizontalHeaderLabels(
+            ["Target", "Kind", "#reactions", "Status", "Distance", "Objective"]
+        )
+        self.comparison_table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            dist = "infeasible" if r.status != "optimal" else f"{r.distance:.4g}"
+            self.comparison_table.setItem(i, 0, QTableWidgetItem(r.target_id))
+            self.comparison_table.setItem(i, 1, QTableWidgetItem(r.kind))
+            self.comparison_table.setItem(i, 2, QTableWidgetItem(str(r.n_reactions)))
+            self.comparison_table.setItem(i, 3, QTableWidgetItem(r.status))
+            self.comparison_table.setItem(i, 4, QTableWidgetItem(dist))
+            self.comparison_table.setItem(i, 5, QTableWidgetItem(f"{r.objective:.4g}"))
+        synthetic_note = (
+            " <span style='color:#b45309'>⚠ synthetic demo expression.</span>"
+            if synthetic_expression else ""
+        )
+        lethal = sum(1 for r in rows if r.status != "optimal")
+        self.comparison_summary.setText(
+            f"<b>Batch {method_label}</b> vs <b>{template}</b> over {len(rows)} {level} "
+            f"knockout(s): {lethal} infeasible/lethal. Sorted by distance (most disrupted "
+            "first)." + synthetic_note
+        )
+        self.status_label.setText(f"Batch comparison complete ({method_label}, {level}).")
 
     def _build_simulation_tab(self) -> QWidget:
         tab = QWidget()
@@ -1065,8 +1215,7 @@ class CmmMainWindow(QMainWindow):
         self.sd_product_combo.addItems(exchanges)
         self.substrate_combo.clear()
         self.substrate_combo.addItems(["auto", *exchanges])
-        self.ko_combo.clear()
-        self.ko_combo.addItems([r.id for r in model.reactions])
+        self._populate_ko_list()
         self._loading = False
         if self._default_product and self._default_product in exchanges:
             self.product_combo.setCurrentText(self._default_product)
