@@ -1,6 +1,20 @@
 """Feature module boundaries and service entry points for the CMM platform."""
 
-from cmm.features.comparison import ComparisonResult, moma, reference_flux, room
+from cmm.features._perturbation import (
+    Perturbation,
+    blocked_reactions_for_genes,
+    gene_perturbations,
+    reaction_perturbations,
+)
+from cmm.features.comparison import (
+    BatchComparisonRow,
+    ComparisonResult,
+    batch_comparison,
+    knockout_comparison,
+    moma,
+    reference_flux,
+    room,
+)
 from cmm.features.production import (
     fseof,
     fvseof,
@@ -25,6 +39,7 @@ INCLUDED_FEATURES = (
     "pfba",
     "moma",
     "room",
+    "batch_moma_room",
     "theoretical_yield",
     "production_envelope",
     "fseof",
@@ -41,7 +56,6 @@ INCLUDED_FEATURES = (
 # surface. Move an entry into INCLUDED_FEATURES only when its service and tests land.
 PLANNED_FEATURES = (
     "dynamic_fba",
-    "batch_moma_room",
     "random_flux_sampling",
     "flux_response_analysis",
     "enzyme_constrained_modeling",
@@ -60,14 +74,21 @@ __all__ = [
     "INCLUDED_FEATURES",
     "PLANNED_FEATURES",
     "EXCLUDED_FEATURES",
+    "BatchComparisonRow",
     "ComparisonResult",
+    "Perturbation",
     "StrainDesign",
     "StrainDesignResult",
+    "batch_comparison",
+    "blocked_reactions_for_genes",
     "direction_from_states",
     "fseof",
     "fvseof",
+    "gene_perturbations",
+    "knockout_comparison",
     "moma",
     "production_envelope",
+    "reaction_perturbations",
     "reference_flux",
     "optknock",
     "robustknock",

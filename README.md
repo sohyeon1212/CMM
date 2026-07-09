@@ -16,7 +16,8 @@ scripts.
 - **Growth media** — preset media (glucose/acetate/glycerol, aerobic and anaerobic) applied
   with one click; easy reaction-bound editing in the model table.
 - **Perturbation response** — MOMA (L1/L2) and ROOM against a reference *template* you choose
-  from FBA, pFBA, LAD, or E-Flux2.
+  from FBA, pFBA, LAD, or E-Flux2, with **reaction or gene knockouts**, **multiple knockouts
+  at once**, and a **batch** mode that scores every gene/reaction knockout in one run.
 - **Omics integration** — single-state expression → flux with **E-Flux2** (Kim 2016) and
   **LAD**; multi-condition prediction with log2 fold-change comparison between conditions.
 - **Production design** — theoretical yield (with CO₂-fixation disclosure), production

@@ -15,6 +15,7 @@ and returns a plain, serializable result.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -28,6 +29,7 @@ from cmm.core import solvers
 from cmm.core.flux_state import FluxState
 from cmm.core.simulation import fba as _fba
 from cmm.core.simulation import pfba as _pfba
+from cmm.features._perturbation import Perturbation
 
 ComparisonMethod = Literal["moma_l1", "moma_l2", "room"]
 ReferenceMethod = Literal["fba", "pfba", "lad", "eflux2"]
@@ -144,3 +146,87 @@ def _result(method: ComparisonMethod, solution: Solution) -> ComparisonResult:
     )
     fluxes = {rid: float(v) for rid, v in solution.fluxes.items()}
     return ComparisonResult(method=method, status=solution.status, distance=distance, fluxes=fluxes)
+
+
+def _objective_reaction_id(model: Model) -> str | None:
+    for rxn in model.reactions:
+        if rxn.objective_coefficient != 0:
+            return rxn.id
+    return None
+
+
+def knockout_comparison(
+    model: Model,
+    reference: FluxState,
+    reaction_ids: Iterable[str],
+    *,
+    method: ComparisonMethod = "moma_l2",
+    delta: float = 0.03,
+    epsilon: float = 1e-3,
+) -> ComparisonResult:
+    """Run MOMA/ROOM against ``reference`` with ``reaction_ids`` forced to zero.
+
+    Accepts one or many reactions, so it covers a single-reaction knockout, a multi-reaction
+    knockout, and a gene knockout (pass the reactions the gene disables via its GPR). The model
+    is restored on return. Method keys: ``moma_l2`` (QP), ``moma_l1`` (LP), ``room`` (MILP).
+    """
+
+    with model:
+        for rid in reaction_ids:
+            model.reactions.get_by_id(rid).bounds = (0.0, 0.0)
+        if method == "room":
+            return room(model, reference, delta=delta, epsilon=epsilon)
+        return moma(model, reference, linear=method == "moma_l1")
+
+
+@dataclass(frozen=True)
+class BatchComparisonRow:
+    """One knockout's MOMA/ROOM outcome in a batch run."""
+
+    target_id: str
+    kind: str  # "gene" | "reaction"
+    status: str
+    distance: float
+    objective: float  # objective-reaction flux at the perturbed state (e.g. growth)
+    n_reactions: int  # how many reactions the knockout blocked
+
+
+def batch_comparison(
+    model: Model,
+    reference: FluxState,
+    perturbations: Sequence[Perturbation],
+    *,
+    method: ComparisonMethod = "moma_l2",
+    delta: float = 0.03,
+    epsilon: float = 1e-3,
+    objective_reaction: str | None = None,
+) -> list[BatchComparisonRow]:
+    """Run MOMA/ROOM for each perturbation against one reference, returning a batch table.
+
+    This is the batch perturbation-response job runner: enumerate gene or reaction knockouts
+    (via :mod:`cmm.features._perturbation`), score each against the same wild-type reference,
+    and collect the distance, the objective (growth) at the perturbed state, and the status.
+    """
+
+    objective = objective_reaction or _objective_reaction_id(model)
+    rows: list[BatchComparisonRow] = []
+    for pert in perturbations:
+        result = knockout_comparison(
+            model, reference, pert.reaction_ids, method=method, delta=delta, epsilon=epsilon
+        )
+        growth = (
+            float(result.fluxes.get(objective, float("nan")))
+            if (result.fluxes and objective is not None)
+            else float("nan")
+        )
+        rows.append(
+            BatchComparisonRow(
+                target_id=pert.target_id,
+                kind=pert.kind,
+                status=result.status,
+                distance=result.distance,
+                objective=growth,
+                n_reactions=len(pert.reaction_ids),
+            )
+        )
+    return rows

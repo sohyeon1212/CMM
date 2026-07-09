@@ -18,16 +18,35 @@ from cobra import Model
 try:  # cobra >= 0.29 renamed the helper and made it context-revertible
     from cobra.manipulation.delete import knock_out_model_genes as _knock_out_genes
 
-    def _blocked_reaction_ids(model: Model, gene_id: str) -> tuple[str, ...]:
+    def _blocked_reaction_ids_for(model: Model, gene_ids: Sequence[str]) -> tuple[str, ...]:
         with model:  # bounds are reverted on exit; we only read the result
-            blocked = _knock_out_genes(model, [gene_id])
+            blocked = _knock_out_genes(model, list(gene_ids))
             return tuple(sorted(r.id for r in blocked))
 except ImportError:  # pragma: no cover - older cobra layout
     from cobra.manipulation.delete import find_gene_knockout_reactions as _find_ko
 
-    def _blocked_reaction_ids(model: Model, gene_id: str) -> tuple[str, ...]:
-        blocked = _find_ko(model, [model.genes.get_by_id(gene_id)])
+    def _blocked_reaction_ids_for(model: Model, gene_ids: Sequence[str]) -> tuple[str, ...]:
+        genes = [model.genes.get_by_id(g) for g in gene_ids]
+        blocked = _find_ko(model, genes)
         return tuple(sorted(r.id for r in blocked))
+
+
+def _blocked_reaction_ids(model: Model, gene_id: str) -> tuple[str, ...]:
+    return _blocked_reaction_ids_for(model, [gene_id])
+
+
+def blocked_reactions_for_genes(model: Model, gene_ids: Iterable[str]) -> tuple[str, ...]:
+    """Reactions disabled when *all* the given genes are knocked out together (GPR-aware).
+
+    Resolving the genes jointly (not one at a time) is what makes a multi-gene knockout
+    correct: a reaction whose GPR needs two of the knocked-out genes via an ``and`` is only
+    blocked when both are gone, which per-gene resolution would miss.
+    """
+
+    gene_list = [str(g) for g in gene_ids]
+    if not gene_list:
+        return ()
+    return _blocked_reaction_ids_for(model, gene_list)
 
 PerturbationKind = Literal["gene", "reaction"]
 
