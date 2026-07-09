@@ -12,7 +12,8 @@ from collections.abc import Mapping
 
 from cobra import Model
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from qtpy.QtCore import Qt
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+from qtpy.QtCore import QEventLoop, QObject, Qt, QThread, QTimer, Signal
 from qtpy.QtGui import QColor, QFont
 from qtpy.QtWidgets import (
     QComboBox,
@@ -25,8 +26,10 @@ from qtpy.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSlider,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -53,6 +56,13 @@ from cmm.features.production import (
     theoretical_yield,
 )
 from cmm.features.revert import revert_targets
+from cmm.features.strain_design import optknock, robustknock
+from cmm.features.transformation import transformation_targets
+from cmm.omics.conditions import (
+    flux_log_change,
+    predict_condition_fluxes,
+    read_expression_table,
+)
 from cmm.omics.differential import differential_expression
 from cmm.omics.expression import gene_to_reaction_weights, integrate_expression
 from cmm.visualization import (
@@ -185,6 +195,31 @@ def _read_expression_vector(path: str) -> dict[str, float]:
     return expression
 
 
+class _AnalysisWorker(QObject):
+    """Runs one compute callable on a worker thread and reports back to the UI thread.
+
+    The callable must be pure computation over the cobra model / services (no Qt or matplotlib
+    access) — those stay on the main thread. The result (or the raised exception) is captured
+    so the caller can render it (or re-raise) once ``finished`` fires.
+    """
+
+    finished = Signal()
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+        self.result = None
+        self.error: Exception | None = None
+
+    def run(self) -> None:
+        try:
+            self.result = self._fn()
+        except Exception as exc:  # captured and re-raised on the UI thread by the caller
+            self.error = exc
+        finally:
+            self.finished.emit()
+
+
 class CmmMainWindow(QMainWindow):
     """Main platform window over a single cobra model."""
 
@@ -199,6 +234,16 @@ class CmmMainWindow(QMainWindow):
         self._map_path = map_path
         self._revert_source_expression: dict[str, float] | None = None
         self._revert_target_expression: dict[str, float] | None = None
+        # Real gene expression loaded from a CSV on the Omics tab, reused as the LAD/E-Flux2
+        # reference template on the Comparison tab so that path is not left to synthetic data.
+        self._omics_expression: dict[str, float] | None = None
+        # A→B transformation finder: two expression vectors → two predicted flux states.
+        self._transform_source_expression: dict[str, float] | None = None
+        self._transform_target_expression: dict[str, float] | None = None
+        # Multi-condition comparison: a gene × condition expression table.
+        self._condition_table = None
+        # Guards re-entrant background runs (see _run_in_background).
+        self._busy = False
         self.setWindowTitle("CMM — Cellular Metabolic Modeling Platform")
         self.resize(1180, 740)
         self.setStyleSheet(_STYLE)
@@ -236,6 +281,14 @@ class CmmMainWindow(QMainWindow):
 
         bar = self.menuBar()
 
+        file_menu = bar.addMenu("&File")
+        file_menu.addAction("Open Model…", self.open_model_dialog)
+        file_menu.addSeparator()
+        file_menu.addAction("Export Table to CSV…", self.export_table_csv)
+        file_menu.addAction("Save Figure…", self.save_active_figure)
+        file_menu.addSeparator()
+        file_menu.addAction("Quit", self.close)
+
         analysis = bar.addMenu("&Analysis")
         analysis.addAction("Run FBA", self.run_fba)
         analysis.addAction("Run FVA", self.run_fva)
@@ -246,10 +299,16 @@ class CmmMainWindow(QMainWindow):
                            lambda: self._in_tab("Production", self.run_production_envelope_plot))
         analysis.addAction("FSEOF Targets",
                            lambda: self._in_tab("Production", self.run_fseof_plot))
+        analysis.addAction("Strain Design (OptKnock / RobustKnock)…",
+                           lambda: self._goto_tab("Strain Design"))
         analysis.addSeparator()
         analysis.addAction("Omics Integration (E-Flux2 / LAD)…",
                            lambda: self._goto_tab("Omics"))
+        analysis.addAction("Multi-condition Comparison…",
+                           lambda: self._goto_tab("Multi-condition"))
         analysis.addAction("Revert Metabolism…", lambda: self._goto_tab("Revert Metabolism"))
+        analysis.addAction("Transformation Targets (A→B)…",
+                           lambda: self._goto_tab("Transform (A→B)"))
         if self._map_path:
             analysis.addSeparator()
             analysis.addAction("Render Flux Map",
@@ -307,6 +366,172 @@ class CmmMainWindow(QMainWindow):
             f"Solver: {active_solver(self.model)}",
         )
 
+    # -- background execution -----------------------------------------------
+
+    def _run_in_background(self, compute, *, label: str = "Working…"):
+        """Run ``compute()`` off the UI thread and return its result synchronously.
+
+        The heavy solve runs on a worker thread while a nested event loop keeps the window
+        repainting; a modal busy dialog blocks input so the model is not mutated mid-solve.
+        Because the nested loop only exits when the worker finishes, callers still see a plain
+        synchronous call (tests and the scenario harnesses read results immediately after).
+
+        Re-entrant calls (a backgrounded handler invoking another) run inline so busy dialogs
+        and worker threads never stack.
+        """
+
+        if self._busy:  # already inside a background run — don't nest threads/dialogs
+            return compute()
+
+        self._busy = True
+        worker = _AnalysisWorker(compute)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        loop = QEventLoop()
+        worker.finished.connect(loop.quit)
+
+        # A modal, no-cancel busy dialog: blocks input (menus, table edits, other analyses) so
+        # only the worker touches the model, and auto-shows only if the work exceeds
+        # minimumDuration so fast solves do not flash a dialog.
+        dialog = QProgressDialog(label, None, 0, 0, self)
+        dialog.setWindowTitle("CMM")
+        dialog.setWindowModality(Qt.ApplicationModal)
+        dialog.setMinimumDuration(400)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+
+        # Start the thread only once the event loop is running, so the worker cannot finish and
+        # queue loop.quit before exec_() begins (which would otherwise hang the loop).
+        QTimer.singleShot(0, thread.start)
+        try:
+            loop.exec_()
+        finally:
+            dialog.reset()
+            dialog.deleteLater()
+            thread.quit()
+            thread.wait()
+            worker.deleteLater()
+            self._busy = False
+
+        if worker.error is not None:
+            raise worker.error
+        return worker.result
+
+    # -- File menu (open / export) ------------------------------------------
+
+    def open_model_dialog(self) -> None:
+        """Load a different SBML model into the running window."""
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open SBML model", "",
+            "SBML models (*.xml *.sbml *.xml.gz *.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            import cobra
+
+            model = (
+                cobra.io.load_json_model(path)
+                if path.endswith(".json")
+                else cobra.io.read_sbml_model(path)
+            )
+        except Exception as exc:
+            self.status_label.setText(f"Could not load model: {html.escape(str(exc))}")
+            return
+        # A new model invalidates any loaded expression / revert state.
+        self._omics_expression = None
+        self._revert_source_expression = None
+        self._revert_target_expression = None
+        self.revert_source_label.setText("not loaded")
+        self.revert_target_label.setText("not loaded")
+        self._update_revert_run_state()
+        self.load_model(model)
+        self.status_label.setText(f"Loaded model '{model.id}' from {path}.")
+
+    def _active_table(self) -> QTableWidget | None:
+        """The primary result table of the current tab, or None for figure-only tabs."""
+
+        name = self.tabs.tabText(self.tabs.currentIndex())
+        return {
+            "Simulation": self.sim_table,
+            "Comparison": self.comparison_table,
+            "Strain Design": self.sd_table,
+            "Omics": self.omics_table,
+            "Multi-condition": self.cond_table,
+            "Revert Metabolism": self.revert_table,
+            "Transform (A→B)": self.transform_table,
+        }.get(name)
+
+    def _active_figure(self):
+        """The matplotlib figure of the current tab, or None if it has no figure."""
+
+        name = self.tabs.tabText(self.tabs.currentIndex())
+        if name == "Production" and self._production_canvas is not None:
+            return self._production_canvas.figure
+        if name == "Flux Map" and self._map_canvas is not None:
+            return self._map_canvas.figure
+        return None
+
+    def export_table_csv(self) -> None:
+        """Write the current tab's result table to a CSV file."""
+
+        import csv
+
+        table = self._active_table()
+        if table is None or table.rowCount() == 0:
+            self.status_label.setText(
+                "No result table to export on this tab — run an analysis first."
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export table to CSV", "", "CSV files (*.csv);;All files (*)"
+        )
+        if not path:
+            return
+        headers = [
+            table.horizontalHeaderItem(c).text() if table.horizontalHeaderItem(c) else f"col{c}"
+            for c in range(table.columnCount())
+        ]
+        try:
+            with open(path, "w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(headers)
+                for row in range(table.rowCount()):
+                    writer.writerow(
+                        [
+                            table.item(row, col).text() if table.item(row, col) else ""
+                            for col in range(table.columnCount())
+                        ]
+                    )
+        except OSError as exc:
+            self.status_label.setText(f"Could not write CSV: {exc}")
+            return
+        self.status_label.setText(f"Exported {table.rowCount()} rows to {path}.")
+
+    def save_active_figure(self) -> None:
+        """Save the current tab's figure (Production or Flux Map) at 300 DPI."""
+
+        fig = self._active_figure()
+        if fig is None:
+            self.status_label.setText(
+                "No figure to save — open the Production or Flux Map tab and run an analysis."
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save figure", "", "PNG (*.png);;PDF (*.pdf);;SVG (*.svg)"
+        )
+        if not path:
+            return
+        try:
+            fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
+        except Exception as exc:
+            self.status_label.setText(f"Could not save figure: {html.escape(str(exc))}")
+            return
+        self.status_label.setText(f"Saved figure to {path}.")
+
     def _build_header(self) -> QWidget:
         header = QWidget()
         header.setObjectName("header")
@@ -363,10 +588,13 @@ class CmmMainWindow(QMainWindow):
         self.tabs.addTab(self._build_simulation_tab(), "Simulation")
         self.tabs.addTab(self._build_comparison_tab(), "Comparison")
         self.tabs.addTab(self._build_production_tab(), "Production")
+        self.tabs.addTab(self._build_strain_design_tab(), "Strain Design")
         self.tabs.addTab(self._build_omics_tab(), "Omics")
+        self.tabs.addTab(self._build_conditions_tab(), "Multi-condition")
         if self._map_path:
             self.tabs.addTab(self._build_fluxmap_tab(), "Flux Map")
         self.tabs.addTab(self._build_revert_tab(), "Revert Metabolism")
+        self.tabs.addTab(self._build_transformation_tab(), "Transform (A→B)")
         return self.tabs
 
     def _build_omics_tab(self) -> QWidget:
@@ -420,6 +648,7 @@ class CmmMainWindow(QMainWindow):
         holder.setLayout(self.map_canvas_holder)
         layout.addWidget(holder, 1)
         self._map_canvas = None
+        self._map_toolbar = None
         return tab
 
     def _build_production_tab(self) -> QWidget:
@@ -471,7 +700,118 @@ class CmmMainWindow(QMainWindow):
         holder.setLayout(self.production_canvas_holder)
         layout.addWidget(holder, 1)
         self._production_canvas = None
+        self._production_toolbar = None
         return tab
+
+    def _build_strain_design_tab(self) -> QWidget:
+        """Growth-coupled strain design: OptKnock / RobustKnock over the library service."""
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        controls = QGroupBox("Growth-coupled strain design (OptKnock / RobustKnock)")
+        form = QHBoxLayout(controls)
+        form.addWidget(QLabel("Target product:"))
+        self.sd_product_combo = QComboBox()
+        self.sd_product_combo.setMinimumWidth(150)
+        self.sd_product_combo.setToolTip("Exchange reaction of the target product to couple to growth")
+        form.addWidget(self.sd_product_combo, 1)
+        form.addWidget(QLabel("Method:"))
+        self.sd_method_combo = QComboBox()
+        self.sd_method_combo.addItems(["optknock", "robustknock"])
+        self.sd_method_combo.setToolTip(
+            "OptKnock maximizes product at max growth (optimistic); RobustKnock keeps only "
+            "designs that guarantee product at max growth (worst case)."
+        )
+        form.addWidget(self.sd_method_combo)
+        form.addWidget(QLabel("max KOs:"))
+        self.sd_max_ko_spin = QSpinBox()
+        self.sd_max_ko_spin.setRange(1, 6)
+        self.sd_max_ko_spin.setValue(3)
+        self.sd_max_ko_spin.setToolTip("Maximum number of reaction knockouts per design")
+        form.addWidget(self.sd_max_ko_spin)
+        form.addWidget(QLabel("solutions:"))
+        self.sd_max_sol_spin = QSpinBox()
+        self.sd_max_sol_spin.setRange(1, 20)
+        self.sd_max_sol_spin.setValue(5)
+        self.sd_max_sol_spin.setToolTip("Maximum number of designs to enumerate")
+        form.addWidget(self.sd_max_sol_spin)
+        self.sd_run_btn = QPushButton("Run design")
+        self.sd_run_btn.clicked.connect(self.run_strain_design)
+        form.addWidget(self.sd_run_btn)
+        form.addStretch(1)
+        layout.addWidget(controls)
+
+        self.sd_summary = QLabel(
+            "OptKnock/RobustKnock search knockout sets that couple product to growth. "
+            "Needs a MILP solver (Gurobi/CPLEX)."
+        )
+        self.sd_summary.setWordWrap(True)
+        layout.addWidget(self.sd_summary)
+
+        self.sd_table = QTableWidget(0, 5)
+        self.sd_table.setHorizontalHeaderLabels(
+            ["Rank", "Knockouts", "Growth", "Max product", "Guaranteed product"]
+        )
+        _sd_header = self.sd_table.horizontalHeader()
+        _sd_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        for _col in (0, 2, 3, 4):
+            _sd_header.setSectionResizeMode(_col, QHeaderView.ResizeToContents)
+        self.sd_table.verticalHeader().setVisible(False)
+        self.sd_table.setAlternatingRowColors(True)
+        layout.addWidget(self.sd_table, 1)
+        return tab
+
+    def run_strain_design(self) -> None:
+        product = self.sd_product_combo.currentText()
+        if not product:
+            self.sd_summary.setText("Select a target product exchange reaction first.")
+            return
+        method = self.sd_method_combo.currentText()
+        max_ko = self.sd_max_ko_spin.value()
+        max_sol = self.sd_max_sol_spin.value()
+        self.sd_summary.setText(f"Searching {method} designs for {html.escape(product)}…")
+        self.status_label.setText(f"Running {method} (this can take a while)…")
+        self.sd_run_btn.setEnabled(False)
+        try:
+            search = optknock if method == "optknock" else robustknock
+            result = self._run_in_background(
+                lambda: search(self.model, product, max_knockouts=max_ko, max_solutions=max_sol),
+                label=f"Running {method}…",
+            )
+        except Exception as exc:  # surface solver-capability/model errors instead of freezing
+            self.sd_table.setRowCount(0)
+            self.sd_summary.setText(f"Strain design failed: {html.escape(str(exc))}")
+            self.status_label.setText(f"Strain design failed ({method}).")
+            return
+        finally:
+            self.sd_run_btn.setEnabled(True)
+
+        designs = result.designs
+        self.sd_table.setRowCount(len(designs))
+        for i, design in enumerate(designs):
+            self.sd_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.sd_table.setItem(i, 1, QTableWidgetItem(", ".join(design.knockouts) or "—"))
+            self.sd_table.setItem(i, 2, QTableWidgetItem(f"{design.growth:.4g}"))
+            self.sd_table.setItem(i, 3, QTableWidgetItem(f"{design.max_product:.4g}"))
+            self.sd_table.setItem(i, 4, QTableWidgetItem(f"{design.guaranteed_product:.4g}"))
+            if design.growth_coupled:
+                self.sd_table.item(i, 4).setBackground(QColor("#dce9d6"))
+        if designs:
+            best = result.best()
+            self.sd_summary.setText(
+                f"<b>{method}</b> for {html.escape(product)}: {len(designs)} design(s). "
+                f"Best knocks out <b>{html.escape(', '.join(best.knockouts) or '—')}</b> "
+                f"(growth {best.growth:.3g} h⁻¹, guaranteed product {best.guaranteed_product:.3g}, "
+                f"max product {best.max_product:.3g})."
+            )
+        else:
+            self.sd_summary.setText(
+                f"<b>{method}</b> found no growth-coupled design for "
+                f"{html.escape(product)} — try a different product, more knockouts, or check "
+                "the product can carry flux in the current medium."
+            )
+        self.status_label.setText(f"Strain design complete ({method}).")
 
     def _build_comparison_tab(self) -> QWidget:
         tab = QWidget()
@@ -485,7 +825,10 @@ class CmmMainWindow(QMainWindow):
         row.addWidget(QLabel("Reference template:"))
         self.template_combo = QComboBox()
         self.template_combo.addItems(["fba", "pfba", "lad", "eflux2"])
-        self.template_combo.setToolTip("Wild-type flux template the perturbed state is compared to")
+        self.template_combo.setToolTip(
+            "Wild-type flux template the perturbed state is compared to. "
+            "LAD/E-Flux2 use expression loaded on the Omics tab (synthetic demo data if none)."
+        )
         row.addWidget(self.template_combo)
         row.addWidget(QLabel("Knock out:"))
         self.ko_combo = QComboBox()
@@ -518,29 +861,48 @@ class CmmMainWindow(QMainWindow):
         method_label = self.comparison_method_combo.currentText()
         template = self.template_combo.currentText()
         ko = self.ko_combo.currentText()
+        synthetic_expression = False
         try:
             expression = None
             if template in ("lad", "eflux2"):
-                import numpy as np
+                # Prefer real expression loaded on the Omics tab; only fall back to synthetic
+                # data if none is loaded — and flag it so the result is never mistaken for a
+                # data-driven template.
+                expression = self._omics_expression
+                if expression is None:
+                    import numpy as np
 
-                rng = np.random.default_rng(0)
-                expression = {g.id: float(rng.uniform(1, 100)) for g in self.model.genes}
-            reference = reference_flux(self.model, template, gene_expression=expression)
-            with self.model:
-                self.model.reactions.get_by_id(ko).bounds = (0.0, 0.0)
-                if method_label == "ROOM":
-                    result = room(self.model, reference)
-                else:
-                    result = moma(self.model, reference, linear=method_label == "MOMA (L1)")
+                    rng = np.random.default_rng(0)
+                    expression = {g.id: float(rng.uniform(1, 100)) for g in self.model.genes}
+                    synthetic_expression = True
+
+            def _compute():
+                reference = reference_flux(self.model, template, gene_expression=expression)
+                with self.model:
+                    self.model.reactions.get_by_id(ko).bounds = (0.0, 0.0)
+                    if method_label == "ROOM":
+                        result = room(self.model, reference)
+                    else:
+                        result = moma(self.model, reference, linear=method_label == "MOMA (L1)")
+                return reference, result
+
+            reference, result = self._run_in_background(
+                _compute, label=f"Running {method_label}…"
+            )
         except Exception as exc:
             self.comparison_summary.setText(f"Comparison failed: {html.escape(str(exc))}")
             return
+        synthetic_note = (
+            " <span style='color:#b45309'>⚠ synthetic demo expression — load a CSV on the "
+            "Omics tab for a data-driven template.</span>"
+            if synthetic_expression else ""
+        )
         if result.status != "optimal":
             self.comparison_table.setRowCount(0)
             self.comparison_summary.setText(
                 f"<b>{method_label}</b> vs <b>{template}</b>: knocking out "
                 f"{html.escape(ko)} makes the model <b>infeasible</b> "
-                "(e.g. it cannot meet maintenance demand)."
+                "(e.g. it cannot meet maintenance demand)." + synthetic_note
             )
             self.status_label.setText("Comparison: infeasible perturbation.")
             return
@@ -554,7 +916,7 @@ class CmmMainWindow(QMainWindow):
         self.comparison_summary.setText(
             f"<b>{method_label}</b> vs <b>{template}</b> template after knocking out "
             f"{html.escape(ko)}: status {result.status}, distance {result.distance:.4g}, "
-            f"{len(changed)} reactions changed."
+            f"{len(changed)} reactions changed." + synthetic_note
         )
         self.status_label.setText(f"Comparison complete ({method_label}, {template}).")
 
@@ -699,6 +1061,8 @@ class CmmMainWindow(QMainWindow):
         self.product_combo.clear()
         exchanges = sorted(r.id for r in model.exchanges)
         self.product_combo.addItems(exchanges)
+        self.sd_product_combo.clear()
+        self.sd_product_combo.addItems(exchanges)
         self.substrate_combo.clear()
         self.substrate_combo.addItems(["auto", *exchanges])
         self.ko_combo.clear()
@@ -706,11 +1070,14 @@ class CmmMainWindow(QMainWindow):
         self._loading = False
         if self._default_product and self._default_product in exchanges:
             self.product_combo.setCurrentText(self._default_product)
+            self.sd_product_combo.setCurrentText(self._default_product)
 
-        # Production analysis needs exchange reactions; disable it otherwise.
+        # Production and strain design need exchange reactions; disable them otherwise.
         has_exchanges = bool(exchanges)
         for btn in getattr(self, "_production_buttons", []):
             btn.setEnabled(has_exchanges)
+        if hasattr(self, "sd_run_btn"):
+            self.sd_run_btn.setEnabled(has_exchanges)
         if not has_exchanges:
             self.yield_label.setText("No exchange reactions in this model — production design unavailable.")
 
@@ -838,7 +1205,10 @@ class CmmMainWindow(QMainWindow):
             self.run_fba()
         fraction = self.fva_fraction_spin.value()
         try:
-            ranges = fva(self.model, fraction_of_optimum=fraction)
+            ranges = self._run_in_background(
+                lambda: fva(self.model, fraction_of_optimum=fraction),
+                label="Running FVA…",
+            )
         except Exception as exc:
             self.status_label.setText(f"FVA failed: {exc}")
             return
@@ -913,11 +1283,16 @@ class CmmMainWindow(QMainWindow):
             old = self._map_canvas.figure
             self.map_canvas_holder.removeWidget(self._map_canvas)
             self._map_canvas.setParent(None)
+            if self._map_toolbar is not None:
+                self.map_canvas_holder.removeWidget(self._map_toolbar)
+                self._map_toolbar.setParent(None)
             old.clf()
         fig.set_dpi(110)
         self._map_canvas = FigureCanvas(fig)
-        self._map_canvas.draw()
+        self._map_toolbar = NavigationToolbar(self._map_canvas, self)
+        self.map_canvas_holder.addWidget(self._map_toolbar)
         self.map_canvas_holder.addWidget(self._map_canvas)
+        self._map_canvas.draw()
         self.status_label.setText("Flux map rendered (Escher layout).")
 
     def _on_product_changed(self, product: str) -> None:
@@ -932,13 +1307,19 @@ class CmmMainWindow(QMainWindow):
             old_fig = self._production_canvas.figure
             self.production_canvas_holder.removeWidget(self._production_canvas)
             self._production_canvas.setParent(None)
+            if self._production_toolbar is not None:
+                self.production_canvas_holder.removeWidget(self._production_toolbar)
+                self._production_toolbar.setParent(None)
             old_fig.clf()  # release the previous figure so it is not leaked
         # Figures are authored at 300 DPI for file export; render on screen at a lower DPI
         # so the canvas fits the panel instead of clipping.
         fig.set_dpi(100)
         self._production_canvas = FigureCanvas(fig)
-        self._production_canvas.draw()
+        # A matplotlib toolbar gives interactive zoom/pan and a "Save the figure" button.
+        self._production_toolbar = NavigationToolbar(self._production_canvas, self)
+        self.production_canvas_holder.addWidget(self._production_toolbar)
         self.production_canvas_holder.addWidget(self._production_canvas)
+        self._production_canvas.draw()
 
     def _run_production(self, action) -> None:
         """Run a production analysis, surfacing any error instead of crashing the UI."""
@@ -978,9 +1359,12 @@ class CmmMainWindow(QMainWindow):
             product = self._current_product()
             aerobic = self._is_aerobic()
             condition = "aerobic" if aerobic else "anaerobic"
-            envelope = production_envelope(self.model, product,
-                                           substrate=self._current_substrate(),
-                                           aerobic=aerobic, points=20)
+            substrate = self._current_substrate()
+            envelope = self._run_in_background(
+                lambda: production_envelope(self.model, product, substrate=substrate,
+                                            aerobic=aerobic, points=20),
+                label="Computing production envelope…",
+            )
             fig = production_envelope_figure(
                 envelope, title=f"Production envelope — {product} ({condition})"
             )
@@ -992,7 +1376,11 @@ class CmmMainWindow(QMainWindow):
     def run_fseof_plot(self) -> None:
         def _do():
             product = self._current_product()
-            result = fseof(self.model, product, n_steps=10, aerobic=self._is_aerobic())
+            aerobic = self._is_aerobic()
+            result = self._run_in_background(
+                lambda: fseof(self.model, product, n_steps=10, aerobic=aerobic),
+                label="Running FSEOF…",
+            )
             if result.metadata.get("max_product", 0.0) <= 1e-9:
                 self.yield_label.setText(
                     f"FSEOF not meaningful: theoretical yield of {html.escape(product)} is zero "
@@ -1020,7 +1408,11 @@ class CmmMainWindow(QMainWindow):
     def run_fvseof_plot(self) -> None:
         def _do():
             product = self._current_product()
-            result = fvseof(self.model, product, n_steps=8, aerobic=self._is_aerobic())
+            aerobic = self._is_aerobic()
+            result = self._run_in_background(
+                lambda: fvseof(self.model, product, n_steps=8, aerobic=aerobic),
+                label="Running FVSEOF…",
+            )
             if result.metadata.get("max_product", 0.0) <= 1e-9:
                 self.yield_label.setText(
                     f"FVSEOF not meaningful: theoretical yield of {html.escape(product)} is zero."
@@ -1094,6 +1486,9 @@ class CmmMainWindow(QMainWindow):
         except Exception as exc:
             self.omics_summary.setText(f"Could not read expression CSV: {html.escape(str(exc))}")
             return
+        # Remember real (CSV-loaded) expression so the Comparison tab's LAD/E-Flux2 template
+        # uses it instead of synthetic data. Demo expression is intentionally not stored.
+        self._omics_expression = dict(expression)
         self.run_omics(expression)
 
     def _update_revert_run_state(self) -> None:
@@ -1140,12 +1535,12 @@ class CmmMainWindow(QMainWindow):
         method = self.method_combo.currentText()
         perturbation = self.perturbation_combo.currentText()
         alpha = self.alpha_spin.value()
-        try:
+        def _compute():
             reference = reference_state_pfba(self.model, name="source")
             direction = differential_expression(
                 self.model, source_expression, target_expression, reference=reference
             )
-            ranking = revert_targets(
+            return revert_targets(
                 self.model,
                 None,
                 reference,
@@ -1154,6 +1549,9 @@ class CmmMainWindow(QMainWindow):
                 alpha=alpha,
                 perturbation=perturbation,
             )
+
+        try:
+            ranking = self._run_in_background(_compute, label=f"Running revert ({method})…")
         except Exception as exc:  # surface solver-capability/model errors instead of freezing
             self.revert_summary.setText(f"Revert prediction failed: {exc}")
             self.status_label.setText(f"Revert prediction failed ({method}).")
@@ -1175,3 +1573,276 @@ class CmmMainWindow(QMainWindow):
                 f"Knocking it out moves the source state most toward the target state."
             )
         self.status_label.setText(f"Revert prediction complete ({method}).")
+
+    # -- transformation finder (A -> B) -------------------------------------
+
+    def _build_transformation_tab(self) -> QWidget:
+        """Rank knockouts that move a source flux state toward a target flux state (A→B)."""
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        controls = QGroupBox("Transformation targets (move source → target flux state)")
+        form = QFormLayout(controls)
+        self.transform_method_combo = QComboBox()
+        self.transform_method_combo.addItems(["moma", "mta"])
+        self.transform_method_combo.setToolTip(
+            "moma: rank by how much the minimal-adjustment state moves toward the target. "
+            "mta: robust MTA on the source→target direction."
+        )
+        self.transform_omics_combo = QComboBox()
+        self.transform_omics_combo.addItems(["eflux2", "lad"])
+        self.transform_omics_combo.setToolTip("How each expression vector is turned into a flux state")
+        self.transform_perturbation_combo = QComboBox()
+        self.transform_perturbation_combo.addItems(["gene", "reaction"])
+        self.transform_alpha_spin = QDoubleSpinBox()
+        self.transform_alpha_spin.setRange(0.0, 1.0)
+        self.transform_alpha_spin.setSingleStep(0.1)
+        self.transform_alpha_spin.setValue(0.9)
+        form.addRow("Method:", self.transform_method_combo)
+        form.addRow("Predict states with:", self.transform_omics_combo)
+        form.addRow("Knockout level:", self.transform_perturbation_combo)
+        form.addRow("Transformation weight α (mta):", self.transform_alpha_spin)
+
+        source_row = QHBoxLayout()
+        source_btn = QPushButton("Load source (A) CSV/TSV…")
+        source_btn.clicked.connect(lambda: self.load_transform_expression("source"))
+        self.transform_source_label = QLabel("not loaded")
+        source_row.addWidget(source_btn)
+        source_row.addWidget(self.transform_source_label, 1)
+        form.addRow("Source expression:", source_row)
+
+        target_row = QHBoxLayout()
+        target_btn = QPushButton("Load target (B) CSV/TSV…")
+        target_btn.clicked.connect(lambda: self.load_transform_expression("target"))
+        self.transform_target_label = QLabel("not loaded")
+        target_row.addWidget(target_btn)
+        target_row.addWidget(self.transform_target_label, 1)
+        form.addRow("Target expression:", target_row)
+
+        self.transform_run_btn = QPushButton("Run transformation")
+        self.transform_run_btn.setEnabled(False)
+        self.transform_run_btn.clicked.connect(self.run_transformation)
+        self.transform_run_btn.setToolTip("Load both source and target expression files to enable.")
+        form.addRow("", self.transform_run_btn)
+        layout.addWidget(controls)
+
+        self.transform_summary = QLabel(
+            "Load source (A) and target (B) expression files; each is predicted to a flux "
+            "state, then knockouts are ranked by how well they move A toward B."
+        )
+        self.transform_summary.setWordWrap(True)
+        layout.addWidget(self.transform_summary)
+
+        self.transform_table = QTableWidget(0, 3)
+        self.transform_table.setHorizontalHeaderLabels(["Rank", "Target", "Score"])
+        self.transform_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.transform_table.verticalHeader().setVisible(False)
+        self.transform_table.setAlternatingRowColors(True)
+        layout.addWidget(self.transform_table, 1)
+        return tab
+
+    def _update_transform_run_state(self) -> None:
+        ready = (
+            self._transform_source_expression is not None
+            and self._transform_target_expression is not None
+        )
+        self.transform_run_btn.setEnabled(ready)
+
+    def load_transform_expression(self, role: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Load {role} expression", "", "CSV/TSV files (*.csv *.tsv);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            expression = _read_expression_vector(path)
+        except Exception as exc:
+            self.transform_summary.setText(
+                f"Could not read {html.escape(role)} expression: {html.escape(str(exc))}"
+            )
+            return
+        if role == "source":
+            self._transform_source_expression = expression
+            self.transform_source_label.setText(f"{len(expression)} genes")
+        else:
+            self._transform_target_expression = expression
+            self.transform_target_label.setText(f"{len(expression)} genes")
+        self._update_transform_run_state()
+        self.status_label.setText(f"Loaded {role} (A→B) expression ({len(expression)} genes).")
+
+    def run_transformation(self) -> None:
+        if (
+            self._transform_source_expression is None
+            or self._transform_target_expression is None
+        ):
+            self.transform_summary.setText("Load both source (A) and target (B) expression files first.")
+            return
+        method = self.transform_method_combo.currentText()
+        omics_method = self.transform_omics_combo.currentText()
+        perturbation = self.transform_perturbation_combo.currentText()
+        alpha = self.transform_alpha_spin.value()
+        source_expr = self._transform_source_expression
+        target_expr = self._transform_target_expression
+
+        def _compute():
+            source_state = integrate_expression(
+                self.model, source_expr, method=omics_method
+            ).to_flux_state("source")
+            target_state = integrate_expression(
+                self.model, target_expr, method=omics_method
+            ).to_flux_state("target")
+            return transformation_targets(
+                self.model, source_state, target_state,
+                method=method, perturbation=perturbation, alpha=alpha,
+            )
+
+        try:
+            ranking = self._run_in_background(
+                _compute, label=f"Running transformation ({method})…"
+            )
+        except Exception as exc:  # surface solver-capability/model errors instead of freezing
+            self.transform_summary.setText(f"Transformation failed: {html.escape(str(exc))}")
+            self.status_label.setText(f"Transformation failed ({method}).")
+            return
+        rows = ranking.to_records()
+        self.transform_table.setRowCount(len(rows))
+        for i, record in enumerate(rows):
+            self.transform_table.setItem(i, 0, QTableWidgetItem(str(record["rank"])))
+            self.transform_table.setItem(i, 1, QTableWidgetItem(record["target_id"]))
+            self.transform_table.setItem(i, 2, QTableWidgetItem(f"{record['score']:.4g}"))
+            if i == 0:
+                for col in range(3):
+                    self.transform_table.item(i, col).setBackground(QColor("#dce9d6"))
+        best = ranking.best()
+        if best is not None:
+            self.transform_summary.setText(
+                f"<b>Top A→B target: {html.escape(best.target_id)}</b> "
+                f"(score {best.score:.4g}, method {method}, {omics_method} states, "
+                f"{perturbation} knockout). Higher score = moves the source state more toward "
+                "the target."
+            )
+        else:
+            self.transform_summary.setText("No candidate knockouts scored.")
+        self.status_label.setText(f"Transformation complete ({method}).")
+
+    # -- multi-condition comparison -----------------------------------------
+
+    def _build_conditions_tab(self) -> QWidget:
+        """Predict per-condition fluxes from a gene×condition table and compare two as log2FC."""
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        controls = QGroupBox("Multi-condition flux comparison (expression table → per-condition flux)")
+        row = QHBoxLayout(controls)
+        row.addWidget(QLabel("Method:"))
+        self.cond_method_combo = QComboBox()
+        self.cond_method_combo.addItems(["eflux2", "lad"])
+        row.addWidget(self.cond_method_combo)
+        load_btn = QPushButton("Load expression table CSV…")
+        load_btn.clicked.connect(self.load_condition_table)
+        row.addWidget(load_btn)
+        row.addWidget(QLabel("A:"))
+        self.cond_source_combo = QComboBox()
+        self.cond_source_combo.setMinimumWidth(120)
+        row.addWidget(self.cond_source_combo)
+        row.addWidget(QLabel("B:"))
+        self.cond_target_combo = QComboBox()
+        self.cond_target_combo.setMinimumWidth(120)
+        row.addWidget(self.cond_target_combo)
+        self.cond_run_btn = QPushButton("Compare")
+        self.cond_run_btn.setEnabled(False)
+        self.cond_run_btn.clicked.connect(self.run_condition_comparison)
+        row.addWidget(self.cond_run_btn)
+        row.addStretch(1)
+        layout.addWidget(controls)
+
+        self.cond_summary = QLabel(
+            "Load a gene × condition table (first column = gene id, remaining columns = "
+            "conditions), pick two conditions A and B, and compare their predicted fluxes."
+        )
+        self.cond_summary.setWordWrap(True)
+        layout.addWidget(self.cond_summary)
+
+        self.cond_table = QTableWidget(0, 2)
+        self.cond_table.setHorizontalHeaderLabels(["Reaction", "log2( |flux B| / |flux A| )"])
+        self.cond_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.cond_table.verticalHeader().setVisible(False)
+        self.cond_table.setAlternatingRowColors(True)
+        layout.addWidget(self.cond_table, 1)
+        return tab
+
+    def load_condition_table(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load expression table", "", "CSV/TSV files (*.csv *.tsv);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            table = read_expression_table(path)
+        except Exception as exc:
+            self.cond_summary.setText(f"Could not read expression table: {html.escape(str(exc))}")
+            return
+        if table.shape[1] < 2:
+            self.cond_summary.setText(
+                "Expression table needs at least two condition columns to compare."
+            )
+            return
+        self._condition_table = table
+        conditions = [str(c) for c in table.columns]
+        self._loading = True
+        self.cond_source_combo.clear()
+        self.cond_source_combo.addItems(conditions)
+        self.cond_target_combo.clear()
+        self.cond_target_combo.addItems(conditions)
+        self.cond_target_combo.setCurrentIndex(min(1, len(conditions) - 1))
+        self._loading = False
+        self.cond_run_btn.setEnabled(True)
+        self.cond_summary.setText(
+            f"Loaded {table.shape[0]} genes × {table.shape[1]} conditions "
+            f"({', '.join(conditions)}). Pick A and B, then Compare."
+        )
+        self.status_label.setText(f"Loaded expression table ({table.shape[1]} conditions).")
+
+    def run_condition_comparison(self) -> None:
+        if self._condition_table is None:
+            self.cond_summary.setText("Load an expression table first.")
+            return
+        source = self.cond_source_combo.currentText()
+        target = self.cond_target_combo.currentText()
+        if source == target:
+            self.cond_summary.setText("Pick two different conditions for A and B.")
+            return
+        method = self.cond_method_combo.currentText()
+        table = self._condition_table
+
+        def _compute():
+            predictions = predict_condition_fluxes(
+                self.model, table, method=method, conditions=[source, target]
+            )
+            return flux_log_change(predictions.fluxes(source), predictions.fluxes(target))
+
+        try:
+            log_change = self._run_in_background(
+                _compute, label=f"Comparing conditions ({method})…"
+            )
+        except Exception as exc:
+            self.cond_summary.setText(f"Condition comparison failed: {html.escape(str(exc))}")
+            self.status_label.setText("Condition comparison failed.")
+            return
+        ranked = sorted(
+            ((rid, v) for rid, v in log_change.items() if v == v),  # drop NaN
+            key=lambda kv: -abs(kv[1]),
+        )
+        changed = [(rid, v) for rid, v in ranked if abs(v) > 1e-6]
+        self.cond_table.setRowCount(len(changed))
+        for i, (rid, value) in enumerate(changed):
+            self.cond_table.setItem(i, 0, QTableWidgetItem(rid))
+            text = "+inf" if value == float("inf") else "-inf" if value == float("-inf") else f"{value:.4g}"
+            self.cond_table.setItem(i, 1, QTableWidgetItem(text))
+        self.cond_summary.setText(
+            f"<b>{method}</b>: {source} → {target}. {len(changed)} reactions changed flux "
+            f"magnitude (log2 fold-change; positive = higher in {html.escape(target)})."
+        )
+        self.status_label.setText(f"Condition comparison complete ({method}).")
