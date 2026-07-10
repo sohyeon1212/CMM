@@ -18,6 +18,7 @@ from qtpy.QtCore import QEventLoop, QObject, Qt, QThread, QTimer, Signal
 from qtpy.QtGui import QColor, QFont
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -27,6 +28,7 @@ from qtpy.QtWidgets import (
     QHeaderView,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -70,12 +72,11 @@ from cmm.features.revert import revert_targets
 from cmm.features.strain_design import optknock, robustknock
 from cmm.features.transformation import transformation_targets
 from cmm.omics.conditions import (
-    flux_log_change,
     predict_condition_fluxes,
     read_expression_table,
 )
 from cmm.omics.differential import differential_expression
-from cmm.omics.expression import gene_to_reaction_weights, integrate_expression
+from cmm.omics.expression import integrate_expression
 from cmm.visualization import (
     escher_flux_map,
     fseof_figure,
@@ -271,8 +272,13 @@ class CmmMainWindow(QMainWindow):
         # A→B transformation finder: two expression vectors → two predicted flux states.
         self._transform_source_expression: dict[str, float] | None = None
         self._transform_target_expression: dict[str, float] | None = None
-        # Multi-condition comparison: a gene × condition expression table.
-        self._condition_table = None
+        # Omics integration source: a gene × condition expression table (1+ conditions).
+        # Loading only stores it; Compute predicts a flux column per selected condition.
+        self._omics_table_df = None
+        # Last computed per-condition fluxes (condition -> {reaction: flux}), kept so the
+        # active-only / show-all toggle can re-render without recomputing.
+        self._omics_fluxes_by_condition: dict[str, dict[str, float]] | None = None
+        self._omics_conditions_order: list[str] = []
         # Guards re-entrant background runs (see _run_in_background).
         self._busy = False
         self.setWindowTitle("CMM — Cellular Metabolic Modeling Platform")
@@ -342,9 +348,6 @@ class CmmMainWindow(QMainWindow):
         analysis.addSeparator()
         analysis.addAction(
             "Omics Integration (E-Flux2 / LAD)…", lambda: self._goto_tab("Omics")
-        )
-        analysis.addAction(
-            "Multi-condition Comparison…", lambda: self._goto_tab("Multi-condition")
         )
         analysis.addAction(
             "Revert Metabolism…", lambda: self._goto_tab("Revert Metabolism")
@@ -495,16 +498,18 @@ class CmmMainWindow(QMainWindow):
         self._revert_target_expression = None
         self._transform_source_expression = None
         self._transform_target_expression = None
-        self._condition_table = None
+        self._omics_table_df = None
+        self._omics_fluxes_by_condition = None
+        self._omics_conditions_order = []
         self.revert_source_label.setText("not loaded")
         self.revert_target_label.setText("not loaded")
         self.transform_source_label.setText("not loaded")
         self.transform_target_label.setText("not loaded")
-        self.cond_source_combo.clear()
-        self.cond_target_combo.clear()
-        self.cond_run_btn.setEnabled(False)
+        self.omics_file_label.setText("no file loaded")
+        self.omics_compute_btn.setEnabled(False)
+        self.omics_cond_list.clear()
+        self.omics_table.setRowCount(0)
         self.transform_table.setRowCount(0)
-        self.cond_table.setRowCount(0)
         self._update_revert_run_state()
         self._update_transform_run_state()
         self.load_model(model)
@@ -519,7 +524,6 @@ class CmmMainWindow(QMainWindow):
             "Comparison": self.comparison_table,
             "Strain Design": self.sd_table,
             "Omics": self.omics_table,
-            "Multi-condition": self.cond_table,
             "Revert Metabolism": self.revert_table,
             "Transform (A→B)": self.transform_table,
         }.get(name)
@@ -655,7 +659,6 @@ class CmmMainWindow(QMainWindow):
         self.tabs.addTab(self._build_production_tab(), "Production")
         self.tabs.addTab(self._build_strain_design_tab(), "Strain Design")
         self.tabs.addTab(self._build_omics_tab(), "Omics")
-        self.tabs.addTab(self._build_conditions_tab(), "Multi-condition")
         if self._map_path:
             self.tabs.addTab(self._build_fluxmap_tab(), "Flux Map")
         self.tabs.addTab(self._build_revert_tab(), "Revert Metabolism")
@@ -666,8 +669,11 @@ class CmmMainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        controls = QGroupBox("Omics integration (expression → flux)")
-        row = QHBoxLayout(controls)
+        controls = QGroupBox("Omics integration (expression → per-condition flux)")
+        cbox = QVBoxLayout(controls)
+
+        # Row 1: method + load (loading only stores the file; Compute runs the integration).
+        row = QHBoxLayout()
         row.addWidget(QLabel("Method:"))
         self.omics_method_combo = QComboBox()
         self.omics_method_combo.addItems(["eflux2", "lad"])
@@ -677,21 +683,61 @@ class CmmMainWindow(QMainWindow):
         row.addWidget(self.omics_method_combo)
         load_btn = QPushButton("Load expression CSV…")
         load_btn.clicked.connect(self.load_expression_csv)
-        demo_btn = QPushButton("Run on demo expression")
-        demo_btn.clicked.connect(self.run_omics_demo)
         row.addWidget(load_btn)
+        self.omics_file_label = QLabel("no file loaded")
+        self.omics_file_label.setStyleSheet("color: #5c6b7e; font-style: italic;")
+        row.addWidget(self.omics_file_label)
+        demo_btn = QPushButton("Use demo expression")
+        demo_btn.clicked.connect(self.load_omics_demo)
         row.addWidget(demo_btn)
+        # Compute is separate so the method can change and re-run on the same loaded data.
+        self.omics_compute_btn = QPushButton("Compute")
+        self.omics_compute_btn.setEnabled(False)
+        self.omics_compute_btn.setToolTip(
+            "Load an expression source first, then compute the checked conditions."
+        )
+        self.omics_compute_btn.clicked.connect(self.compute_omics)
+        row.addWidget(self.omics_compute_btn)
         row.addStretch(1)
+        cbox.addLayout(row)
+
+        # Row 2: the conditions detected in the file, each check-selectable.
+        cond_row = QHBoxLayout()
+        cond_row.addWidget(QLabel("Conditions:"))
+        self.omics_cond_list = QListWidget()
+        self.omics_cond_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.omics_cond_list.setFlow(QListWidget.LeftToRight)
+        self.omics_cond_list.setWrapping(True)
+        self.omics_cond_list.setMaximumHeight(64)
+        self.omics_cond_list.setToolTip(
+            "Columns detected in the file. Check the conditions to predict a flux column for."
+        )
+        cond_row.addWidget(self.omics_cond_list, 1)
+        cbox.addLayout(cond_row)
         layout.addWidget(controls)
 
         self.omics_summary = QLabel(
-            "Load a gene-expression CSV (columns: gene, expression) or run on demo data."
+            "Load a gene × condition CSV (first column = gene id, remaining columns = "
+            "conditions) or use demo data, then check conditions and click Compute."
         )
         self.omics_summary.setWordWrap(True)
         layout.addWidget(self.omics_summary)
 
-        self.omics_table = QTableWidget(0, 2)
-        self.omics_table.setHorizontalHeaderLabels(["Reaction", "Predicted flux"])
+        # Result-view controls sit with the table so the toggle reads as adjusting the results.
+        table_controls = QHBoxLayout()
+        table_controls.addWidget(QLabel("Predicted fluxes:"))
+        table_controls.addStretch(1)
+        self.omics_show_all_check = QCheckBox("Show all reactions")
+        self.omics_show_all_check.setToolTip(
+            "Off: only reactions with non-zero flux in some condition. On: every reaction."
+        )
+        self.omics_show_all_check.toggled.connect(self._render_omics_table)
+        table_controls.addWidget(self.omics_show_all_check)
+        layout.addLayout(table_controls)
+
+        # Columns are set per run: Reaction + one predicted-flux column per computed condition.
+        self.omics_table = QTableWidget(0, 1)
+        self.omics_table.setHorizontalHeaderLabels(["Reaction"])
         self.omics_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.omics_table.verticalHeader().setVisible(False)
         self.omics_table.setAlternatingRowColors(True)
@@ -1734,80 +1780,186 @@ class CmmMainWindow(QMainWindow):
 
     # -- omics integration --------------------------------------------------
 
-    def run_omics(self, gene_expression: Mapping[str, float]) -> None:
-        """Predict a flux distribution from gene expression (E-Flux2 or LAD)."""
+    def _set_omics_source(self, table, label: str) -> None:
+        """Store a loaded gene × condition table and list its conditions (does not compute)."""
 
-        method = self.omics_method_combo.currentText()
-        try:
-            weights = gene_to_reaction_weights(self.model, dict(gene_expression))
-            result = integrate_expression(
-                self.model, dict(gene_expression), method=method
-            )
-        except Exception as exc:
-            self.omics_summary.setText(
-                f"Omics integration failed: {html.escape(str(exc))}"
-            )
-            return
-        if result.status != "optimal":
-            self.omics_summary.setText(
-                f"{method.upper()} returned status '{result.status}' "
-                f"({len(weights)} reactions mapped from expression)."
-            )
-            self.omics_table.setRowCount(0)
-            return
-        ranked = sorted(result.fluxes.items(), key=lambda kv: -abs(kv[1]))
-        active = [(rid, v) for rid, v in ranked if abs(v) > 1e-6]
-        self.omics_table.setRowCount(len(active))
-        for i, (rid, flux) in enumerate(active):
-            self.omics_table.setItem(i, 0, QTableWidgetItem(rid))
-            self.omics_table.setItem(i, 1, QTableWidgetItem(f"{flux:.4g}"))
-        detail = f" [{result.detail}]" if result.detail else ""
-        objective_label = (
-            "Achieved biological objective"
-            if result.metadata.get("objective_kind") == "achieved_biological_objective"
-            else "Total absolute deviation"
+        self._omics_table_df = table
+        # Discard any previous result so the show-all toggle can't re-render stale data.
+        self._omics_fluxes_by_condition = None
+        self._omics_conditions_order = []
+        self.omics_table.setRowCount(0)
+        conditions = [str(c) for c in table.columns]
+        self.omics_file_label.setText(
+            f"{label} ({table.shape[0]} genes × {len(conditions)} condition(s))"
         )
+        self.omics_cond_list.blockSignals(True)
+        self.omics_cond_list.clear()
+        for cond in conditions:
+            item = QListWidgetItem(cond)
+            item.setFlags((item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsSelectable)
+            item.setCheckState(Qt.Checked)  # compute all conditions by default
+            self.omics_cond_list.addItem(item)
+        self.omics_cond_list.blockSignals(False)
+        self.omics_compute_btn.setEnabled(True)
         self.omics_summary.setText(
-            f"<b>{method.upper()}{detail}</b>: {len(weights)} reactions mapped from "
-            f"{len(gene_expression)} genes; {len(active)} active fluxes. "
-            f"{objective_label} = {result.objective_value:.4g}."
+            f"Loaded <b>{html.escape(label)}</b>: {len(conditions)} condition(s) "
+            f"({html.escape(', '.join(conditions))}). Check conditions and click Compute."
         )
-        self.status_label.setText(f"Omics integration complete ({method}).")
+        self.status_label.setText(f"Loaded expression source: {label}.")
 
-    def run_omics_demo(self) -> None:
-        """Run omics integration on deterministic demo expression over the model's genes."""
+    def _checked_omics_conditions(self) -> list[str]:
+        return [
+            self.omics_cond_list.item(i).text()
+            for i in range(self.omics_cond_list.count())
+            if self.omics_cond_list.item(i).checkState() == Qt.Checked
+        ]
+
+    def load_omics_demo(self) -> None:
+        """Load a deterministic single-condition demo table (does not compute)."""
 
         import numpy as np
+        import pandas as pd
 
-        rng = np.random.default_rng(0)
-        expression = {g.id: float(rng.uniform(1.0, 100.0)) for g in self.model.genes}
-        if not expression:
+        genes = [g.id for g in self.model.genes]
+        if not genes:
             self.omics_summary.setText(
                 "Model has no genes — omics integration is not applicable."
             )
             return
-        self.run_omics(expression)
+        rng = np.random.default_rng(0)
+        values = {g: float(rng.uniform(1.0, 100.0)) for g in genes}
+        table = pd.DataFrame({"demo": pd.Series(values)})
+        self._set_omics_source(table, "demo expression")
 
     def load_expression_csv(self) -> None:
+        """Load a gene × condition expression CSV/TSV as the source (compute is separate)."""
+
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Load gene-expression CSV",
             "",
-            "CSV files (*.csv *.tsv);;All files (*)",
+            "CSV/TSV files (*.csv *.tsv);;All files (*)",
         )
         if not path:
             return
         try:
-            expression = _read_expression_vector(path)
+            table = read_expression_table(path)
         except Exception as exc:
             self.omics_summary.setText(
                 f"Could not read expression CSV: {html.escape(str(exc))}"
             )
             return
-        # Remember real (CSV-loaded) expression so the Comparison tab's LAD/E-Flux2 template
-        # uses it instead of synthetic data. Demo expression is intentionally not stored.
-        self._omics_expression = dict(expression)
-        self.run_omics(expression)
+        import os
+
+        self._set_omics_source(table, os.path.basename(path))
+
+    def run_omics_demo(self) -> None:
+        """Load the demo expression and compute immediately (used by scenarios/tests)."""
+
+        self.load_omics_demo()
+        if self._omics_table_df is not None:
+            self.compute_omics()
+
+    def compute_omics(self) -> None:
+        """Predict a flux column for each checked condition (E-Flux2 or LAD)."""
+
+        import pandas as pd
+
+        if self._omics_table_df is None:
+            self.omics_summary.setText("Load an expression source (CSV or demo) first.")
+            return
+        conditions = self._checked_omics_conditions()
+        if not conditions:
+            self.omics_summary.setText("Check at least one condition to compute.")
+            return
+        method = self.omics_method_combo.currentText()
+        table = self._omics_table_df
+
+        def _compute():
+            return predict_condition_fluxes(
+                self.model, table, method=method, conditions=conditions
+            )
+
+        try:
+            predictions = self._run_in_background(
+                _compute, label=f"Computing {method} for {len(conditions)} condition(s)…"
+            )
+        except Exception as exc:
+            self.omics_summary.setText(
+                f"Omics integration failed: {html.escape(str(exc))}"
+            )
+            self.status_label.setText("Omics integration failed.")
+            return
+
+        # Keep only conditions that produced an optimal flux state; note the rest.
+        per_condition: dict[str, dict[str, float]] = {}
+        failed: list[str] = []
+        for cond in conditions:
+            try:
+                per_condition[cond] = predictions.fluxes(cond)
+            except Exception:
+                failed.append(cond)
+        ok = [c for c in conditions if c in per_condition]
+        if not ok:
+            self._omics_fluxes_by_condition = None
+            self._omics_conditions_order = []
+            self.omics_table.setColumnCount(1)
+            self.omics_table.setHorizontalHeaderLabels(["Reaction"])
+            self.omics_table.setRowCount(0)
+            self.omics_summary.setText(
+                f"{method.upper()} produced no optimal flux state for the selected conditions."
+            )
+            return
+
+        # Cache the result so the show-all toggle can re-render without recomputing.
+        self._omics_fluxes_by_condition = per_condition
+        self._omics_conditions_order = ok
+        n_active = len(
+            {rid for cond in ok for rid, v in per_condition[cond].items() if abs(v) > 1e-6}
+        )
+        self._render_omics_table()
+
+        # Reuse the first computed condition as the Comparison tab's LAD/E-Flux2 reference.
+        first = ok[0]
+        self._omics_expression = {
+            str(gene): float(value)
+            for gene, value in table[first].items()
+            if pd.notna(value)
+        }
+        note = (
+            f" ({len(failed)} infeasible: {html.escape(', '.join(failed))})" if failed else ""
+        )
+        self.omics_summary.setText(
+            f"<b>{method.upper()}</b>: {len(ok)} condition(s) × {n_active} active "
+            f"reactions{note}. Reference for Comparison = '{html.escape(first)}'."
+        )
+        self.status_label.setText(f"Omics integration complete ({method}).")
+
+    def _render_omics_table(self) -> None:
+        """Render the cached per-condition fluxes, honouring the active-only / show-all toggle."""
+
+        per = self._omics_fluxes_by_condition
+        ok = self._omics_conditions_order
+        if not per or not ok:
+            return
+        if self.omics_show_all_check.isChecked():
+            rxn_set = {rid for cond in ok for rid in per[cond]}
+        else:
+            rxn_set = {
+                rid for cond in ok for rid, v in per[cond].items() if abs(v) > 1e-6
+            }
+        rxns = sorted(
+            rxn_set, key=lambda rid: -max(abs(per[c].get(rid, 0.0)) for c in ok)
+        )
+        self.omics_table.setColumnCount(1 + len(ok))
+        self.omics_table.setHorizontalHeaderLabels(["Reaction", *ok])
+        self.omics_table.setRowCount(len(rxns))
+        for i, rid in enumerate(rxns):
+            self.omics_table.setItem(i, 0, QTableWidgetItem(rid))
+            for j, cond in enumerate(ok, start=1):
+                self.omics_table.setItem(
+                    i, j, QTableWidgetItem(f"{per[cond].get(rid, 0.0):.4g}")
+                )
 
     def _update_revert_run_state(self) -> None:
         ready = (
@@ -2092,145 +2244,3 @@ class CmmMainWindow(QMainWindow):
         else:
             self.transform_summary.setText("No candidate knockouts scored.")
         self.status_label.setText(f"Transformation complete ({method}).")
-
-    # -- multi-condition comparison -----------------------------------------
-
-    def _build_conditions_tab(self) -> QWidget:
-        """Predict per-condition fluxes from a gene×condition table and compare two as log2FC."""
-
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        controls = QGroupBox(
-            "Multi-condition flux comparison (expression table → per-condition flux)"
-        )
-        row = QHBoxLayout(controls)
-        row.addWidget(QLabel("Method:"))
-        self.cond_method_combo = QComboBox()
-        self.cond_method_combo.addItems(["eflux2", "lad"])
-        row.addWidget(self.cond_method_combo)
-        load_btn = QPushButton("Load expression table CSV…")
-        load_btn.clicked.connect(self.load_condition_table)
-        row.addWidget(load_btn)
-        row.addWidget(QLabel("A:"))
-        self.cond_source_combo = QComboBox()
-        self.cond_source_combo.setMinimumWidth(120)
-        row.addWidget(self.cond_source_combo)
-        row.addWidget(QLabel("B:"))
-        self.cond_target_combo = QComboBox()
-        self.cond_target_combo.setMinimumWidth(120)
-        row.addWidget(self.cond_target_combo)
-        self.cond_run_btn = QPushButton("Compare")
-        self.cond_run_btn.setEnabled(False)
-        self.cond_run_btn.clicked.connect(self.run_condition_comparison)
-        row.addWidget(self.cond_run_btn)
-        row.addStretch(1)
-        layout.addWidget(controls)
-
-        self.cond_summary = QLabel(
-            "Load a gene × condition table (first column = gene id, remaining columns = "
-            "conditions), pick two conditions A and B, and compare their predicted fluxes."
-        )
-        self.cond_summary.setWordWrap(True)
-        layout.addWidget(self.cond_summary)
-
-        self.cond_table = QTableWidget(0, 2)
-        self.cond_table.setHorizontalHeaderLabels(
-            ["Reaction", "log2( |flux B| / |flux A| )"]
-        )
-        self.cond_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.cond_table.verticalHeader().setVisible(False)
-        self.cond_table.setAlternatingRowColors(True)
-        layout.addWidget(self.cond_table, 1)
-        return tab
-
-    def load_condition_table(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load expression table",
-            "",
-            "CSV/TSV files (*.csv *.tsv);;All files (*)",
-        )
-        if not path:
-            return
-        try:
-            table = read_expression_table(path)
-        except Exception as exc:
-            self.cond_summary.setText(
-                f"Could not read expression table: {html.escape(str(exc))}"
-            )
-            return
-        if table.shape[1] < 2:
-            self.cond_summary.setText(
-                "Expression table needs at least two condition columns to compare."
-            )
-            return
-        self._condition_table = table
-        conditions = [str(c) for c in table.columns]
-        self._loading = True
-        self.cond_source_combo.clear()
-        self.cond_source_combo.addItems(conditions)
-        self.cond_target_combo.clear()
-        self.cond_target_combo.addItems(conditions)
-        self.cond_target_combo.setCurrentIndex(min(1, len(conditions) - 1))
-        self._loading = False
-        self.cond_run_btn.setEnabled(True)
-        self.cond_summary.setText(
-            f"Loaded {table.shape[0]} genes × {table.shape[1]} conditions "
-            f"({', '.join(conditions)}). Pick A and B, then Compare."
-        )
-        self.status_label.setText(
-            f"Loaded expression table ({table.shape[1]} conditions)."
-        )
-
-    def run_condition_comparison(self) -> None:
-        if self._condition_table is None:
-            self.cond_summary.setText("Load an expression table first.")
-            return
-        source = self.cond_source_combo.currentText()
-        target = self.cond_target_combo.currentText()
-        if source == target:
-            self.cond_summary.setText("Pick two different conditions for A and B.")
-            return
-        method = self.cond_method_combo.currentText()
-        table = self._condition_table
-
-        def _compute():
-            predictions = predict_condition_fluxes(
-                self.model, table, method=method, conditions=[source, target]
-            )
-            return flux_log_change(
-                predictions.fluxes(source), predictions.fluxes(target)
-            )
-
-        try:
-            log_change = self._run_in_background(
-                _compute, label=f"Comparing conditions ({method})…"
-            )
-        except Exception as exc:
-            self.cond_summary.setText(
-                f"Condition comparison failed: {html.escape(str(exc))}"
-            )
-            self.status_label.setText("Condition comparison failed.")
-            return
-        ranked = sorted(
-            ((rid, v) for rid, v in log_change.items() if v == v),  # drop NaN
-            key=lambda kv: -abs(kv[1]),
-        )
-        changed = [(rid, v) for rid, v in ranked if abs(v) > 1e-6]
-        self.cond_table.setRowCount(len(changed))
-        for i, (rid, value) in enumerate(changed):
-            self.cond_table.setItem(i, 0, QTableWidgetItem(rid))
-            text = (
-                "+inf"
-                if value == float("inf")
-                else "-inf"
-                if value == float("-inf")
-                else f"{value:.4g}"
-            )
-            self.cond_table.setItem(i, 1, QTableWidgetItem(text))
-        self.cond_summary.setText(
-            f"<b>{method}</b>: {source} → {target}. {len(changed)} reactions changed flux "
-            f"magnitude (log2 fold-change; positive = higher in {html.escape(target)})."
-        )
-        self.status_label.setText(f"Condition comparison complete ({method}).")
