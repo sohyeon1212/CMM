@@ -256,7 +256,9 @@ class CmmMainWindow(QMainWindow):
     ):
         super().__init__(parent)
         self.model = model
-        self._fluxes: dict[str, float] = {}
+        self._fluxes: dict[str, float] = {}  # the last-run distribution (drives left panel/FVA/map)
+        self._fba_fluxes: dict[str, float] = {}  # FBA column of the simulation table
+        self._pfba_fluxes: dict[str, float] = {}  # pFBA column of the simulation table
         self._loading = False
         self._fluxes_stale = False
         self._default_product = default_product
@@ -1197,18 +1199,28 @@ class CmmMainWindow(QMainWindow):
             "FVA: fraction of the optimum objective to hold"
         )
         controls.addWidget(self.fva_fraction_spin)
+        # Objective on top, pFBA's minimal-total-flux directly beneath it (previously only in
+        # the easy-to-miss status bar).
+        obj_box = QVBoxLayout()
+        obj_box.setSpacing(0)
         self.objective_label = QLabel("Objective: —")
         self.objective_label.setFont(QFont("", 13, QFont.Bold))
+        self.pfba_total_label = QLabel("")
+        self.pfba_total_label.setStyleSheet("color: #5c6b7e; font-size: 11px;")
+        obj_box.addWidget(self.objective_label)
+        obj_box.addWidget(self.pfba_total_label)
         controls.addStretch(1)
-        controls.addWidget(self.objective_label)
+        controls.addLayout(obj_box)
         layout.addLayout(controls)
 
-        self.sim_table = QTableWidget(0, 3)
-        self.sim_table.setHorizontalHeaderLabels(["Reaction", "Flux", "FVA range"])
+        # FBA and pFBA fluxes live in separate columns so running pFBA adds to — rather than
+        # overwrites — the FBA result and the two can be compared side by side.
+        self.sim_table = QTableWidget(0, 4)
+        self.sim_table.setHorizontalHeaderLabels(["Reaction", "FBA flux", "pFBA flux", "FVA range"])
         _sim_header = self.sim_table.horizontalHeader()
         _sim_header.setSectionResizeMode(0, QHeaderView.Stretch)
-        _sim_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        _sim_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for _c in (1, 2, 3):
+            _sim_header.setSectionResizeMode(_c, QHeaderView.ResizeToContents)
         self.sim_table.verticalHeader().setVisible(False)
         self.sim_table.setAlternatingRowColors(True)
         layout.addWidget(self.sim_table, 1)
@@ -1335,7 +1347,11 @@ class CmmMainWindow(QMainWindow):
             )
 
         self._fluxes = {}
+        self._fba_fluxes = {}
+        self._pfba_fluxes = {}
         self._fluxes_stale = False
+        if getattr(self, "pfba_total_label", None) is not None:
+            self.pfba_total_label.setText("")
         self.status_label.setText(f"Loaded model '{model.id}'.")
 
     def set_reaction_bounds(
@@ -1410,10 +1426,12 @@ class CmmMainWindow(QMainWindow):
             self.status_label.setText(f"FBA failed: {exc}")
             return
         self._fluxes = dict(solution.fluxes)
+        self._fba_fluxes = dict(solution.fluxes)
         self._fluxes_stale = False
         obj = solution.objective_value
         obj_text = f"{obj:.4g}" if obj is not None else "infeasible"
         self.objective_label.setText(f"Objective: {obj_text} ({solution.status})")
+        self.pfba_total_label.setText("")  # FBA does not minimise total flux
         if obj is None or solution.status != "optimal":
             self.status_label.setText(
                 f"FBA status: {solution.status} — model may be infeasible."
@@ -1431,6 +1449,7 @@ class CmmMainWindow(QMainWindow):
             self.status_label.setText(f"pFBA failed: {exc}")
             return
         self._fluxes = dict(solution.fluxes)
+        self._pfba_fluxes = dict(solution.fluxes)
         self._fluxes_stale = False
         # pFBA's objective value is the minimal total flux; show the growth (objective rxn).
         growth = next(
@@ -1444,6 +1463,7 @@ class CmmMainWindow(QMainWindow):
         growth_text = f"{growth:.4g}" if growth is not None else "—"
         total = sum(abs(v) for v in self._fluxes.values())
         self.objective_label.setText(f"Objective: {growth_text} (pFBA)")
+        self.pfba_total_label.setText(f"Minimal total flux: {total:.1f}")
         self.status_label.setText(f"pFBA complete (minimal total flux = {total:.1f}).")
         self._populate_flux_column()
         self._fill_sim_table()
@@ -1473,24 +1493,30 @@ class CmmMainWindow(QMainWindow):
         except Exception as exc:
             self.status_label.setText(f"FVA failed: {exc}")
             return
-        self.sim_table.setHorizontalHeaderLabels(
-            ["Reaction", "Flux", f"FVA range (f={fraction:g})"]
-        )
-        self.sim_table.setRowCount(len(self._fluxes))
-        for row, (rid, flux) in enumerate(sorted(self._fluxes.items())):
-            self.sim_table.setItem(row, 0, QTableWidgetItem(rid))
-            self.sim_table.setItem(row, 1, QTableWidgetItem(f"{flux:.3g}"))
-            rng = ranges.get(rid)
-            text = f"[{rng.minimum:.3g}, {rng.maximum:.3g}]" if rng else "—"
-            self.sim_table.setItem(row, 2, QTableWidgetItem(text))
+        self._fill_sim_table(fva_ranges=ranges, fraction=fraction)
         self.status_label.setText(f"FVA complete (fraction {fraction:g}).")
 
-    def _fill_sim_table(self) -> None:
-        self.sim_table.setRowCount(len(self._fluxes))
-        for row, (rid, flux) in enumerate(sorted(self._fluxes.items())):
+    def _fill_sim_table(self, *, fva_ranges=None, fraction=None) -> None:
+        """Fill the simulation table with FBA/pFBA flux columns (and an FVA range if given)."""
+
+        fva_header = "FVA range" if fraction is None else f"FVA range (f={fraction:g})"
+        self.sim_table.setHorizontalHeaderLabels(
+            ["Reaction", "FBA flux", "pFBA flux", fva_header]
+        )
+        ids = sorted(set(self._fba_fluxes) | set(self._pfba_fluxes))
+        self.sim_table.setRowCount(len(ids))
+        for row, rid in enumerate(ids):
             self.sim_table.setItem(row, 0, QTableWidgetItem(rid))
-            self.sim_table.setItem(row, 1, QTableWidgetItem(f"{flux:.3g}"))
-            self.sim_table.setItem(row, 2, QTableWidgetItem("—"))
+            fba = self._fba_fluxes.get(rid)
+            pfba = self._pfba_fluxes.get(rid)
+            self.sim_table.setItem(row, 1, QTableWidgetItem(f"{fba:.3g}" if fba is not None else "—"))
+            self.sim_table.setItem(row, 2, QTableWidgetItem(f"{pfba:.3g}" if pfba is not None else "—"))
+            if fva_ranges is not None:
+                rng = fva_ranges.get(rid)
+                text = f"[{rng.minimum:.3g}, {rng.maximum:.3g}]" if rng else "—"
+            else:
+                text = "—"
+            self.sim_table.setItem(row, 3, QTableWidgetItem(text))
 
     def _populate_flux_column(self) -> None:
         for row in range(self.reaction_table.rowCount()):
