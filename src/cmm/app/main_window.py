@@ -522,6 +522,7 @@ class CmmMainWindow(QMainWindow):
         return {
             "Simulation": self.sim_table,
             "Comparison": self.comparison_table,
+            "Production": self.fseof_table,
             "Strain Design": self.sd_table,
             "Omics": self.omics_table,
             "Revert Metabolism": self.revert_table,
@@ -805,12 +806,27 @@ class CmmMainWindow(QMainWindow):
         self.yield_label.setTextFormat(Qt.RichText)
         layout.addWidget(self.yield_label)
 
+        # Plot on the left, its underlying data table on the right — side by side so the
+        # figure and the numbers behind it are visible together (equal 50/50 split).
+        results = QSplitter(Qt.Horizontal)
         self.production_canvas_holder = QVBoxLayout()
         holder = QWidget()
         holder.setLayout(self.production_canvas_holder)
-        layout.addWidget(holder, 1)
+        results.addWidget(holder)
         self._production_canvas = None
         self._production_toolbar = None
+
+        self.fseof_table = QTableWidget(0, 4)
+        self._set_production_table_headers(
+            ["Reaction", "Flux @ low enforce", "Flux @ high enforce", "Trend"]
+        )
+        self.fseof_table.verticalHeader().setVisible(False)
+        self.fseof_table.setAlternatingRowColors(True)
+        results.addWidget(self.fseof_table)
+        results.setStretchFactor(0, 1)
+        results.setStretchFactor(1, 1)
+        results.setSizes([10000, 10000])
+        layout.addWidget(results, 1)
         return tab
 
     def _build_strain_design_tab(self) -> QWidget:
@@ -1654,6 +1670,105 @@ class CmmMainWindow(QMainWindow):
         self.production_canvas_holder.addWidget(self._production_canvas)
         self._production_canvas.draw()
 
+    def _set_production_table_headers(self, labels: list[str], tooltips=None) -> None:
+        """Re-shape the shared production results table for whichever analysis just ran."""
+
+        self.fseof_table.setColumnCount(len(labels))
+        self.fseof_table.setHorizontalHeaderLabels(labels)
+        self.fseof_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        if tooltips:
+            for i, tip in enumerate(tooltips):
+                header_item = self.fseof_table.horizontalHeaderItem(i)
+                if header_item is not None and tip:
+                    header_item.setToolTip(tip)
+
+    def _fill_fseof_table(self, result) -> None:
+        """Show FSEOF amplify/knockdown targets ranked by change in |flux| across the scan."""
+
+        levels = list(result.enforced_levels)
+        lo, hi = levels[0], levels[-1]
+        rows = []
+        for rid in result.trends.index:
+            cls = str(result.trends.loc[rid, "classification"])
+            if cls not in ("amplify", "knockdown"):
+                continue
+            flo = float(result.trends.loc[rid, lo])
+            fhi = float(result.trends.loc[rid, hi])
+            rows.append((rid, flo, fhi, cls, abs(abs(fhi) - abs(flo))))
+        rows.sort(key=lambda r: -r[4])
+        self._set_production_table_headers(
+            ["Reaction", "Flux @ low enforce", "Flux @ high enforce", "Trend"],
+            [
+                "Reaction ID",
+                f"Reaction's flux when the product exchange is fixed at the lowest scanned "
+                f"level ({lo:.3g}, ~10% of the theoretical maximum) and biomass is maximised",
+                f"Reaction's flux when the product exchange is fixed at the highest scanned "
+                f"level ({hi:.3g}, ~90% of the theoretical maximum) and biomass is maximised",
+                "amplify = |flux| rises as the cell is pushed toward product (over-express "
+                "target); knockdown = |flux| falls (down-regulate/delete target)",
+            ],
+        )
+        self.fseof_table.setRowCount(len(rows))
+        for i, (rid, flo, fhi, cls, _delta) in enumerate(rows):
+            self.fseof_table.setItem(i, 0, QTableWidgetItem(rid))
+            self.fseof_table.setItem(i, 1, QTableWidgetItem(f"{flo:.4g}"))
+            self.fseof_table.setItem(i, 2, QTableWidgetItem(f"{fhi:.4g}"))
+            self.fseof_table.setItem(i, 3, QTableWidgetItem(cls))
+
+    def _fill_fvseof_table(self, result) -> None:
+        """Show FVSEOF targets with mean flux endpoints; robust ones are flagged."""
+
+        levels = list(result.enforced_levels)
+        lo, hi = levels[0], levels[-1]
+        robust_ids = set(result.robust_targets())
+        rows = []
+        for rid in result.classification.index:
+            cls = str(result.classification.loc[rid])
+            if cls not in ("amplify", "knockdown"):
+                continue
+            mlo = float(result.mean.loc[rid, lo])
+            mhi = float(result.mean.loc[rid, hi])
+            is_robust = rid in robust_ids
+            tag = f"{cls} · robust" if is_robust else cls
+            rows.append((rid, mlo, mhi, tag, is_robust, abs(abs(mhi) - abs(mlo))))
+        rows.sort(key=lambda r: (-int(r[4]), -r[5]))
+        self._set_production_table_headers(
+            ["Reaction", "Mean flux @ low", "Mean flux @ high", "Trend"],
+            [
+                "Reaction ID",
+                f"Midpoint of the reaction's FVA flux range at the lowest enforced product "
+                f"level ({lo:.3g})",
+                f"Midpoint of the reaction's FVA flux range at the highest enforced product "
+                f"level ({hi:.3g})",
+                "amplify/knockdown from the |mean-flux| trend; 'robust' = the FVA minimum "
+                "|flux| also rises, so the reaction cannot avoid carrying more flux",
+            ],
+        )
+        self.fseof_table.setRowCount(len(rows))
+        for i, (rid, mlo, mhi, tag, _robust, _delta) in enumerate(rows):
+            self.fseof_table.setItem(i, 0, QTableWidgetItem(rid))
+            self.fseof_table.setItem(i, 1, QTableWidgetItem(f"{mlo:.4g}"))
+            self.fseof_table.setItem(i, 2, QTableWidgetItem(f"{mhi:.4g}"))
+            self.fseof_table.setItem(i, 3, QTableWidgetItem(tag))
+
+    def _fill_envelope_table(self, envelope) -> None:
+        """List the production-envelope points: growth range attainable at each product flux."""
+
+        frame = envelope.to_frame()
+        self._set_production_table_headers(
+            ["Product flux", "Growth (min)", "Growth (max)"],
+            [
+                "Enforced product secretion rate along the envelope",
+                "Minimum growth rate feasible at this product flux (lower boundary)",
+                "Maximum growth rate feasible at this product flux (upper boundary)",
+            ],
+        )
+        self.fseof_table.setRowCount(len(frame))
+        for i, (_, record) in enumerate(frame.iterrows()):
+            self.fseof_table.setItem(i, 0, QTableWidgetItem(f"{record['product_flux']:.4g}"))
+            self.fseof_table.setItem(i, 1, QTableWidgetItem(f"{record['growth_min']:.4g}"))
+            self.fseof_table.setItem(i, 2, QTableWidgetItem(f"{record['growth_max']:.4g}"))
+
     def _run_production(self, action) -> None:
         """Run a production analysis, surfacing any error instead of crashing the UI."""
 
@@ -1667,6 +1782,7 @@ class CmmMainWindow(QMainWindow):
 
     def run_theoretical_yield(self) -> None:
         def _do():
+            self.fseof_table.setRowCount(0)  # yield is a scalar, not a target scan
             product = self._current_product()
             result = theoretical_yield(
                 self.model,
@@ -1710,6 +1826,7 @@ class CmmMainWindow(QMainWindow):
                 envelope, title=f"Production envelope — {product} ({condition})"
             )
             self._set_production_figure(fig)
+            self._fill_envelope_table(envelope)
             self.status_label.setText(f"Production envelope computed ({condition}).")
 
         self._run_production(_do)
@@ -1731,6 +1848,7 @@ class CmmMainWindow(QMainWindow):
                 return
             fig = fseof_figure(result, top_n=6, title=f"FSEOF targets — {product}")
             self._set_production_figure(fig)
+            self._fill_fseof_table(result)
             # Rank the listed targets the same way the figure does (by flux increase).
             levels = list(result.enforced_levels)
             ranked = sorted(
@@ -1766,6 +1884,7 @@ class CmmMainWindow(QMainWindow):
                 result, top_n=5, title=f"FVSEOF robust targets — {product}"
             )
             self._set_production_figure(fig)
+            self._fill_fvseof_table(result)
             robust = result.robust_targets()[:8]
             self.yield_label.setText(
                 "FVSEOF robust amplification targets (forced up): "
