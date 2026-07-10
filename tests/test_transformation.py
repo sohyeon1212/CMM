@@ -59,3 +59,11 @@ def test_unknown_method_raises(branched_model):
     source, target = _states(branched_model)
     with pytest.raises(ValueError, match="unknown method"):
         transformation_targets(branched_model, source, target, method="bogus")
+
+
+def test_unknown_perturbation_raises(branched_model):
+    source, target = _states(branched_model)
+    with pytest.raises(ValueError, match="perturbation"):
+        transformation_targets(
+            branched_model, source, target, method="moma", perturbation="bogus"
+        )

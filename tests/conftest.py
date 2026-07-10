@@ -78,44 +78,41 @@ def branched_model() -> Model:
 
 
 @pytest.fixture
+def published_mta_model() -> Model:
+    """Independent Python construction of the official COBRA Toolbox MTA test network."""
+
+    model = Model("published_mta_toy")
+    a = Metabolite("A_c", compartment="c")
+    b = Metabolite("B_c", compartment="c")
+    c = Metabolite("C_c", compartment="c")
+    d = Metabolite("D_c", compartment="c")
+
+    def reaction(rid, metabolites, rule="", lower=0.0, upper=20.0):
+        item = Reaction(rid)
+        item.bounds = (lower, upper)
+        item.add_metabolites(metabolites)
+        item.gene_reaction_rule = rule
+        return item
+
+    model.add_reactions(
+        [
+            reaction("r1", {a: 1}, "g1.1 and g6.1"),
+            reaction("r2", {a: -1, b: 1}, "g2.1 or g2.2"),
+            reaction("r3", {a: -1, c: 1}),
+            reaction("r4", {c: -1, d: 1}, "g4.1", lower=-20.0),
+            reaction("r5", {a: -1, d: 1}, "g5.1"),
+            reaction("r6", {d: -1, b: 1}, "g6.1"),
+            reaction("r7", {b: -1}),
+        ]
+    )
+    model.objective = model.reactions.r7
+    return model
+
+
+@pytest.fixture
 def ecoli_core():
     """The e_coli_core textbook model (95 reactions) bundled with cobra."""
 
     from cobra.io import load_model
 
     return load_model("textbook")
-
-
-@pytest.fixture(scope="session")
-def unrestricted_qp_solver():
-    """Skip when the active solver cannot run an e_coli_core-scale QP.
-
-    The MOMA QP on e_coli_core exceeds the size-limited license shipped with the pip
-    ``gurobipy`` package (used on CI), which either raises a "size-limited / too large"
-    GurobiError or returns a non-optimal/NaN solution. Tests depending on this fixture run
-    wherever a full QP solver license is configured (e.g. the local Gurobi/CPLEX install) and
-    skip — instead of failing — on the free size-limited license. Small-model QP/MIQP tests
-    (branched model) are unaffected and always run.
-    """
-
-    import math
-
-    from cobra.io import load_model
-
-    from cmm.core.flux_state import reference_state_pfba
-    from cmm.core.solvers import SolverCapabilityError
-    from cmm.features.comparison import moma
-
-    try:
-        model = load_model("textbook")
-        result = moma(model, reference_state_pfba(model), linear=False)
-    except SolverCapabilityError:
-        pytest.skip("no QP-capable solver available for an e_coli_core-scale MOMA")
-    except Exception as exc:  # noqa: BLE001 - any solver/license failure means "cannot run here"
-        # e.g. gurobipy's free license: "Model too large for size-limited license". The exact
-        # wording varies by solver/version/platform, so skip on any probe failure rather than
-        # matching a message; genuine MOMA regressions still fail the small-model MOMA tests.
-        pytest.skip(f"active solver cannot run an e_coli_core-scale MOMA ({type(exc).__name__}: {exc})")
-    if result.status != "optimal" or not math.isfinite(result.distance):
-        pytest.skip("active solver cannot solve an e_coli_core-scale MOMA (size-limited license?)")
-    return True

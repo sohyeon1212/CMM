@@ -11,15 +11,34 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import math
 
 from cobra import Model
 
 # Mineral-salt ions opened in a minimal medium (any naming variant present is used).
 _MINIMAL_IONS: tuple[str, ...] = (
-    "EX_nh4_e", "EX_pi_e", "EX_so4_e", "EX_co2_e", "EX_h2o_e", "EX_h_e",
-    "EX_k_e", "EX_na1_e", "EX_cl_e", "EX_ca2_e", "EX_mg2_e", "EX_mn2_e",
-    "EX_fe2_e", "EX_fe3_e", "EX_zn2_e", "EX_cu2_e", "EX_cobalt2_e",
-    "EX_mobd_e", "EX_ni2_e", "EX_slnt_e", "EX_sel_e", "EX_tungs_e",
+    "EX_nh4_e",
+    "EX_pi_e",
+    "EX_so4_e",
+    "EX_co2_e",
+    "EX_h2o_e",
+    "EX_h_e",
+    "EX_k_e",
+    "EX_na1_e",
+    "EX_cl_e",
+    "EX_ca2_e",
+    "EX_mg2_e",
+    "EX_mn2_e",
+    "EX_fe2_e",
+    "EX_fe3_e",
+    "EX_zn2_e",
+    "EX_cu2_e",
+    "EX_cobalt2_e",
+    "EX_mobd_e",
+    "EX_ni2_e",
+    "EX_slnt_e",
+    "EX_sel_e",
+    "EX_tungs_e",
 )
 
 # Naming-convention variants for tolerant resolution.
@@ -54,15 +73,24 @@ class Medium:
 
         resolved: dict[str, float] = {}
         for exchange_id, rate in self.uptake.items():
+            rate = float(rate)
+            if not math.isfinite(rate) or rate < 0:
+                raise ValueError(
+                    f"uptake rate for {exchange_id!r} must be finite and non-negative"
+                )
             actual = _resolve_id(model, exchange_id)
             if actual is not None:
-                resolved[actual] = float(rate)
+                resolved[actual] = rate
         return resolved
 
     def apply_to(self, model: Model) -> dict[str, float]:
         """Set the model's medium to this composition; returns what was applied."""
 
         resolved = self.resolve(model)
+        if self.uptake and not resolved:
+            raise ValueError(
+                f"medium {self.name!r} has no exchange reactions present in model {model.id!r}"
+            )
         model.medium = resolved
         return resolved
 
@@ -79,7 +107,9 @@ def glucose_minimal(*, aerobic: bool = True, glucose: float = 10.0) -> Medium:
     return Medium(name=name, uptake=uptake)
 
 
-def carbon_minimal(carbon_exchange: str, *, aerobic: bool = True, uptake: float = 10.0) -> Medium:
+def carbon_minimal(
+    carbon_exchange: str, *, aerobic: bool = True, uptake: float = 10.0
+) -> Medium:
     """Minimal medium on an arbitrary carbon source exchange."""
 
     rates: dict[str, float] = {carbon_exchange: uptake}
@@ -88,7 +118,9 @@ def carbon_minimal(carbon_exchange: str, *, aerobic: bool = True, uptake: float 
     if aerobic:
         rates["EX_o2_e"] = 1000.0
     label = carbon_exchange.replace("EX_", "").replace("_e", "")
-    return Medium(name=f"{label} minimal ({'aerobic' if aerobic else 'anaerobic'})", uptake=rates)
+    return Medium(
+        name=f"{label} minimal ({'aerobic' if aerobic else 'anaerobic'})", uptake=rates
+    )
 
 
 PRESET_MEDIA: dict[str, Medium] = {
@@ -103,7 +135,9 @@ def preset_medium(name: str) -> Medium:
     """Look up a preset medium by key (see ``PRESET_MEDIA``)."""
 
     if name not in PRESET_MEDIA:
-        raise KeyError(f"unknown preset medium {name!r}; available: {sorted(PRESET_MEDIA)}")
+        raise KeyError(
+            f"unknown preset medium {name!r}; available: {sorted(PRESET_MEDIA)}"
+        )
     return PRESET_MEDIA[name]
 
 

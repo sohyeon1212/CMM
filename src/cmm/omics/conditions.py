@@ -28,16 +28,37 @@ class ConditionFluxes:
         return tuple(self.results.keys())
 
     def fluxes(self, condition: str) -> dict[str, float]:
-        return self.results[condition].fluxes
+        result = self.results[condition]
+        if result.status != "optimal" or not result.fluxes:
+            raise ValueError(
+                f"condition {condition!r} has no valid flux state ({result.status})"
+            )
+        return result.fluxes
 
 
 def read_expression_table(path: str, gene_column: str | None = None) -> pd.DataFrame:
     """Read a gene-by-condition expression table; index = gene id, columns = conditions."""
 
     frame = pd.read_csv(path, sep=None, engine="python")
+    if frame.empty or frame.shape[1] < 2:
+        raise ValueError(
+            "expression table must contain a gene column and at least one condition"
+        )
+    if frame.columns.duplicated().any():
+        raise ValueError("expression table contains duplicate condition columns")
     gene_column = gene_column or frame.columns[0]
     frame = frame.set_index(gene_column)
-    return frame.apply(pd.to_numeric, errors="coerce").dropna(how="all")
+    if frame.index.duplicated().any():
+        raise ValueError("expression table contains duplicate gene identifiers")
+    numeric = frame.apply(pd.to_numeric, errors="coerce").dropna(how="all")
+    finite_or_missing = numeric.apply(
+        lambda column: column.map(
+            lambda value: pd.isna(value) or math.isfinite(float(value))
+        )
+    )
+    if not finite_or_missing.to_numpy().all() or (numeric < 0).any().any():
+        raise ValueError("expression values must be finite and non-negative")
+    return numeric
 
 
 def predict_condition_fluxes(
@@ -50,7 +71,14 @@ def predict_condition_fluxes(
 ) -> ConditionFluxes:
     """Predict a flux distribution for each condition column with E-Flux2 or LAD."""
 
+    if expression.empty:
+        raise ValueError("expression table is empty")
     columns = list(conditions) if conditions is not None else list(expression.columns)
+    missing = [
+        condition for condition in columns if condition not in expression.columns
+    ]
+    if missing:
+        raise KeyError(f"unknown condition columns: {missing}")
     results: dict[str, OmicsFluxResult] = {}
     for condition in columns:
         gene_expression = {
@@ -58,7 +86,9 @@ def predict_condition_fluxes(
             for gene, value in expression[condition].items()
             if pd.notna(value)
         }
-        results[condition] = integrate_expression(model, gene_expression, method=method, **kwargs)
+        results[condition] = integrate_expression(
+            model, gene_expression, method=method, **kwargs
+        )
     return ConditionFluxes(method=method, results=results)
 
 
@@ -75,11 +105,17 @@ def flux_log_change(
     handled gracefully; the pseudocount bounds the change for reactions that switch on/off.
     """
 
+    if pseudocount < 0 or not math.isfinite(pseudocount):
+        raise ValueError("pseudocount must be finite and non-negative")
     keys = set(reactions) if reactions is not None else set(source) | set(target)
     out: dict[str, float] = {}
     for rid in keys:
-        a = abs(source.get(rid, 0.0)) + pseudocount
-        b = abs(target.get(rid, 0.0)) + pseudocount
+        source_value = float(source.get(rid, 0.0))
+        target_value = float(target.get(rid, 0.0))
+        if not math.isfinite(source_value) or not math.isfinite(target_value):
+            raise ValueError(f"flux values for reaction {rid!r} must be finite")
+        a = abs(source_value) + pseudocount
+        b = abs(target_value) + pseudocount
         # The zero branches are only reachable when pseudocount=0 (the default 1e-3 bounds
         # every change). Guard both off-states symmetrically: log2(0/0)=0, log2(b/0)=+inf
         # (switch on), log2(0/a)=-inf (switch off) — the last would raise a math domain error.

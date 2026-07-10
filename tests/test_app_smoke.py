@@ -85,18 +85,26 @@ def test_infeasible_fba_does_not_crash(app):
     # Force infeasibility: demand uptake the network cannot satisfy.
     window.model.reactions.SUP_A.bounds = (5.0, 5.0)
     window.model.reactions.BIOMASS.lower_bound = 1000.0
-    window.run_fba()  # must not raise
-    assert "infeasible" in window.objective_label.text() or "error" in window.objective_label.text()
+    with pytest.warns(UserWarning, match="infeasible"):
+        window.run_fba()  # must not raise
+    assert (
+        "infeasible" in window.objective_label.text()
+        or "error" in window.objective_label.text()
+    )
 
 
 def test_crossing_bound_edit_does_not_crash(app):
     window = CmmMainWindow(build_demo_model())
     # Setting lower above the current upper must not raise (atomic assignment + clamp).
     window.set_reaction_bounds("SUP_A", lower=2000.0)
-    assert window.model.reactions.SUP_A.lower_bound <= window.model.reactions.SUP_A.upper_bound
+    assert (
+        window.model.reactions.SUP_A.lower_bound
+        <= window.model.reactions.SUP_A.upper_bound
+    )
     # In-table crossing edit clamps and reflects the stored value in the cell.
     sup_row = next(
-        r for r in range(window.reaction_table.rowCount())
+        r
+        for r in range(window.reaction_table.rowCount())
         if window.reaction_table.item(r, 0).text() == "SUP_A"
     )
     window.reaction_table.item(sup_row, 1).setText("99999")
@@ -121,7 +129,10 @@ def test_production_buttons_disabled_without_exchanges(app):
     assert all(not btn.isEnabled() for btn in window._production_buttons)
     # Even if invoked directly, the guarded runner must not raise.
     window.run_theoretical_yield()
-    assert "failed" in window.yield_label.text() or "unavailable" in window.yield_label.text()
+    assert (
+        "failed" in window.yield_label.text()
+        or "unavailable" in window.yield_label.text()
+    )
 
 
 def test_menu_bar_has_expected_menus(app):
@@ -150,6 +161,18 @@ def test_expression_vector_reads_tsv(tmp_path):
     assert _read_expression_vector(str(path)) == {"g1": 2.5, "g2": 7.0}
 
 
+def test_expression_vector_rejects_duplicates_and_negative_values(tmp_path):
+    duplicate = tmp_path / "duplicate.csv"
+    duplicate.write_text("gene,expression\ng1,1\ng1,2\n")
+    with pytest.raises(ValueError, match="duplicate"):
+        _read_expression_vector(str(duplicate))
+
+    negative = tmp_path / "negative.csv"
+    negative.write_text("gene,expression\ng1,-1\n")
+    with pytest.raises(ValueError, match="non-negative"):
+        _read_expression_vector(str(negative))
+
+
 def test_revert_tab_runs_loaded_expressions(app):
     window = CmmMainWindow(build_demo_model())
     assert not window.revert_run_btn.isEnabled()
@@ -164,7 +187,7 @@ def test_revert_tab_runs_loaded_expressions(app):
     assert "g2" in window.revert_summary.text()
 
 
-def test_media_pfba_comparison_in_gui(app, ecoli_core, unrestricted_qp_solver):
+def test_media_pfba_comparison_in_gui(app, ecoli_core):
     window = CmmMainWindow(ecoli_core)
 
     # Apply a preset medium and confirm it changed the model's exchange bounds.
@@ -180,7 +203,7 @@ def test_media_pfba_comparison_in_gui(app, ecoli_core, unrestricted_qp_solver):
     # Comparison: MOMA against a pFBA template after a (feasible) knockout.
     window.medium_combo.setCurrentText("glucose_aerobic")
     window.apply_selected_medium()
-    window.comparison_method_combo.setCurrentText("MOMA (L2)")
+    window.comparison_method_combo.setCurrentText("MOMA (L1)")
     window.template_combo.setCurrentText("pfba")
     window.ko_level_combo.setCurrentText("reaction")
     _select_ko(window, ["PFK"])  # reroutable aerobically
@@ -202,7 +225,9 @@ def test_fvseof_in_gui(app, ecoli_core):
     window.product_combo.setCurrentText("EX_succ_e")
     window.anaerobic_combo.setCurrentText("anaerobic")
     window.run_fvseof_plot()
-    assert "FVSEOF" in window.yield_label.text() or "robust" in window.yield_label.text()
+    assert (
+        "FVSEOF" in window.yield_label.text() or "robust" in window.yield_label.text()
+    )
 
 
 def test_menu_bar_has_file_menu(app):
@@ -252,7 +277,9 @@ def test_conditions_tab_runs(app, tmp_path):
     from cmm.omics.conditions import read_expression_table
 
     path = tmp_path / "conditions.csv"
-    path.write_text("gene,condA,condB\ng1,50,50\ng2,100,1\ng3,1,100\ng5,1,100\ngb,50,50\n")
+    path.write_text(
+        "gene,condA,condB\ng1,50,50\ng2,100,1\ng3,1,100\ng5,1,100\ngb,50,50\n"
+    )
 
     window = CmmMainWindow(build_demo_model())
     assert window._tab_index("Multi-condition") is not None
@@ -265,7 +292,9 @@ def test_conditions_tab_runs(app, tmp_path):
     window.cond_run_btn.setEnabled(True)
     window.cond_method_combo.setCurrentText("eflux2")
     window.run_condition_comparison()  # must not raise
-    assert "condA" in window.cond_summary.text() and "condB" in window.cond_summary.text()
+    assert (
+        "condA" in window.cond_summary.text() and "condB" in window.cond_summary.text()
+    )
 
     # Identical conditions are rejected with a clear message, not a crash.
     window.cond_target_combo.setCurrentText("condA")
@@ -281,7 +310,9 @@ def test_export_table_csv(app, tmp_path):
     out = tmp_path / "fluxes.csv"
     from qtpy import QtWidgets
 
-    QtWidgets.QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (str(out), "CSV"))
+    QtWidgets.QFileDialog.getSaveFileName = staticmethod(
+        lambda *a, **k: (str(out), "CSV")
+    )
     window.export_table_csv()
     assert out.exists()
     header = out.read_text().splitlines()[0]
@@ -294,7 +325,9 @@ def test_comparison_gene_knockout(app):
     window.comparison_method_combo.setCurrentText("MOMA (L2)")
     window.template_combo.setCurrentText("pfba")
     window.ko_level_combo.setCurrentText("gene")
-    _select_ko(window, ["g2"])  # disease-branch gene -> blocks R2 -> reroute through R3/R5
+    _select_ko(
+        window, ["g2"]
+    )  # disease-branch gene -> blocks R2 -> reroute through R3/R5
     window.run_comparison()
     assert "gene g2" in window.comparison_summary.text()
     assert "1 reactions blocked" in window.comparison_summary.text()

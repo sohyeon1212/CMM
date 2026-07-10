@@ -25,7 +25,9 @@ def test_glucose_anaerobic_closes_oxygen(ecoli_core):
 
 def test_acetate_medium_switches_carbon_source(ecoli_core):
     apply_medium(ecoli_core, "acetate_aerobic")
-    assert ecoli_core.reactions.EX_glc__D_e.lower_bound == pytest.approx(0.0)  # glucose closed
+    assert ecoli_core.reactions.EX_glc__D_e.lower_bound == pytest.approx(
+        0.0
+    )  # glucose closed
     assert ecoli_core.reactions.EX_ac_e.lower_bound == pytest.approx(-10.0)
     assert ecoli_core.slim_optimize() == pytest.approx(0.1733, abs=1e-3)
 
@@ -46,3 +48,8 @@ def test_preset_lookup_unknown_raises():
     with pytest.raises(KeyError, match="unknown preset medium"):
         preset_medium("nonsense")
     assert set(PRESET_MEDIA) >= {"glucose_aerobic", "glucose_anaerobic"}
+
+
+def test_medium_rejects_negative_uptake(ecoli_core):
+    with pytest.raises(ValueError, match="non-negative"):
+        Medium("bad", {"EX_glc__D_e": -1.0}).apply_to(ecoli_core)

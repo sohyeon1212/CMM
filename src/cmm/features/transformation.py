@@ -43,12 +43,18 @@ def direction_from_states(
 ) -> DirectionMap:
     """Per-reaction desired flux-value direction to go from source to target (B − A)."""
 
-    keys = set(reactions) if reactions is not None else set(source.fluxes) | set(target.fluxes)
+    keys = (
+        set(reactions)
+        if reactions is not None
+        else set(source.fluxes) | set(target.fluxes)
+    )
     directions: dict[str, int] = {}
     for rid in keys:
         delta = target.get(rid) - source.get(rid)
         directions[rid] = 1 if delta > tol else (-1 if delta < -tol else 0)
-    return DirectionMap(directions=directions, metadata={"from": source.name, "to": target.name})
+    return DirectionMap(
+        directions=directions, metadata={"from": source.name, "to": target.name}
+    )
 
 
 def transformation_targets(
@@ -60,15 +66,21 @@ def transformation_targets(
     perturbation: Literal["gene", "reaction"] = "gene",
     targets: Iterable[str] | None = None,
     order: Literal[1, 2] = 2,
-    alpha: float = 0.9,
+    alpha: float = 0.66,
 ) -> TargetRanking:
     """Rank knockouts that move the source flux state toward the target flux state."""
 
     if method == "mta":
         direction = direction_from_states(source_state, target_state)
         ranking = revert_targets(
-            model, None, source_state, direction,
-            targets=targets, method="rmta", alpha=alpha, perturbation=perturbation,
+            model,
+            None,
+            source_state,
+            direction,
+            targets=targets,
+            method="mta",
+            alpha=alpha,
+            perturbation=perturbation,
         )
         return TargetRanking(
             method="transform_mta", targets=ranking.targets, metadata=ranking.metadata
@@ -76,6 +88,10 @@ def transformation_targets(
 
     if method != "moma":
         raise ValueError(f"unknown method {method!r}; use 'moma' or 'mta'")
+    if perturbation not in {"gene", "reaction"}:
+        raise ValueError("perturbation must be 'gene' or 'reaction'")
+    source_state.validate()
+    target_state.validate()
 
     solvers.require("QP", model.solver.interface, feature="MOMA transformation targets")
     compare_rxns = [r.id for r in model.reactions]

@@ -1,62 +1,76 @@
 # Architecture
 
-CMM is organized around simulation workflows instead of inherited desktop menus.
+CMM separates numerical services from the desktop interface. The Python API and GUI call the
+same functions, and result objects carry enough metadata to reproduce a run.
 
-## Layers
+## Runtime layers
 
-- `cmm.core`: conditions, constraints, objectives, the `FluxState` reference primitive,
-  solver capability detection, and solver-neutral result objects (including `TargetRanking`)
-- `cmm.io`: SBML import/export and the new project archive format
-- `cmm.visualization`: map state, flux coloring, and interactive slider state
-- `cmm.features`: workflow services for advanced analysis methods
-- `cmm.app`: desktop shell and view models
+- `cmm.core` owns conditions, media, FBA/pFBA/FVA, immutable flux states, solver-capability
+  checks, common ranking types, and deterministic provenance.
+- `cmm.omics` maps expression through GPR rules, runs E-Flux2 or LAD, predicts multiple
+  conditions, and derives source-to-target reaction directions.
+- `cmm.features` owns perturbation resolution, MOMA/ROOM, theoretical yield and production
+  scans, OptKnock/RobustKnock, MTA/rMTA, and A→B transformation ranking.
+- `cmm.visualization` converts already-computed results into matplotlib figures. It does not
+  solve metabolic models.
+- `cmm.app` is the Qt shell. It validates files and UI state, dispatches long analyses to a
+  worker, and renders service results.
 
-Only `cmm.app` should depend on Qt. Core and feature modules should be testable without
-a GUI process.
+Only `cmm.app` depends on Qt. The scientific services are importable and testable in a
+headless process.
 
-## Solver Capability
+## State and data flow
 
-The cobra default solver is LP-only. Each service declares the solver class it needs (LP,
-QP, or MILP/MIQP) and checks it at call time via `core.solvers`. LP and QP run on an open
-stack; MILP/MIQP features degrade to a typed `SolverCapabilityError` with an actionable
-message when no commercial solver is configured. This keeps the open install usable while
-documenting which features need CPLEX/Gurobi.
+```text
+COBRA model + Condition/expression
+              │
+              ▼
+       core / omics service ──► FluxState or typed result
+              │                         │
+              ▼                         ▼
+       feature service             provenance metadata
+              │                 (model SHA-256, solver,
+              ▼                  versions, parameters)
+       table / ranking / figure
+```
 
-## Reference Flux State
+`FluxState` is the shared complete reaction-flux vector used by MOMA, ROOM, MTA/rMTA, and
+transformation workflows. It rejects empty or non-finite state vectors and records its
+origin. A source state must be regenerated after model, medium, bound, or expression changes.
+The GUI clears these derived states whenever a new model is loaded.
 
-`core.flux_state.FluxState` is a named, serializable flux vector with provenance (pFBA,
-sampling mean, or imported). It is the shared reference for MOMA, ROOM, and revert-
-metabolism, so distance-to-reference logic lives in one place.
+## Solver contracts
 
-## Project Model
+Every method checks the mathematical capability it actually requires:
 
-The primary editable state is a condition:
+| Capability | Methods |
+|---|---|
+| LP | FBA, pFBA, FVA, LAD, yield, envelope, FSEOF, FVSEOF |
+| MILP | ROOM; OptKnock/RobustKnock through StrainDesign |
+| QP | L2 MOMA, E-Flux2, explicitly named `rmta_continuous` heuristic |
+| MIQP | published MTA and published rMTA |
 
-- name
-- reaction bound overrides
-- objective coefficients and direction
-- optional notes
+GLPK supplies LP and MILP. Gurobi and CPLEX supply all four classes; their license limits
+still determine feasible model size. A method never silently changes its formulation when a
+capability is missing. In particular, E-Flux2 raises `SolverCapabilityError` unless its
+explicitly named `allow_l1_fallback=True` approximation is requested.
 
-The condition model intentionally excludes scenario templates, separate scenario files,
-media-management state, and legacy annotation conventions.
+## Scientific boundaries
 
-## Included Feature Boundaries
+Implemented and tested services are enumerated in `cmm.features.INCLUDED_FEATURES`. Dynamic
+FBA, random flux sampling, flux-response analysis, and enzyme-constrained modeling remain
+roadmap items; they are not exposed as shipped capabilities.
 
-- FBA/FVA: core services backed by cobra model objects
-- Flux visualization slider: maps normalized flux ranges to a rendering state
-- Dynamic FBA: time-course service with explicit exchange/update callbacks
-- MOMA/ROOM: perturbation services that compare reference and mutant states
-- Batch MOMA/ROOM: job runner over perturbation tables
-- Random sampling: sampler service returning typed flux sample tables
-- FSEOF/FVSEOF: objective-enforced scanning services
-- Omics integration: expression table normalization plus method-specific constraints
-- Enzyme-constrained modeling: separate model extension layer and import/export helpers
-- Flux response analysis: parameter sweep service over chosen bounds or objectives
-- OptKnock/RobustKnock: new design services with a dedicated product wizard
-- Revert metabolism: normalization-target service that ranks KOs by how well they move a
-  source `FluxState` toward a target state, using differential expression direction labels
+The following distinctions are intentional:
 
-## Removed Feature Boundaries
+- OptKnock uses the optimistic two-level formulation; RobustKnock uses the distinct
+  three-level worst-case formulation.
+- `rmta` is the published best/MOMA/worst pipeline and Equation 9; the historical continuous
+  approximation is available only as `rmta_continuous`.
+- FSEOF ranks a single biomass-optimal flux at each enforced product level. FVSEOF performs
+  FVA at each level and reports midpoint, forced-minimum magnitude, and range-width trends.
+- Boundary reactions, biomass, the target exchange, and reactions without a GPR are retained
+  in diagnostic tables but excluded from actionable target lists by default.
 
-The desktop app will not include EFM, thermodynamics, legacy MCS workflows, scenario
-templates, media management, or separate scenario file formats.
+See [VALIDATION.md](VALIDATION.md) for reference equations, test evidence, reproducibility
+commands, and limitations.

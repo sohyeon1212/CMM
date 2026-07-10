@@ -57,7 +57,9 @@ def test_flux_log_change_handles_zero_without_pseudocount_divzero():
 
 def test_flux_log_change_zero_pseudocount_is_guarded():
     # Even with pseudocount=0 (no smoothing), an all-zero or off->on reaction must not raise.
-    lc = flux_log_change({"R1": 0.0, "R2": 0.0}, {"R1": 0.0, "R2": 5.0}, pseudocount=0.0)
+    lc = flux_log_change(
+        {"R1": 0.0, "R2": 0.0}, {"R1": 0.0, "R2": 5.0}, pseudocount=0.0
+    )
     assert lc["R1"] == 0.0
     assert lc["R2"] == math.inf
 
@@ -67,6 +69,13 @@ def test_flux_log_change_switch_off_is_negative_inf():
     # hit log2(0/a); it must return -inf symmetrically with the switch-on (+inf) case.
     lc = flux_log_change({"R": 7.0}, {"R": 0.0}, pseudocount=0.0)
     assert lc["R"] == -math.inf
+
+
+def test_flux_log_change_rejects_invalid_values():
+    with pytest.raises(ValueError, match="pseudocount"):
+        flux_log_change({"R": 1.0}, {"R": 2.0}, pseudocount=-1.0)
+    with pytest.raises(ValueError, match="finite"):
+        flux_log_change({"R": float("nan")}, {"R": 2.0})
 
 
 def test_sign_flips_detects_reversal():

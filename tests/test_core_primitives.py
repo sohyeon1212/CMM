@@ -7,6 +7,7 @@ from cmm.core.flux_state import (
     reference_state_from_samples,
     reference_state_pfba,
 )
+from cmm.core.provenance import model_fingerprint, run_provenance
 from cmm.core.results import TargetRanking, TargetScore
 from cmm.core.solvers import SolverCapabilityError
 
@@ -71,6 +72,25 @@ def test_flux_state_roundtrip_serialization():
     assert restored.get("missing", -1.0) == -1.0
 
 
+@pytest.mark.parametrize(
+    "payload, message",
+    [
+        ({"fluxes": [1.0]}, "fluxes.*mapping"),
+        ({"fluxes": {"R1": 1.0}, "metadata": []}, "metadata.*mapping"),
+        ({"fluxes": {"R1": 1.0}, "provenance": "unknown"}, "provenance"),
+    ],
+)
+def test_flux_state_deserialize_rejects_malformed_payload(payload, message):
+    with pytest.raises(ValueError, match=message):
+        FluxState.deserialize(payload)
+
+
+@pytest.mark.parametrize("fluxes", [{}, {"R": float("nan")}, {"R": float("inf")}])
+def test_flux_state_rejects_empty_or_nonfinite_fluxes(fluxes):
+    with pytest.raises(ValueError):
+        FluxState(fluxes)
+
+
 def test_reference_state_pfba_routes_disease_branch(branched_model):
     ref = reference_state_pfba(branched_model, name="disease")
     assert ref.provenance == "pfba"
@@ -88,6 +108,21 @@ def test_reference_state_from_samples():
     assert ref.provenance == "sampling_mean"
     assert ref.get("R1") == pytest.approx(2.0)
     assert ref.metadata["n_samples"] == 2
+
+
+def test_model_fingerprint_is_deterministic_and_bound_sensitive(branched_model):
+    first = model_fingerprint(branched_model)
+    assert first == model_fingerprint(branched_model.copy())
+    branched_model.reactions.R2.upper_bound = 9.0
+    assert model_fingerprint(branched_model) != first
+
+
+def test_run_provenance_records_reproducibility_fields(branched_model):
+    provenance = run_provenance(branched_model, alpha=0.66)
+    assert provenance["model_id"] == "branched"
+    assert len(provenance["model_sha256"]) == 64
+    assert provenance["solver"]
+    assert provenance["parameters"] == {"alpha": 0.66}
 
 
 # --- target ranking --------------------------------------------------------

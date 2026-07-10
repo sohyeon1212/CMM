@@ -34,6 +34,16 @@ def test_invalid_bound_is_rejected():
         condition.validate()
 
 
+def test_nonfinite_and_duplicate_bounds_are_rejected():
+    with pytest.raises(ValueError, match="finite"):
+        ReactionBound("R1", lower_bound=float("nan")).validate()
+    duplicate = Condition(
+        bounds=(ReactionBound("R1", upper_bound=1), ReactionBound("R1", upper_bound=2))
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        duplicate.validate()
+
+
 def test_condition_bounds_set_atomically_when_crossing(toy_model):
     # SOURCE_A starts at (0, 10). Raising both bounds above the current upper yields a valid
     # final pair (20, 30), but assigning lower=20 before upper would transiently exceed the

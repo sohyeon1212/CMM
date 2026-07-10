@@ -1,5 +1,8 @@
 # Build Ledger (append-only)
 
+> Archived implementation ledger. Entries describe the state at the time they were written,
+> not the validated 0.3.0 method contracts.
+
 Durable record of the autonomous build loop. Event types: START, GENERATE, VERIFY(PASS|FAIL),
 FIX, RULE, CHECKPOINT, DEFERRED, CLOSE. Verifier is always a separate agent from the generator.
 

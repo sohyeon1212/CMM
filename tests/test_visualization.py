@@ -53,7 +53,11 @@ def test_fseof_figure(ecoli_core, tmp_path):
 
 def test_fvseof_figure(ecoli_core, tmp_path):
     result = fvseof(
-        ecoli_core, SUCC, BIOMASS, n_steps=4, aerobic=False,
+        ecoli_core,
+        SUCC,
+        BIOMASS,
+        n_steps=4,
+        aerobic=False,
         reactions=["FRD7", "PPC", "MDH", "FUM", "SUCCt3", "EX_succ_e"],
     )
     fig = fvseof_figure(result, top_n=4)
@@ -106,18 +110,40 @@ def _mini_escher_map(path):
     body = {
         "reactions": {
             "1": {
-                "bigg_id": "R1", "label_x": 50, "label_y": 50,
-                "metabolites": [{"bigg_id": "a_c", "coefficient": -1},
-                                {"bigg_id": "b_c", "coefficient": 1}],
-                "segments": {"s1": {"from_node_id": "10", "to_node_id": "11",
-                                    "b1": None, "b2": None}},
+                "bigg_id": "R1",
+                "label_x": 50,
+                "label_y": 50,
+                "metabolites": [
+                    {"bigg_id": "a_c", "coefficient": -1},
+                    {"bigg_id": "b_c", "coefficient": 1},
+                ],
+                "segments": {
+                    "s1": {
+                        "from_node_id": "10",
+                        "to_node_id": "11",
+                        "b1": None,
+                        "b2": None,
+                    }
+                },
             }
         },
         "nodes": {
-            "10": {"node_type": "metabolite", "x": 0, "y": 0, "bigg_id": "a_c",
-                   "label_x": 0, "label_y": 0},
-            "11": {"node_type": "metabolite", "x": 100, "y": 100, "bigg_id": "b_c",
-                   "label_x": 100, "label_y": 100},
+            "10": {
+                "node_type": "metabolite",
+                "x": 0,
+                "y": 0,
+                "bigg_id": "a_c",
+                "label_x": 0,
+                "label_y": 0,
+            },
+            "11": {
+                "node_type": "metabolite",
+                "x": 100,
+                "y": 100,
+                "bigg_id": "b_c",
+                "label_x": 100,
+                "label_y": 100,
+            },
         },
         "text_labels": {},
         "canvas": {"x": -10, "y": -10, "width": 120, "height": 120},

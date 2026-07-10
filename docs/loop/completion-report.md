@@ -1,5 +1,8 @@
 # CMM Autonomous Build — Completion Report
 
+> Archived implementation-loop record from before 0.3.0. Method descriptions and test
+> counts here are historical; `docs/VALIDATION.md` is authoritative.
+
 Self-paced PDCA loop over the updated CMM plan, with the revert-metabolism (normalization
 target) feature as the headline. Generator and verifier were always separate agents
 (Strategy 1); failures were turned into durable rules (Strategy 2); every story had an

@@ -1,0 +1,7 @@
+include CHANGELOG.md
+include CITATION.cff
+include LICENSE
+include uv.lock
+recursive-include docs *.md *.png
+recursive-include tests *.py
+include test_data/*.json

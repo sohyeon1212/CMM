@@ -7,6 +7,7 @@ from cmm.core.flux_state import (
     reference_state_pfba,
 )
 from cmm.core.media import PRESET_MEDIA, Medium, apply_medium, preset_medium
+from cmm.core.provenance import model_fingerprint, run_provenance
 from cmm.core.results import TargetRanking, TargetScore
 from cmm.core.simulation import FluxRange, FluxSolution, fba, fva, pfba
 from cmm.core.solvers import (
@@ -41,9 +42,11 @@ __all__ = [
     "capabilities",
     "fba",
     "fva",
+    "model_fingerprint",
     "reference_state_from_samples",
     "reference_state_pfba",
     "require",
+    "run_provenance",
     "solver_status",
     "supports",
     "with_condition",

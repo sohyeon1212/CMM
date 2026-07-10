@@ -9,7 +9,7 @@
 # Usage:
 #   ./install.sh                      # core + desktop GUI + strain design + gurobipy, into ./.venv
 #   ./install.sh --dev                # also install the test/lint tooling (pytest, ruff)
-#   ./install.sh --no-gurobi          # skip gurobipy (open GLPK runs LP only: FBA/pFBA/FVA/FSEOF)
+#   ./install.sh --no-gurobi          # skip gurobipy (open GLPK runs LP/MILP, not QP/MIQP)
 #   ./install.sh --core-only          # core library only (no GUI / strain-design extras)
 #   ./install.sh --python python3.12  # use a specific interpreter
 #   ./install.sh --venv /path/to/venv # install into a chosen venv directory (default: ./.venv)
@@ -36,6 +36,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$WITH_GUROBI" -eq 1 ]; then
+  EXTRAS="${EXTRAS:+$EXTRAS,}solver-gurobi"
+fi
 
 # --- locate a Python >= 3.10 ------------------------------------------------------------
 if [ -z "$PYTHON" ]; then
@@ -75,11 +79,8 @@ else
   "$VPY" -m pip install -e .
 fi
 
-if [ "$WITH_GUROBI" -eq 1 ]; then
-  echo "==> Installing gurobipy (free size-limited license; enables MOMA/ROOM/OptKnock/MTA on small models)"
-  "$VPY" -m pip install gurobipy
-else
-  echo "==> Skipping gurobipy (open GLPK runs FBA/pFBA/FVA/FSEOF; QP/MILP/MIQP features need Gurobi or CPLEX)"
+if [ "$WITH_GUROBI" -eq 0 ]; then
+  echo "==> Skipping gurobipy (GLPK supports LP/MILP; L2 MOMA/E-Flux2 need QP and published MTA/rMTA need MIQP)"
 fi
 
 # --- done ------------------------------------------------------------------------------

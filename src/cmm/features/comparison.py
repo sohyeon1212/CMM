@@ -22,11 +22,12 @@ from typing import Literal
 import pandas as pd
 from cobra import Model
 from cobra.core import Solution
+from cobra.exceptions import OptimizationError
 from cobra.flux_analysis import moma as _cobra_moma
 from cobra.flux_analysis import room as _cobra_room
 
 from cmm.core import solvers
-from cmm.core.flux_state import FluxState
+from cmm.core.flux_state import FluxState, Provenance
 from cmm.core.simulation import fba as _fba
 from cmm.core.simulation import pfba as _pfba
 from cmm.features._perturbation import Perturbation
@@ -49,18 +50,38 @@ def reference_flux(
     """
 
     if method == "fba":
-        fluxes = _fba(model).fluxes
+        simulation_result = _fba(model)
+        if simulation_result.status != "optimal":
+            raise ValueError(f"FBA reference solve is {simulation_result.status}")
+        fluxes = simulation_result.fluxes
+        provenance: Provenance = "fba"
+        metadata = simulation_result.metadata
     elif method == "pfba":
-        fluxes = _pfba(model).fluxes
+        simulation_result = _pfba(model)
+        if simulation_result.status != "optimal":
+            raise ValueError(f"pFBA reference solve is {simulation_result.status}")
+        fluxes = simulation_result.fluxes
+        provenance = "pfba"
+        metadata = simulation_result.metadata
     elif method in ("lad", "eflux2"):
         if gene_expression is None:
             raise ValueError(f"method {method!r} requires gene_expression")
         from cmm.omics.expression import integrate_expression
 
-        fluxes = integrate_expression(model, gene_expression, method=method).fluxes
+        omics_result = integrate_expression(model, gene_expression, method=method)
+        if omics_result.status != "optimal" or not omics_result.fluxes:
+            raise ValueError(f"{method} reference solve is {omics_result.status}")
+        fluxes = omics_result.fluxes
+        provenance = "imported"
+        metadata = omics_result.metadata
     else:
         raise ValueError(f"unknown reference method {method!r}")
-    return FluxState(fluxes, name=name or f"{method}_reference", provenance="imported")
+    return FluxState(
+        fluxes,
+        name=name or f"{method}_reference",
+        provenance=provenance,
+        metadata={"source_method": method, **metadata},
+    )
 
 
 @dataclass(frozen=True)
@@ -85,6 +106,15 @@ def _reference_solution(model: Model, reference: FluxState) -> Solution:
     flux.
     """
 
+    missing = [
+        reaction.id
+        for reaction in model.reactions
+        if reaction.id not in reference.fluxes
+    ]
+    if missing:
+        raise ValueError(
+            f"reference flux is missing {len(missing)} model reactions: {', '.join(missing[:5])}"
+        )
     fluxes = pd.Series(
         {r.id: reference.get(r.id) for r in model.reactions}, dtype=float
     )
@@ -94,7 +124,9 @@ def _reference_solution(model: Model, reference: FluxState) -> Solution:
     return Solution(objective_value=objective_value, status="optimal", fluxes=fluxes)
 
 
-def moma(model: Model, reference: FluxState, *, linear: bool = False) -> ComparisonResult:
+def moma(
+    model: Model, reference: FluxState, *, linear: bool = False
+) -> ComparisonResult:
     """Minimal-adjustment flux state nearest the reference.
 
     ``linear=True`` solves the L1 variant (LP, runs on any solver). ``linear=False`` solves
@@ -104,12 +136,23 @@ def moma(model: Model, reference: FluxState, *, linear: bool = False) -> Compari
     method: ComparisonMethod = "moma_l1" if linear else "moma_l2"
     if not linear:
         solvers.require("QP", model.solver.interface, feature="L2 MOMA")
+    # COBRApy/Gurobi may leak a backend ``GurobiError`` while reading primal values from an
+    # infeasible solve.  Probe feasibility without retrieving a full solution first.
+    model.slim_optimize(error_value=None)
+    if model.solver.status == "infeasible":
+        return ComparisonResult(
+            method=method, status="infeasible", distance=float("nan")
+        )
 
     reference_solution = _reference_solution(model, reference)
     try:
         solution = _cobra_moma(model, solution=reference_solution, linear=linear)
-    except Exception:  # cobra raises when the perturbed model is infeasible (e.g. lethal KO)
-        return ComparisonResult(method=method, status="infeasible", distance=float("nan"))
+    except (
+        OptimizationError
+    ):  # cobra raises for an infeasible perturbed model (e.g. lethal KO)
+        return ComparisonResult(
+            method=method, status="infeasible", distance=float("nan")
+        )
     return _result(method, solution)
 
 
@@ -127,25 +170,42 @@ def room(
     the LP relaxation.
     """
 
+    if delta < 0 or epsilon < 0:
+        raise ValueError("ROOM delta and epsilon must be non-negative")
     if not linear:
         solvers.require("MILP", model.solver.interface, feature="ROOM")
+    model.slim_optimize(error_value=None)
+    if model.solver.status == "infeasible":
+        return ComparisonResult(
+            method="room", status="infeasible", distance=float("nan")
+        )
 
     reference_solution = _reference_solution(model, reference)
     try:
         solution = _cobra_room(
-            model, solution=reference_solution, linear=linear, delta=delta, epsilon=epsilon
+            model,
+            solution=reference_solution,
+            linear=linear,
+            delta=delta,
+            epsilon=epsilon,
         )
-    except Exception:  # infeasible perturbed model
-        return ComparisonResult(method="room", status="infeasible", distance=float("nan"))
+    except OptimizationError:  # infeasible perturbed model
+        return ComparisonResult(
+            method="room", status="infeasible", distance=float("nan")
+        )
     return _result("room", solution)
 
 
 def _result(method: ComparisonMethod, solution: Solution) -> ComparisonResult:
     distance = (
-        float(solution.objective_value) if solution.objective_value is not None else float("nan")
+        float(solution.objective_value)
+        if solution.objective_value is not None
+        else float("nan")
     )
     fluxes = {rid: float(v) for rid, v in solution.fluxes.items()}
-    return ComparisonResult(method=method, status=solution.status, distance=distance, fluxes=fluxes)
+    return ComparisonResult(
+        method=method, status=solution.status, distance=distance, fluxes=fluxes
+    )
 
 
 def _objective_reaction_id(model: Model) -> str | None:
@@ -171,6 +231,8 @@ def knockout_comparison(
     is restored on return. Method keys: ``moma_l2`` (QP), ``moma_l1`` (LP), ``room`` (MILP).
     """
 
+    if method not in {"moma_l1", "moma_l2", "room"}:
+        raise ValueError("method must be 'moma_l1', 'moma_l2', or 'room'")
     with model:
         for rid in reaction_ids:
             model.reactions.get_by_id(rid).bounds = (0.0, 0.0)
@@ -212,7 +274,12 @@ def batch_comparison(
     rows: list[BatchComparisonRow] = []
     for pert in perturbations:
         result = knockout_comparison(
-            model, reference, pert.reaction_ids, method=method, delta=delta, epsilon=epsilon
+            model,
+            reference,
+            pert.reaction_ids,
+            method=method,
+            delta=delta,
+            epsilon=epsilon,
         )
         growth = (
             float(result.fluxes.get(objective, float("nan")))

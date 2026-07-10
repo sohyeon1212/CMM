@@ -90,7 +90,9 @@ def run_scenarios(model_path: str | None = None, prefix: str = "genome") -> list
         window.run_omics_demo()
         saved.append(_capture(window, app, f"{prefix}_06_omics_eflux2"))
 
-    print(f"model {model.id}: {len(model.reactions)} reactions, {len(model.genes)} genes")
+    print(
+        f"model {model.id}: {len(model.reactions)} reactions, {len(model.genes)} genes"
+    )
     return saved
 
 

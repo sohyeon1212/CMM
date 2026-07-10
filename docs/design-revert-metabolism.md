@@ -1,150 +1,101 @@
-# Design: Revert Metabolism (Normalization-Target Prediction)
+# Revert metabolism: MTA and rMTA
 
-## Purpose
+## Scope
 
-Predict gene/reaction interventions that move a perturbed metabolic state (for example a
-disease, stress, or off-spec production state) back toward a reference "normal" state.
+CMM ranks gene or reaction knockouts intended to move a source metabolic state toward a
+target state. `mta` implements the MTA mixed-integer quadratic formulation of Yizhak et al.
+(2013). `rmta` implements the robust best-case/MOMA/worst-case workflow and Equation 9 of
+Valcárcel et al. (2019). `mta_miqp` is retained as an API alias for `mta`.
 
-This is the inverse of the production-optimization workflows already in scope (FSEOF,
-OptKnock, RobustKnock), which push metabolism *away* from wild type toward a product.
-Revert-metabolism instead asks: which knockout makes the diseased flux distribution look
-most like the healthy one? No legacy feature covers this, so it is a net-new
-capability rather than a reimplementation.
-
-The method is the Metabolic Transformation Algorithm (MTA, Yizhak et al. 2013) and its
-robust variant rMTA (Valcárcel et al. 2019). rMTA is the recommended default because it
-uses a continuous QP formulation that scales to genome-scale all-gene knockout screens and
-does not require a MIQP solver.
+The former continuous approximation is not labeled as rMTA. It is available only as
+`rmta_continuous` and its result metadata reports `formulation="continuous_heuristic"`.
 
 ## Inputs
 
-- `model`: a cobra model.
-- `source_condition` (`core.Condition`): constraints describing the perturbed/source state.
-- `reference_state` (`core.FluxState`): the source-state reference flux vector `v_ref`,
-  produced by pFBA on the source condition or by the mean of a sampling run. rMTA is
-  sensitive to `v_ref`; sampling-mean is preferred for genome-scale models.
-- `direction` (`omics.DirectionMap`): per-reaction desired change derived from two-state
-  differential expression (target vs source). Each reaction is labeled:
-  - `+1` forward / increase  (reaction should carry more flux in the normal state)
-  - `-1` backward / decrease
-  - `0`  steady / unchanged
-- `targets` (optional): the gene or reaction knockouts to score. Defaults to all genes.
-- `params`: `alpha` (transformation weight), `epsilon` (numerical floor), and the
-  perturbation mode (`gene` or `reaction`).
+- `model`: a COBRApy model with the source-condition bounds.
+- `source_condition`: optional bound/objective overrides applied during target scoring.
+- `reference_state`: a complete, finite `FluxState` for the source condition. Every model
+  reaction must be present.
+- `direction`: a `DirectionMap` with values `+1` (desired increase), `-1` (desired decrease),
+  or `0` (steady).
+- `targets`: optional candidate genes or reactions. Omitting it screens all candidates.
+- `alpha`: MTA weighting, in `[0, 1]`; the rMTA paper default used by CMM is `0.66`.
+- `epsilon`: minimum directional change represented by each MTA binary switch.
+- `parameter_k`: Equation 9 scale factor, default `100`.
 
-`reference_state` comes from Phase 3 and `direction` from Phase 5, so this feature is pure
-composition over primitives that already exist by the time it lands.
+For transcript-style gene identifiers such as `g2.1` and `g2.2`,
+`transcript_separator="."` groups transcripts into a single gene perturbation before GPR
+evaluation.
 
-## Algorithm (rMTA, continuous)
+## Published MTA solve
 
-For an unperturbed reference flux `v_ref` and a knockout that fixes a reaction set to zero,
-solve a MOMA-style quadratic program that trades off two terms:
+For steady reactions, MTA penalizes squared deviation from the source flux. Directional
+reactions receive a binary success switch constrained by `epsilon` and reaction-specific
+big-M bounds. After dropping constants, CMM minimizes
 
-1. **Steady fidelity** — keep `steady` reactions (`direction == 0`) close to `v_ref`:
-   minimize `sum_{i in steady} (v_i - v_ref_i)^2`.
-2. **Desired transformation** — reward movement of `forward`/`backward` reactions in the
-   labeled direction, weighted by `alpha`:
-   for `forward` reward `(v_i - v_ref_i)`, for `backward` reward `(v_ref_i - v_i)`.
-
-rMTA runs this QP three times per knockout with different `alpha` weightings to obtain:
-
-- `bTS` — best-case transformation score (`alpha`: reward desired direction)
-- `mTS` — MOMA baseline score (`alpha = 0`: pure minimal adjustment)
-- `wTS` — worst-case score (`-alpha`: reward the wrong direction, adversarial)
-
-The per-knockout transformation score `TS(v)` is the magnitude-weighted net agreement
-between the achieved flux change `(v - v_ref)` and the `direction` labels, normalized by the
-steady disturbance: `TS = (correct_movement - wrong_movement) / (1 + steady_deviation)`.
-
-They combine into a robust score `rTS` (implemented in `_robust_score`):
-
-```
-rTS = mTS + wTS               if bTS > 0 and wTS >= 0   (transforms even adversarially)
-rTS = max(0, mTS + wTS)       if bTS > 0                (helps best-case but reversible)
-rTS = 0                       if bTS <= 0               (cannot transform at all)
+```text
+(1 - alpha) · Σsteady (v_i - vref_i)² - (alpha / 2) · Σdirectional z_i
 ```
 
-A knockout ranks high only when it transforms in the best case (`bTS > 0`) **and** its
-worst-case behaviour is still beneficial; the score is anchored on the guaranteed
-(worst-case) transformation plus the neutral MOMA signal. Note: this differs from the
-textbook `mTS·(bTS - wTS)` gate, which requires `wTS < 0` and therefore zeros out knockouts
-that *force* a correct transformation (e.g. a knockout whose only feasible reroute is the
-healthy branch). The additive worst-case form is the one validated to rank such forced-
-reversion targets correctly, so it is the implemented default.
+subject to steady-state mass balance, reaction bounds, the active knockout, and the binary
+direction constraints. This is an MIQP. The solve is built on a model copy so binary variables
+cannot leak between candidates.
 
-The original MTA (a MIQP that maximizes the count of successfully transformed reactions) is
-offered as an optional high-fidelity mode behind the MILP/MIQP solver gate. The two modes
-share inputs, the perturbation runner, and the result type; only the per-KO solve differs.
+## Transformation score and robust score
 
-## Outputs
+For an optimal candidate flux `v`, the published L1 transformation score is
 
-`core.results.TargetRanking`: an ordered list of `(target_id, score, detail)` rows with
-`score = rTS` (or MTA `TS` in MIQP mode), sorted descending, plus run metadata (method,
-alpha, reference provenance, solver). Exportable as a deterministic table like every other
-result service. The `mta` (single-QP) and `mta_miqp` modes are single-solve and have no
-robustness gate, so they score by `TS` directly; non-reverting knockouts there approach but
-do not always equal exactly zero (a forced reaction may move by the indicator tolerance).
-The clear separation between the top target and the rest is preserved in every mode.
-
-## Module Layout
-
-```
-cmm/
-  core/
-    flux_state.py        # FluxState reference primitive (Phase 1/3)
-    results.py           # TargetRanking (shared with FSEOF/OptKnock)
-    solvers.py           # capability detection + SolverCapabilityError
-  omics/
-    differential.py      # two-state diff expression -> DirectionMap (Phase 5)
-  features/
-    revert.py            # revert_targets(...) orchestration + scoring
-    _perturbation.py     # shared KO enumeration/runner (also used by batch MOMA/ROOM)
+```text
+TS = (successful directional movement - unsuccessful directional movement)
+     / steady-reaction L1 disturbance
 ```
 
-Public surface (solver-neutral, GUI-free, mirrors the existing `fba`/`fva` style):
+If the denominator is zero, CMM returns `0` for `0/0`, `+∞` for a beneficial nonzero
+numerator, and `-∞` for an adverse one. These cases remain sortable and are not converted to
+arbitrary finite constants.
 
-```python
-def revert_targets(
-    model: Model,
-    source_condition: Condition,
-    reference_state: FluxState,
-    direction: DirectionMap,
-    *,
-    targets: Iterable[str] | None = None,
-    method: Literal["rmta", "mta"] = "rmta",
-    alpha: float = 0.9,
-    perturbation: Literal["gene", "reaction"] = "gene",
-) -> TargetRanking: ...
+Robust rMTA performs three candidate solves:
+
+1. `bTS`: published MTA in the requested direction.
+2. `mTS`: full L2 MOMA relative to the source state.
+3. `wTS`: published MTA after swapping forward and backward direction sets, scored against
+   that swapped direction.
+
+The final score follows Equation 9:
+
+```text
+if bTS > 0 and mTS > 0 and wTS < 0:
+    rTS = mTS · K · (bTS - wTS)
+else:
+    rTS = mTS
 ```
 
-## Performance
+Non-optimal candidates receive `-∞`; the ranking metadata records the count. Every row exposes
+`bTS`, `mTS`, and `wTS` for audit.
 
-Genome-scale x all-gene KO is the expensive case (one-to-three QP solves per gene).
+## Source-state preprocessing
 
-- Reuse the Phase 3 batch perturbation runner for enumeration and parallel solving.
-- Solve inside a single persistent `model` context, mutating only the KO bounds per
-  iteration and restoring them, to avoid rebuilding the problem.
-- Warm-start each KO from `v_ref`.
-- Support a candidate-subset `targets` list so the GUI can score a shortlist interactively
-  before committing to a full screen.
+The original MTA/rMTA studies construct the source model with expression contextualization
+and flux sampling. CMM's desktop workflow instead creates a deterministic source state by
+running E-Flux2 on the source expression at full objective (`objective_fraction=1.0`) and
+derives source→target directions from differential expression plus GPR logic. This is a
+documented CMM preprocessing variant; the optimization and score stages described above are
+the published formulations.
 
-## Testing
+For a manuscript that claims the complete original pipeline, supply an externally generated
+source `FluxState` from the study's contextualization/sampling protocol through the Python
+API. Record that provenance in the state metadata.
 
-The existing single-metabolite `toy_model` cannot exercise direction logic. Add a small
-branched toy model (one shared precursor feeding two competing branches) so a knockout on
-one branch demonstrably shifts flux toward the other. Cover:
+## Validation
 
-- `DirectionMap` construction from a two-state expression table with up/down/steady labels.
-- A KO that improves agreement scores above one that does not (ranking correctness).
-- `rTS == 0` when a KO helps best-case but hurts worst-case (robustness gate).
-- `SolverCapabilityError` raised for `method="mta"` when no MIQP solver is present.
-- Determinism of the exported `TargetRanking` table.
+`tests/test_revert.py` reconstructs the official COBRA Toolbox MTA test network independently
+and checks the published Equation 9 and expected target signs (`g4 > 0`, `g2 < 0` for MTA;
+`g4 > 0` for rMTA). `tests/test_scientific_sensitivity.py` verifies that the positive control
+and relative ranking persist across `alpha = 0.3, 0.4, 0.66, 0.8`.
 
-## Open Questions
+Primary references:
 
-- Default reference provenance: pFBA is reproducible but rMTA papers use sampling means.
-  Plan: allow both, default to pFBA for small models and recommend sampling for
-  genome-scale, recorded in `FluxState.provenance`.
-- Differential-expression thresholding (fold-change/percentile) belongs in the omics layer
-  so single-state and two-state methods share normalization; revert only consumes the
-  resulting labels.
+- Yizhak et al. (2013), *Nature Communications* 4:2632,
+  <https://doi.org/10.1038/ncomms3632>.
+- Valcárcel et al. (2019), *Bioinformatics* 35:4350–4355,
+  <https://doi.org/10.1093/bioinformatics/btz231>.

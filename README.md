@@ -2,174 +2,169 @@
 
 [![CI](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml/badge.svg)](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml)
 
-CMM is a desktop platform and Python library for genome-scale metabolic modeling: flux
-simulation, omics integration, metabolic-engineering design, and publication-quality
-visualization. It is built on [COBRApy](https://opencobra.github.io/cobrapy/) and runs every
-analysis through small, solver-neutral services so the same code powers both the GUI and
-scripts.
+CMM is a Python library and Qt desktop application for constraint-based metabolic modeling.
+The same solver-neutral services power scripts and the GUI: FBA/pFBA/FVA, omics integration,
+perturbation response, production scans, growth-coupled strain design, MTA/rMTA target
+ranking, and publication figures.
 
 ![CMM platform](docs/images/overview.png)
 
-## Features
+## Availability and implementation
 
-- **Simulation** — FBA, parsimonious FBA (pFBA), and FVA.
-- **Growth media** — preset media (glucose/acetate/glycerol, aerobic and anaerobic) applied
-  with one click; easy reaction-bound editing in the model table.
-- **Perturbation response** — MOMA (L1/L2) and ROOM against a reference *template* you choose
-  from FBA, pFBA, LAD, or E-Flux2, with **reaction or gene knockouts**, **multiple knockouts
-  at once**, and a **batch** mode that scores every gene/reaction knockout in one run.
-- **Omics integration** — single-state expression → flux with **E-Flux2** (Kim 2016) and
-  **LAD**; multi-condition prediction with log2 fold-change comparison between conditions.
-- **Production design** — theoretical yield (with CO₂-fixation disclosure), production
-  envelopes, FSEOF and **FVSEOF** (variability-aware: robustly-forced amplification targets),
-  and **OptKnock / RobustKnock** growth-coupled strain designs.
-- **Normalization targets** — robust MTA (rMTA) and a MOMA/MTA transformation finder that
-  ranks gene knockouts moving flux from one condition toward another.
-- **Visualization** — Escher-layout flux maps coloured by flux, plus paper-ready production
-  envelopes, FSEOF profiles, and flux comparisons (300 DPI, colour-blind-safe).
+Source code, documentation, test data, and reproducibility workflows are freely available
+at <https://github.com/jyryu3161/CMM> under the [MIT License](LICENSE). CMM is implemented in
+Python and supports Python 3.10–3.12 on Linux, macOS, and Windows. It provides both a Python
+API and a Qt desktop interface; installation and a complete test run require no registration.
+Tagged releases and their test data will remain available for at least two years after
+publication, with issue reporting through the repository's
+[GitHub Issues](https://github.com/jyryu3161/CMM/issues).
 
-## Installation
+Before journal submission, the exact `v0.3.0` release must additionally be archived in
+Zenodo or an equivalent long-term repository and its DOI added to this section,
+`CITATION.cff`, and the manuscript's Availability and Implementation statement.
 
-CMM requires Python ≥ 3.10 and runs on **Windows, macOS, and Linux** — it is pure Python
-(no platform-specific build), so one universal wheel installs everywhere. A QP/MILP solver
-(Gurobi or CPLEX) is recommended: the open GLPK solver runs FBA/pFBA/FVA, but MOMA, ROOM,
-revert-metabolism (QP), OptKnock (MILP), and original-MTA (MIQP) need a QP/MILP/MIQP-capable
-solver. `pip install gurobipy` ships a free size-limited license that already covers small
-models such as `e_coli_core`.
+## Implemented methods
 
-### Install a release (easiest)
+- Simulation: FBA, pFBA, FVA, editable conditions, and growth-media presets.
+- Perturbations: reaction/gene/multiple knockouts, L1/L2 MOMA, ROOM, and batch screens.
+- Omics: LAD, strict two-stage E-Flux2, multi-condition flux prediction, and log2 changes.
+- Production: theoretical yield with carbon/CO₂ disclosure, production envelopes, FSEOF,
+  and FVA-based FVSEOF with optional grouping-reaction constraints.
+- Strain design: distinct OptKnock and three-level RobustKnock modules through StrainDesign,
+  followed by independent maximum/guaranteed-product evaluation.
+- Normalization: published MTA MIQP, published rMTA best/MOMA/worst scoring, and an explicitly
+  labeled legacy continuous heuristic.
+- Auditability: deterministic model fingerprints and solver/package/parameter provenance on
+  numerical results.
 
-Each tagged version is published as a [GitHub Release](https://github.com/jyryu3161/CMM/releases)
-with a prebuilt wheel attached. Install it — with optional extras — on any OS:
+## Reproducible installation
+
+CMM requires Python 3.10–3.12. The publication environment is locked in `uv.lock`:
 
 ```bash
-# from a release wheel (replace the version)
-pip install "cmm[desktop,design] @ https://github.com/jyryu3161/CMM/releases/download/v0.2.1/cmm-0.2.1-py3-none-any.whl"
-
-# or straight from the repository at a tag (or @main for the latest)
-pip install "cmm[desktop,design] @ git+https://github.com/jyryu3161/CMM.git@v0.2.1"
+git clone https://github.com/jyryu3161/CMM.git
+cd CMM
+uv sync --frozen --all-extras
+uv run python -m cmm.app
 ```
 
-### Install from source with one command
-
-Clone the repository and run the installer — it creates an isolated virtual environment
-(`./.venv`), installs CMM (editable) with the desktop GUI, strain design, and the `gurobipy`
-solver, and prints the active solver:
+For a conventional editable installation:
 
 ```bash
-git clone https://github.com/jyryu3161/CMM.git && cd CMM
-
-./install.sh                # macOS / Linux (and Windows Git Bash / WSL)
-#   .\install.ps1           # Windows PowerShell
-
-# then launch the platform:
-.venv/bin/python -m cmm.app          # Windows: .venv\Scripts\python -m cmm.app
-```
-
-Useful flags (same names on `install.ps1` as `-Dev`, `-NoGurobi`, `-CoreOnly`):
-
-```bash
-./install.sh --dev          # also install tests + ruff
-./install.sh --no-gurobi    # open GLPK only (FBA/pFBA/FVA/FSEOF)
-./install.sh --core-only    # core library, no GUI / strain-design extras
-./install.sh --help         # all options (--python, --venv, ...)
-```
-
-### Install from source manually
-
-```bash
-git clone https://github.com/jyryu3161/CMM.git && cd CMM
-
-python -m pip install -e .                     # core library
-python -m pip install -e ".[desktop,design]"   # desktop GUI (Qt + matplotlib) + strain design
-python -m pip install -e ".[dev]"              # tests + ruff
-```
-
-Launch the GUI:
-
-```bash
+python -m pip install -e ".[desktop,design,solver-gurobi]"
 python -m cmm.app
 ```
 
-The Config menu reports the active solver and warns when it cannot run the full toolkit.
-
-### Releasing (maintainers)
-
-Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the sdist + wheel and
-attaches them to a new GitHub Release. Every push and PR is validated by
-`.github/workflows/ci.yml` (ruff + the full test suite on Ubuntu, Windows, and macOS).
+The cross-platform installers create `.venv` and install the desktop, strain-design, and
+Gurobi extras by default:
 
 ```bash
-git tag v0.2.1 && git push origin v0.2.1
+./install.sh                 # macOS / Linux / WSL
+# .\install.ps1             # Windows PowerShell
+./install.sh --dev           # also install test, coverage, lint, and type-check tools
+./install.sh --no-gurobi     # GLPK LP/MILP only
 ```
 
-## Quick start (Python API)
+Tagged wheels and source archives are published on the
+[GitHub Releases page](https://github.com/jyryu3161/CMM/releases). The current source version
+is 0.3.0.
+
+## Solver requirements
+
+Solver capability is checked before a solve; a method never silently changes formulation.
+
+| Class | Methods |
+|---|---|
+| LP | FBA, pFBA, FVA, LAD, yield, envelope, FSEOF, FVSEOF |
+| MILP | ROOM, OptKnock, RobustKnock |
+| QP | L2 MOMA, E-Flux2, `rmta_continuous` |
+| MIQP | published MTA and rMTA |
+
+GLPK supports LP/MILP. Gurobi and CPLEX support the full table, subject to their licenses and
+model-size limits. The free restricted Gurobi license is suitable for CMM's small QP/MIQP
+validation models; genome-scale mixed-integer studies generally require an appropriate
+full solver license.
+
+## Python quick start
 
 ```python
 from cobra.io import load_model
-from cmm.core import fba, pfba, apply_medium
-from cmm.features import theoretical_yield, optknock
+from cmm.core import apply_medium, fba, pfba
+from cmm.features import fseof, theoretical_yield
 
-model = load_model("textbook")          # e_coli_core
+model = load_model("textbook")
+apply_medium(model, "glucose_aerobic")
 
-apply_medium(model, "glucose_aerobic")  # preset medium
-print(fba(model).objective_value)       # 0.8739  (growth rate, 1/h)
-print(pfba(model).fluxes["Biomass_Ecoli_core"])
+growth = fba(model)
+minimal = pfba(model)
+yield_result = theoretical_yield(model, "EX_succ_e")
+scan = fseof(model, "EX_succ_e", n_steps=8, aerobic=False)
 
-# theoretical succinate yield from glucose
-y = theoretical_yield(model, "EX_succ_e")
-print(f"{y.molar_yield:.3f} mol/mol {y.substrate}")   # 1.638 (aerobic)
-
-# growth-coupled succinate knockout design
-designs = optknock(model, "EX_succ_e", max_knockouts=3)
-print(designs.best().knockouts)
+print(growth.objective_value, minimal.status)
+print(yield_result.molar_yield, yield_result.metadata["model_sha256"])
+print(scan.amplification_targets())
 ```
 
-Omics integration and condition comparison:
+Expression integration:
 
 ```python
 import pandas as pd
-from cmm.omics import predict_condition_fluxes, flux_log_change
+from cmm.omics import flux_log_change, predict_condition_fluxes
 
-expression = pd.read_csv("expression.csv").set_index("gene")  # genes × conditions
-fluxes = predict_condition_fluxes(model, expression, method="eflux2")
-log_fc = flux_log_change(fluxes.fluxes("condition_A"), fluxes.fluxes("condition_B"))
+expression = pd.read_csv("expression.csv").set_index("gene")
+predicted = predict_condition_fluxes(model, expression, method="eflux2")
+change = flux_log_change(
+    predicted.fluxes("condition_A"),
+    predicted.fluxes("condition_B"),
+)
 ```
 
-## GUI tutorial
+## Validation
 
-1. **Load a model** — start `python -m cmm.app`; the left panel lists every reaction with
-   editable Lower/Upper bounds.
-2. **Pick a medium** — on the *Simulation* tab choose a preset medium and click **Apply
-   medium**, then **Run FBA** / **Run pFBA**. Edit any bound in the table and re-run.
-3. **Compare perturbations** — on the *Comparison* tab pick a reference template
-   (FBA/pFBA/LAD/E-Flux2), a reaction to knock out, and MOMA or ROOM.
-4. **Design for a product** — on the *Production* tab compute theoretical yield, a production
-   envelope, or FSEOF amplification targets for a target exchange.
-5. **Integrate omics** — on the *Omics* tab load an expression CSV/TSV and run E-Flux2 or LAD.
-6. **Rank normalization targets** — on the *Revert Metabolism* tab load source and target
-   expression CSV/TSV files, then run rMTA/MTA to rank candidate gene or reaction knockouts.
-7. **Visualize** — the *Flux Map* tab renders an Escher-layout map coloured by the current
-   flux distribution.
-
-| Production envelope | Escher flux map |
-|---|---|
-| ![envelope](docs/images/production_envelope.png) | ![flux map](docs/images/flux_map.png) |
-
-| FSEOF targets | Multi-condition log-change |
-|---|---|
-| ![fseof](docs/images/fseof.png) | ![log change](docs/images/log_change.png) |
-
-## Correctness
-
-Every platform service is validated against direct COBRApy computations on `e_coli_core`
-(see `tests/test_validation.py`): FBA, pFBA, FVA, MOMA, theoretical yield, and media all match
-the cobra reference to numerical tolerance, so GUI results equal scripted results.
+The suite includes direct COBRApy cross-checks, a non-optional iJO1366 genome-scale test,
+the official COBRA Toolbox MTA test topology, E-Flux2's independent two-stage QP, target
+sensitivity checks, offscreen GUI workflows, static analysis, coverage, and distribution
+build verification.
 
 ```bash
-python -m pytest          # full test suite
+uv sync --frozen --all-extras
+QT_QPA_PLATFORM=offscreen uv run pytest -q -ra --strict-markers \
+  --durations=10 --cov=cmm --cov-branch --cov-report=term-missing --cov-fail-under=80
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run mypy src/cmm/core src/cmm/features src/cmm/omics
+uvx --from cffconvert==2.0.0 cffconvert --validate
+uv build && uvx twine check dist/*
 ```
 
-## License
+The exact evidence, method contracts, references, provenance schema, and limitations are in
+[Scientific validation and reproducibility](docs/VALIDATION.md). Passing these checks
+supports implementation correctness; it does not constitute wet-lab validation of a new
+biological prediction.
 
-Proprietary. See the project owner for terms.
+## Documentation
+
+- [Desktop and Python tutorial](docs/TUTORIAL.md)
+- [Scientific validation and reproducibility](docs/VALIDATION.md)
+- [MTA/rMTA design and equations](docs/design-revert-metabolism.md)
+- [Architecture and solver contracts](docs/architecture.md)
+- [Release changes](CHANGELOG.md)
+
+## Citation and license
+
+CMM is open source under the [MIT License](LICENSE). Citation metadata are machine-readable
+in [CITATION.cff](CITATION.cff); replace the contributor placeholder with the final manuscript
+authors and add the archived release DOI before submission. A manuscript should also cite the
+original papers for every method it uses, listed in `docs/VALIDATION.md`.
+
+## Release process
+
+Every push and pull request installs the frozen lockfile and runs the cross-platform quality
+gates. A tag must exactly match `pyproject.toml`; the release workflow reruns all checks,
+builds the wheel and sdist, validates them, installs the wheel in a clean environment, and
+then attaches the artifacts to a GitHub Release.
+
+```bash
+git tag v0.3.0
+git push origin v0.3.0
+```

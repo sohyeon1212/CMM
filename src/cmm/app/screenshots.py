@@ -111,8 +111,8 @@ def run_scenarios() -> list[Path]:
     window.run_revert(SOURCE_EXPRESSION, TARGET_EXPRESSION)
     saved.append(_capture(window, app, "05_revert_rmta"))
 
-    # 6. Revert-metabolism with the original-MTA MIQP mode.
-    window.method_combo.setCurrentText("mta_miqp")
+    # 6. Revert-metabolism with the published single-MTA MIQP mode.
+    window.method_combo.setCurrentText("mta")
     window.run_revert(SOURCE_EXPRESSION, TARGET_EXPRESSION)
     saved.append(_capture(window, app, "06_revert_mta_miqp"))
 

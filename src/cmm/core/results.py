@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+import math
 
 import pandas as pd
 
@@ -22,8 +23,16 @@ class TargetScore:
     detail: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "score", float(self.score))
-        object.__setattr__(self, "detail", {str(k): float(v) for k, v in self.detail.items()})
+        if not self.target_id:
+            raise ValueError("target_id must not be empty")
+        score = float(self.score)
+        if math.isnan(score):
+            raise ValueError("target score must not be NaN")
+        detail = {str(k): float(v) for k, v in self.detail.items()}
+        if any(math.isnan(value) for value in detail.values()):
+            raise ValueError("target score detail must not contain NaN")
+        object.__setattr__(self, "score", score)
+        object.__setattr__(self, "detail", detail)
 
 
 @dataclass(frozen=True)
@@ -36,6 +45,7 @@ class TargetRanking:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "targets", tuple(self.targets))
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
     def __iter__(self):
         return iter(self.targets)
@@ -50,7 +60,9 @@ class TargetRanking:
             self.targets,
             key=lambda t: (-t.score if descending else t.score, t.target_id),
         )
-        return TargetRanking(method=self.method, targets=tuple(ordered), metadata=self.metadata)
+        return TargetRanking(
+            method=self.method, targets=tuple(ordered), metadata=self.metadata
+        )
 
     def top(self, n: int) -> tuple[TargetScore, ...]:
         return self.sorted().targets[:n]
@@ -85,4 +97,6 @@ class TargetRanking:
     ) -> TargetRanking:
         items = scores.items() if isinstance(scores, Mapping) else scores
         targets = tuple(TargetScore(target_id=str(k), score=float(v)) for k, v in items)
-        return cls(method=method, targets=targets, metadata=dict(metadata or {})).sorted()
+        return cls(
+            method=method, targets=targets, metadata=dict(metadata or {})
+        ).sorted()

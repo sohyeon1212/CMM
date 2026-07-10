@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+import math
+from typing import Literal, cast
 
 import pandas as pd
 from cobra import Model
@@ -35,12 +36,23 @@ class FluxState:
             "fluxes",
             {str(rid): float(value) for rid, value in self.fluxes.items()},
         )
+        object.__setattr__(self, "metadata", dict(self.metadata))
+        self.validate()
 
     def validate(self) -> None:
         if not self.name:
             raise ValueError("FluxState name must not be empty")
         if not self.fluxes:
             raise ValueError("FluxState must contain at least one flux")
+        if self.provenance not in {"fba", "pfba", "sampling_mean", "imported"}:
+            raise ValueError(f"unknown FluxState provenance {self.provenance!r}")
+        invalid = [
+            rid for rid, value in self.fluxes.items() if not math.isfinite(value)
+        ]
+        if invalid:
+            raise ValueError(
+                f"FluxState contains non-finite fluxes: {', '.join(invalid[:5])}"
+            )
 
     def get(self, reaction_id: str, default: float = 0.0) -> float:
         return self.fluxes.get(reaction_id, default)
@@ -67,7 +79,10 @@ class FluxState:
         if order == 1:
             return float(sum(abs(self.get(k) - other_map.get(k, 0.0)) for k in keys))
         if order == 2:
-            return float(sum((self.get(k) - other_map.get(k, 0.0)) ** 2 for k in keys)) ** 0.5
+            return (
+                float(sum((self.get(k) - other_map.get(k, 0.0)) ** 2 for k in keys))
+                ** 0.5
+            )
         raise ValueError("order must be 1 or 2")
 
     def serialize(self) -> dict:
@@ -80,15 +95,30 @@ class FluxState:
 
     @classmethod
     def deserialize(cls, payload: Mapping[str, object]) -> FluxState:
+        raw_fluxes = payload.get("fluxes", {})
+        raw_metadata = payload.get("metadata", {})
+        if not isinstance(raw_fluxes, Mapping):
+            raise ValueError("serialized FluxState 'fluxes' must be a mapping")
+        if not isinstance(raw_metadata, Mapping):
+            raise ValueError("serialized FluxState 'metadata' must be a mapping")
+        raw_provenance = str(payload.get("provenance", "imported"))
+        if raw_provenance not in {"fba", "pfba", "sampling_mean", "imported"}:
+            raise ValueError(f"unknown FluxState provenance {raw_provenance!r}")
         return cls(
-            fluxes=dict(payload.get("fluxes", {})),  # type: ignore[arg-type]
+            fluxes={str(key): float(value) for key, value in raw_fluxes.items()},
             name=str(payload.get("name", "reference")),
-            provenance=str(payload.get("provenance", "imported")),  # type: ignore[arg-type]
-            metadata=dict(payload.get("metadata", {})),  # type: ignore[arg-type]
+            provenance=cast(Provenance, raw_provenance),
+            metadata={str(key): value for key, value in raw_metadata.items()},
         )
 
     @classmethod
-    def from_solution(cls, solution, name: str = "reference", provenance: Provenance = "fba") -> FluxState:
+    def from_solution(
+        cls, solution, name: str = "reference", provenance: Provenance = "fba"
+    ) -> FluxState:
+        if getattr(solution, "status", None) != "optimal":
+            raise ValueError(
+                f"cannot create FluxState from solution status {getattr(solution, 'status', None)!r}"
+            )
         return cls(fluxes=dict(solution.fluxes), name=name, provenance=provenance)
 
 
@@ -104,6 +134,8 @@ def reference_state_pfba(
     optimum, which makes it a reproducible default reference for small models.
     """
 
+    if not 0.0 < fraction_of_optimum <= 1.0:
+        raise ValueError("fraction_of_optimum must be in (0, 1]")
     with model:
         if condition is not None:
             condition.apply_to(model)
@@ -119,7 +151,10 @@ def reference_state_from_samples(
 
     if samples.empty:
         raise ValueError("sample table is empty")
-    means = samples.mean(axis=0)
+    numeric = samples.apply(pd.to_numeric, errors="coerce")
+    if numeric.isna().any().any():
+        raise ValueError("sample table contains non-numeric or non-finite values")
+    means = numeric.mean(axis=0)
     return FluxState(
         fluxes={str(rid): float(v) for rid, v in means.items()},
         name=name,

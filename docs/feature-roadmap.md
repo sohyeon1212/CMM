@@ -1,80 +1,49 @@
-# Feature Roadmap
+# Feature roadmap
 
-## Cross-Cutting Prerequisites
+This roadmap starts from the validated CMM 0.3.0 surface. Implemented features are also
+enumerated by `cmm.features.INCLUDED_FEATURES`; this document does not advertise planned work
+as shipped functionality.
 
-These are not a phase; they are dependencies that several phases assume and that the
-original plan left implicit. They must land before the features that need them.
+## Current validated surface
 
-- **Solver tiers.** Declare solver capability explicitly instead of relying on the cobra
-  default (GLPK, LP-only). FBA/FVA/FSEOF need LP. MOMA, ROOM, and revert-metabolism need
-  QP. OptKnock/RobustKnock and original MTA (MIQP) need MILP/MIQP. Plan: ship LP + QP on
-  an open stack (HiGHS/OSQP via optlang), gate MILP/MIQP behind an optional CPLEX/Gurobi
-  install, and have each service raise a typed `SolverCapabilityError` when the active
-  solver cannot run it.
-- **Reference flux state.** Add a `core.flux_state.FluxState` primitive (a named,
-  serializable flux vector plus provenance: pFBA, sampling mean, or imported). MOMA, ROOM,
-  and revert-metabolism all compare a candidate state against a reference; without this
-  type each feature would reinvent it.
-- **Differential expression.** The omics layer is currently scoped to single-state
-  constraint methods (E-Flux2 / LAD). Revert-metabolism needs two-state (source vs target)
-  differential expression mapped to a per-reaction desired direction. Add this to the omics
-  layer so it is shared, not buried in one feature.
-- **Target ranking result.** FSEOF, OptKnock, and revert-metabolism all emit a ranked list
-  of intervention targets with scores. Add one `core.results.TargetRanking` type they share.
+- Core: conditions, media, FBA, pFBA, FVA, `FluxState`, solver contracts, provenance.
+- Perturbation: gene/reaction/multiple knockout resolution, L1/L2 MOMA, ROOM, batch runs.
+- Production: yield, production envelope, FSEOF, FVSEOF, OptKnock, RobustKnock.
+- Omics: GPR mapping, LAD, E-Flux2, multi-condition prediction, differential directions.
+- Transformation: MOMA A→B ranking, published MTA, published rMTA, explicit continuous
+  heuristic.
+- Product: Qt desktop workflows, CSV/table export, publication figures, offscreen tests.
 
-## Phase 1: Core Engine
+The reference tests and scientific limitations are defined in `docs/VALIDATION.md`.
 
-- Add SBML load/save services
-- Add condition apply/serialize/deserialize
-- Add FBA and FVA
-- Add the `FluxState` reference primitive (pFBA and imported sources first)
-- Add deterministic result export tables
+## Publication follow-up
 
-## Phase 2: Visualization
+These items improve external scientific evidence without changing the existing method
+contracts:
 
-- Add map data model
-- Add flux-to-color normalization
-- Add slider state for flux range inspection
-- Add desktop map view after core rendering state is tested
+1. Archive a DOI-bearing release and replace the organization-only `CITATION.cff` author
+   entry with the manuscript's final authors, ORCIDs, title, and DOI.
+2. Publish immutable input model and omics artifacts with checksums rather than relying only
+   on upstream model repositories.
+3. Add study-specific biological benchmarks with prespecified metrics and held-out
+   experimental interventions.
+4. Record wall time, peak memory, solver tolerances, and candidate counts for representative
+   genome-scale LP, QP, MILP, and MIQP workflows.
+5. Add the original MTA/rMTA contextualization plus sampling preprocessing if a manuscript
+   claims the complete paper pipeline rather than CMM's documented E-Flux2 variant.
 
-## Phase 3: Advanced Simulation
+## Planned scientific services
 
-- Add dynamic FBA
-- Add MOMA and ROOM (consume `FluxState` as the reference)
-- Add batch perturbation runner (gene/reaction KO enumeration + parallel solve)
-- Add random flux sampling (also feeds `FluxState` sampling-mean references)
-- Add flux response analysis
+- Dynamic FBA with explicit exchange/update callbacks.
+- Reproducible random flux sampling and sampling-mean `FluxState` construction.
+- Flux-response analysis over bound and objective sweeps.
+- Enzyme-constrained model extensions and validated import/export.
+- Automated construction of FVSEOF grouping-reaction constraints from physiological data.
 
-## Phase 4: Engineering Workflows (Production Targets)
+## Engineering follow-up
 
-- Add FSEOF and FVSEOF
-- Add OptKnock and RobustKnock as new implementations
-- Emit results as `TargetRanking`
-
-## Phase 5: Omics and Enzyme Constraints
-
-- Add omics table import and normalization
-- Add single-state omics-to-constraint methods (E-Flux2 / LAD class)
-- Add two-state differential expression -> per-reaction desired direction (source vs target)
-- Add enzyme-constrained model extension layer
-- Add enzyme-constrained import/export helpers and validation
-
-## Phase 6: Normalization Targets (Revert Metabolism)
-
-New capability with no analogue in the legacy app or the original plan. Predicts gene/
-reaction interventions that move a perturbed (e.g. disease) metabolic state back toward a
-reference (e.g. healthy) state. Depends on Phase 3 (reference state + perturbation runner)
-and Phase 5 (differential expression).
-
-- Add `features.revert` service implementing the robust MTA (rMTA) continuous/QP scoring
-- Add optional original-MTA (MIQP) high-fidelity mode, gated on a MILP/MIQP solver
-- Reuse the batch perturbation runner for KO enumeration
-- Emit ranked normalization targets as `TargetRanking`
-- See `docs/design-revert-metabolism.md` for the full design
-
-## Phase 7: Desktop Product
-
-- Build the Qt shell with Project, Model, Simulation, Design, and View sections
-- Add a compact model browser
-- Add the visualization workspace
-- Add task-specific dialogs only after the service APIs are stable
+- Cancellation and progress reporting for long-running GUI jobs.
+- Persistent project archives containing model, conditions, expression, result metadata, and
+  checksums.
+- Solver-tolerance configuration recorded in provenance.
+- Optional parallel candidate screens with deterministic ordering and bounded resource use.

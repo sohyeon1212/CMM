@@ -33,7 +33,7 @@ from cmm.features.production import (
 PALETTE = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#999999"]
 _LINESTYLES = ["-", "--", "-.", ":"]
 _FONT_PRESETS = {
-    1: {"title": 10, "label": 9, "tick": 8, "legend": 8},   # single column (~3.3 in)
+    1: {"title": 10, "label": 9, "tick": 8, "legend": 8},  # single column (~3.3 in)
     2: {"title": 13, "label": 12, "tick": 10, "legend": 9},  # double column (~6.5 in)
 }
 
@@ -77,16 +77,28 @@ def production_envelope_figure(
     x = frame["product_flux"].to_numpy()
     gmax = frame["growth_max"].to_numpy()
     gmin = frame["growth_min"].to_numpy()
-    ax.fill_between(x, gmin, gmax, color=PALETTE[0], alpha=0.18, label="feasible region")
+    ax.fill_between(
+        x, gmin, gmax, color=PALETTE[0], alpha=0.18, label="feasible region"
+    )
     ax.plot(x, gmax, color=PALETTE[0], linewidth=2.0, label="max growth")
-    ax.plot(x, gmin, color=PALETTE[0], linewidth=1.0, linestyle="--", alpha=0.7,
-            label="min growth")
+    ax.plot(
+        x,
+        gmin,
+        color=PALETTE[0],
+        linewidth=1.0,
+        linestyle="--",
+        alpha=0.7,
+        label="min growth",
+    )
     label = product_label or envelope.product
     suffix = "  (min growth = 0 across range)" if float(np.max(gmin)) <= 1e-9 else ""
-    _style(ax, font,
-           xlabel=f"{label} flux (mmol gDW$^{{-1}}$ h$^{{-1}}$)",
-           ylabel="growth rate (h$^{-1}$)",
-           title=title + suffix)
+    _style(
+        ax,
+        font,
+        xlabel=f"{label} flux (mmol gDW$^{{-1}}$ h$^{{-1}}$)",
+        ylabel="growth rate (h$^{-1}$)",
+        title=title + suffix,
+    )
     ax.legend(fontsize=font["legend"], frameon=False)
     fig.tight_layout()
     return fig
@@ -106,23 +118,38 @@ def fseof_figure(
     targets = result.amplification_targets()
     ranked = sorted(
         targets,
-        key=lambda rid: abs(result.trends.loc[rid, levels[-1]]) - abs(result.trends.loc[rid, levels[0]]),
+        key=lambda rid: (
+            abs(result.trends.loc[rid, levels[-1]])
+            - abs(result.trends.loc[rid, levels[0]])
+        ),
         reverse=True,
     )[:top_n]
     for i, rid in enumerate(ranked):
         ys = [result.trends.loc[rid, lv] for lv in levels]
         # Vary colour AND linestyle/marker so near-coincident lines stay distinguishable.
-        ax.plot(levels, ys,
-                marker=["o", "s", "^", "D", "v", "P"][i % 6], markersize=6,
-                linewidth=2.4 if i < 2 else 1.6,
-                linestyle=_LINESTYLES[i % len(_LINESTYLES)],
-                color=PALETTE[i % len(PALETTE)], label=rid)
-    _style(ax, font,
-           xlabel=f"enforced {result.product} flux (mmol gDW$^{{-1}}$ h$^{{-1}}$)",
-           ylabel="reaction flux (mmol gDW$^{-1}$ h$^{-1}$)",
-           title=title)
-    ax.legend(fontsize=font["legend"], frameon=False,
-              bbox_to_anchor=(1.01, 1), loc="upper left")
+        ax.plot(
+            levels,
+            ys,
+            marker=["o", "s", "^", "D", "v", "P"][i % 6],
+            markersize=6,
+            linewidth=2.4 if i < 2 else 1.6,
+            linestyle=_LINESTYLES[i % len(_LINESTYLES)],
+            color=PALETTE[i % len(PALETTE)],
+            label=rid,
+        )
+    _style(
+        ax,
+        font,
+        xlabel=f"enforced {result.product} flux (mmol gDW$^{{-1}}$ h$^{{-1}}$)",
+        ylabel="reaction flux (mmol gDW$^{-1}$ h$^{-1}$)",
+        title=title,
+    )
+    ax.legend(
+        fontsize=font["legend"],
+        frameon=False,
+        bbox_to_anchor=(1.01, 1),
+        loc="upper left",
+    )
     fig.tight_layout()
     return fig
 
@@ -146,23 +173,47 @@ def fvseof_figure(
     robust = result.robust_targets() or result.amplification_targets()
     ranked = sorted(
         robust,
-        key=lambda rid: abs(result.mean.loc[rid, level_cols[-1]]) - abs(result.mean.loc[rid, level_cols[0]]),
+        key=lambda rid: (
+            abs(result.mean.loc[rid, level_cols[-1]])
+            - abs(result.mean.loc[rid, level_cols[0]])
+        ),
         reverse=True,
     )[:top_n]
     for i, rid in enumerate(ranked):
         colour = PALETTE[i % len(PALETTE)]
         mean = [result.mean.loc[rid, c] for c in level_cols]
         forced = [result.forced.loc[rid, c] for c in level_cols]
-        ax.plot(levels, mean, marker="o", markersize=5, linewidth=2.0, color=colour,
-                label=f"{rid} (mean)")
+        ax.plot(
+            levels,
+            mean,
+            marker="o",
+            markersize=5,
+            linewidth=2.0,
+            color=colour,
+            label=f"{rid} (mean)",
+        )
         ax.plot(levels, forced, linestyle="--", linewidth=1.4, color=colour, alpha=0.8)
-    _style(ax, font,
-           xlabel=f"enforced {result.product} flux (mmol gDW$^{{-1}}$ h$^{{-1}}$)",
-           ylabel="flux (mmol gDW$^{-1}$ h$^{-1}$)",
-           title=title)
-    ax.legend(fontsize=font["legend"], frameon=False, bbox_to_anchor=(1.01, 1), loc="upper left")
-    ax.text(0.0, -0.16, "solid = mean flux, dashed = forced minimum |flux|",
-            transform=ax.transAxes, fontsize=font["legend"], color="#555555")
+    _style(
+        ax,
+        font,
+        xlabel=f"enforced {result.product} flux (mmol gDW$^{{-1}}$ h$^{{-1}}$)",
+        ylabel="flux (mmol gDW$^{-1}$ h$^{-1}$)",
+        title=title,
+    )
+    ax.legend(
+        fontsize=font["legend"],
+        frameon=False,
+        bbox_to_anchor=(1.01, 1),
+        loc="upper left",
+    )
+    ax.text(
+        0.0,
+        -0.16,
+        "solid = mean flux, dashed = forced minimum |flux|",
+        transform=ax.transAxes,
+        fontsize=font["legend"],
+        color="#555555",
+    )
     fig.tight_layout()
     return fig
 
@@ -179,8 +230,9 @@ def flux_comparison_figure(
 ) -> Figure:
     """Grouped bar chart comparing two flux distributions over selected reactions."""
 
-    fig, ax, font = _new_figure(width=max(6.0, 0.7 * len(reactions) + 2), height=4.0,
-                                column_width=column_width)
+    fig, ax, font = _new_figure(
+        width=max(6.0, 0.7 * len(reactions) + 2), height=4.0, column_width=column_width
+    )
     idx = np.arange(len(reactions))
     width = 0.38
     ref = [reference.get(r, 0.0) for r in reactions]
@@ -190,7 +242,13 @@ def flux_comparison_figure(
     ax.set_xticks(idx)
     ax.set_xticklabels(reactions, rotation=45, ha="right", fontsize=font["tick"])
     ax.axhline(0, color="black", linewidth=0.8)
-    _style(ax, font, xlabel="reaction", ylabel="flux (mmol gDW$^{-1}$ h$^{-1}$)", title=title)
+    _style(
+        ax,
+        font,
+        xlabel="reaction",
+        ylabel="flux (mmol gDW$^{-1}$ h$^{-1}$)",
+        title=title,
+    )
     ax.legend(fontsize=font["legend"], frameon=False)
     fig.tight_layout()
     return fig
@@ -216,28 +274,69 @@ def yield_figure(
     bars = ax.bar(labels, values, color=colors, width=0.55)
     for bar, y in zip(bars, yields, strict=True):
         text = f"{y.molar_yield:.2f}" + (" +CO$_2$" if y.exceeds_carbon_ceiling else "")
-        ax.text(bar.get_x() + bar.get_width() / 2, y.molar_yield, text,
-                ha="center", va="bottom", fontsize=font["tick"])
-    ceiling = next((y.carbon_ceiling for y in yields if y.carbon_ceiling is not None), None)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            y.molar_yield,
+            text,
+            ha="center",
+            va="bottom",
+            fontsize=font["tick"],
+        )
+    ceiling = next(
+        (y.carbon_ceiling for y in yields if y.carbon_ceiling is not None), None
+    )
     if ceiling is not None:
         ax.axhline(ceiling, color="#999999", linestyle="--", linewidth=1.0)
-        ax.text(ax.get_xlim()[1], ceiling, f" carbon ceiling {ceiling:.2f}",
-                va="bottom", ha="right", fontsize=font["legend"], color="#555555")
+        ax.text(
+            ax.get_xlim()[1],
+            ceiling,
+            f" carbon ceiling {ceiling:.2f}",
+            va="bottom",
+            ha="right",
+            fontsize=font["legend"],
+            color="#555555",
+        )
     substrate = substrate_label or (yields[0].substrate if yields else "substrate")
     product = yields[0].product if yields else "product"
-    _style(ax, font, xlabel="condition",
-           ylabel=f"mol {product} / mol {substrate}", title=title)
+    _style(
+        ax,
+        font,
+        xlabel="condition",
+        ylabel=f"mol {product} / mol {substrate}",
+        title=title,
+    )
     fig.tight_layout()
     return fig
 
 
 # Currency / cofactor metabolites that connect to nearly everything and turn a metabolic
 # network drawing into a hairball. Excluded so the map shows the carbon backbone.
-_CURRENCY = frozenset({
-    "h2o", "h", "atp", "adp", "amp", "pi", "ppi", "co2", "o2", "nh4",
-    "nad", "nadh", "nadp", "nadph", "fad", "fadh2", "coa", "q8", "q8h2",
-    "so4", "h2", "pyr_h",
-})
+_CURRENCY = frozenset(
+    {
+        "h2o",
+        "h",
+        "atp",
+        "adp",
+        "amp",
+        "pi",
+        "ppi",
+        "co2",
+        "o2",
+        "nh4",
+        "nad",
+        "nadh",
+        "nadp",
+        "nadph",
+        "fad",
+        "fadh2",
+        "coa",
+        "q8",
+        "q8h2",
+        "so4",
+        "h2",
+        "pyr_h",
+    }
+)
 
 
 def _base_id(mid: str) -> str:
@@ -260,16 +359,21 @@ def flux_log_change_figure(
     labels = [rid for rid, _ in ranked]
     values = [v for _, v in ranked]
 
-    fig, ax, font = _new_figure(width=6.5, height=max(3.5, 0.32 * len(ranked) + 1),
-                                column_width=column_width)
+    fig, ax, font = _new_figure(
+        width=6.5, height=max(3.5, 0.32 * len(ranked) + 1), column_width=column_width
+    )
     colors = [PALETTE[1] if v > 0 else PALETTE[0] for v in values]
     ax.barh(range(len(values)), values, color=colors)
     ax.set_yticks(range(len(values)))
     ax.set_yticklabels(labels, fontsize=font["tick"])
     ax.axvline(0, color="black", linewidth=0.8)
-    _style(ax, font,
-           xlabel=f"log$_2$( |flux {target_label}| / |flux {source_label}| )",
-           ylabel="reaction", title=title)
+    _style(
+        ax,
+        font,
+        xlabel=f"log$_2$( |flux {target_label}| / |flux {source_label}| )",
+        ylabel="reaction",
+        title=title,
+    )
     ax.grid(True, axis="y", alpha=0.0)
     fig.tight_layout()
     return fig
@@ -327,7 +431,9 @@ def network_flux_map(
 
     n = len(met_ids)
     if n == 0:
-        ax.text(0.5, 0.5, "no internal carbon flux to display", ha="center", va="center")
+        ax.text(
+            0.5, 0.5, "no internal carbon flux to display", ha="center", va="center"
+        )
         return fig
 
     _ = seed  # retained for API compatibility; the row layout is deterministic
@@ -339,26 +445,54 @@ def network_flux_map(
         x0, y0 = pos[s]
         x1, y1 = pos[d]
         ax.annotate(
-            "", xy=(x1, y1), xytext=(x0, y0),
-            arrowprops=dict(arrowstyle="-|>", color=cmap(0.15 + 0.85 * w / max_w),
-                            lw=1.2 + 5.0 * w / max_w, alpha=0.9, shrinkA=14, shrinkB=14),
+            "",
+            xy=(x1, y1),
+            xytext=(x0, y0),
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color=cmap(0.15 + 0.85 * w / max_w),
+                lw=1.2 + 5.0 * w / max_w,
+                alpha=0.9,
+                shrinkA=14,
+                shrinkB=14,
+            ),
         )
-        ax.text((x0 + x1) / 2, (y0 + y1) / 2 - 0.055, rid, fontsize=reaction_font,
-                ha="center", va="center", color="#222222",
-                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="#cccccc", alpha=0.85))
-    ax.scatter(pos[:, 0], pos[:, 1], s=130, color=PALETTE[0], zorder=3, edgecolors="white")
+        ax.text(
+            (x0 + x1) / 2,
+            (y0 + y1) / 2 - 0.055,
+            rid,
+            fontsize=reaction_font,
+            ha="center",
+            va="center",
+            color="#222222",
+            bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="#cccccc", alpha=0.85),
+        )
+    ax.scatter(
+        pos[:, 0], pos[:, 1], s=130, color=PALETTE[0], zorder=3, edgecolors="white"
+    )
     metabolite_font = max(7, font["tick"] - 2)
     for i, (mid, (x, y)) in enumerate(zip(met_ids, pos, strict=True)):
         above = i % 2 == 0
         y_offset = 0.055 if above else -0.09
         ax.text(
-            x, y + y_offset, _display_metabolite_id(mid),
-            fontsize=metabolite_font, fontweight="bold",
-            ha="center", va="bottom" if above else "top", color="#11243b",
+            x,
+            y + y_offset,
+            _display_metabolite_id(mid),
+            fontsize=metabolite_font,
+            fontweight="bold",
+            ha="center",
+            va="bottom" if above else "top",
+            color="#11243b",
         )
     # Colour-bar proxy for flux magnitude.
-    ax.text(0.0, -0.08, f"edge width / colour ∝ |flux|  (max {max_w:.1f} mmol gDW$^{{-1}}$ h$^{{-1}}$)",
-            transform=ax.transAxes, fontsize=font["legend"], color="#555555")
+    ax.text(
+        0.0,
+        -0.08,
+        f"edge width / colour ∝ |flux|  (max {max_w:.1f} mmol gDW$^{{-1}}$ h$^{{-1}}$)",
+        transform=ax.transAxes,
+        fontsize=font["legend"],
+        color="#555555",
+    )
     ax.set_xlim(-0.12, 1.12)
     ax.set_ylim(-0.18, 1.06)
     return fig
@@ -390,7 +524,9 @@ def _component_row_layout(n: int, edges: list[tuple[int, int]]) -> np.ndarray:
         components.append(sorted(component))
 
     components.sort(key=lambda nodes: (-len(nodes), nodes[0]))
-    y_values = np.linspace(0.82, 0.22, len(components)) if len(components) > 1 else [0.55]
+    y_values = (
+        np.linspace(0.82, 0.22, len(components)) if len(components) > 1 else [0.55]
+    )
     pos = np.zeros((n, 2))
     for component, y in zip(components, y_values, strict=True):
         ordered = _ordered_component_nodes(component, edges)
@@ -403,7 +539,9 @@ def _component_row_layout(n: int, edges: list[tuple[int, int]]) -> np.ndarray:
     return pos
 
 
-def _ordered_component_nodes(component: list[int], edges: list[tuple[int, int]]) -> list[int]:
+def _ordered_component_nodes(
+    component: list[int], edges: list[tuple[int, int]]
+) -> list[int]:
     """Order one component from likely upstream sources to downstream products."""
 
     nodes = set(component)
@@ -493,8 +631,17 @@ def escher_flux_map(
             else:
                 verts = [a, b]
                 codes = [MplPath.MOVETO, MplPath.LINETO]
-            ax.add_patch(PathPatch(MplPath(verts, codes), fill=False, edgecolor=color,
-                                   lw=lw, alpha=alpha, capstyle="round", joinstyle="round"))
+            ax.add_patch(
+                PathPatch(
+                    MplPath(verts, codes),
+                    fill=False,
+                    edgecolor=color,
+                    lw=lw,
+                    alpha=alpha,
+                    capstyle="round",
+                    joinstyle="round",
+                )
+            )
 
     xs, ys = [], []
     for n in nodes.values():
@@ -503,13 +650,29 @@ def escher_flux_map(
             xs.append(n["x"])
             ys.append(n["y"])
             if label_metabolites:
-                ax.text(n.get("label_x", n["x"]), n.get("label_y", n["y"]),
-                        str(n.get("bigg_id", "")).rsplit("_", 1)[0], fontsize=4.5,
-                        ha="left", va="center", color="#11243b", zorder=4)
+                ax.text(
+                    n.get("label_x", n["x"]),
+                    n.get("label_y", n["y"]),
+                    str(n.get("bigg_id", "")).rsplit("_", 1)[0],
+                    fontsize=4.5,
+                    ha="left",
+                    va="center",
+                    color="#11243b",
+                    zorder=4,
+                )
     if label_reactions:
         for r in reactions.values():
-            ax.text(r.get("label_x", 0), r.get("label_y", 0), r["bigg_id"], fontsize=4.5,
-                    ha="left", va="center", color="#7a3b00", zorder=4, fontstyle="italic")
+            ax.text(
+                r.get("label_x", 0),
+                r.get("label_y", 0),
+                r["bigg_id"],
+                fontsize=4.5,
+                ha="left",
+                va="center",
+                color="#7a3b00",
+                zorder=4,
+                fontstyle="italic",
+            )
 
     if xs:
         mx = 0.04 * (max(xs) - min(xs) + 1)

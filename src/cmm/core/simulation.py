@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cobra import Model
 from cobra.flux_analysis import flux_variability_analysis
 from cobra.flux_analysis import pfba as _cobra_pfba
 
 from cmm.core.condition import Condition
+from cmm.core.provenance import run_provenance
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class FluxSolution:
     status: str
     objective_value: float | None
     fluxes: dict[str, float]
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -32,11 +34,21 @@ class FluxRange:
 def fba(model: Model, condition: Condition | None = None) -> FluxSolution:
     """Run flux balance analysis and return a plain Python result."""
 
+    provenance = run_provenance(
+        model, method="fba", condition=condition.name if condition else None
+    )
     with model:
         if condition is not None:
             condition.apply_to(model)
         solution = model.optimize()
 
+        if solution.status != "optimal":
+            return FluxSolution(
+                status=solution.status,
+                objective_value=None,
+                fluxes={},
+                metadata=provenance,
+            )
         objective_value = solution.objective_value
         if objective_value is not None:
             objective_value = float(objective_value)
@@ -44,7 +56,11 @@ def fba(model: Model, condition: Condition | None = None) -> FluxSolution:
         return FluxSolution(
             status=solution.status,
             objective_value=objective_value,
-            fluxes={reaction_id: float(value) for reaction_id, value in solution.fluxes.items()},
+            fluxes={
+                reaction_id: float(value)
+                for reaction_id, value in solution.fluxes.items()
+            },
+            metadata=provenance,
         )
 
 
@@ -55,6 +71,14 @@ def pfba(
 ) -> FluxSolution:
     """Run parsimonious FBA (minimal total flux at the given fraction of the optimum)."""
 
+    if not 0.0 < fraction_of_optimum <= 1.0:
+        raise ValueError("fraction_of_optimum must be in (0, 1]")
+    provenance = run_provenance(
+        model,
+        method="pfba",
+        condition=condition.name if condition else None,
+        fraction_of_optimum=fraction_of_optimum,
+    )
     with model:
         if condition is not None:
             condition.apply_to(model)
@@ -65,7 +89,11 @@ def pfba(
         return FluxSolution(
             status=solution.status,
             objective_value=objective_value,
-            fluxes={reaction_id: float(value) for reaction_id, value in solution.fluxes.items()},
+            fluxes={
+                reaction_id: float(value)
+                for reaction_id, value in solution.fluxes.items()
+            },
+            metadata=provenance,
         )
 
 
@@ -86,7 +114,9 @@ def fva(
 
         reaction_list = None
         if reactions is not None:
-            reaction_list = [model.reactions.get_by_id(reaction_id) for reaction_id in reactions]
+            reaction_list = [
+                model.reactions.get_by_id(reaction_id) for reaction_id in reactions
+            ]
 
         table = flux_variability_analysis(
             model,

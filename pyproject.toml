@@ -1,33 +1,53 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77,<82", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmm"
-version = "0.2.1"
+version = "0.3.0"
 description = "A metabolic modeling platform for flux simulation and metabolic engineering."
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "Proprietary" }
+requires-python = ">=3.10,<3.13"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "CMM Contributors" }]
-dependencies = [
-    "cobra>=0.30",
-    "numpy>=1.24",
-    "pandas>=2.0",
-    "scipy>=1.10",
+keywords = ["constraint-based modeling", "metabolic engineering", "COBRA", "omics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
+dependencies = [
+    "cobra>=0.31,<0.32",
+    "numpy>=1.24,<3",
+    "pandas>=2.0,<3",
+    "scipy>=1.10,<2",
+]
+
+[project.urls]
+Repository = "https://github.com/jyryu3161/CMM"
+Issues = "https://github.com/jyryu3161/CMM/issues"
 
 [project.optional-dependencies]
 desktop = [
-    "matplotlib>=3.8",
-    "qtpy>=2.4",
-    "PyQt5>=5.15",
+    "matplotlib>=3.8,<4",
+    "qtpy>=2.4,<3",
+    "PyQt5>=5.15,<6",
 ]
 design = [
-    "straindesign>=1.9",
+    "straindesign>=1.18,<2",
+]
+solver-gurobi = [
+    "gurobipy>=12,<14",
 ]
 dev = [
-    "pytest>=8.0",
+    "mypy>=1.14,<2",
+    "pytest>=8,<10",
+    "pytest-cov>=6,<8",
     "ruff>=0.15,<0.16",
 ]
 
@@ -40,3 +60,19 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "genome_scale: validation on a reconstruction with more than 2,000 reactions",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["cmm"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_configs = true

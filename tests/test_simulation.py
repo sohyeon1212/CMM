@@ -27,9 +27,10 @@ def test_pfba_total_flux_not_greater_than_fba(ecoli_core):
     assert pfba_solution.fluxes["Biomass_Ecoli_core"] == pytest.approx(
         fba_solution.fluxes["Biomass_Ecoli_core"], abs=1e-4
     )
-    assert sum(abs(v) for v in pfba_solution.fluxes.values()) <= sum(
-        abs(v) for v in fba_solution.fluxes.values()
-    ) + 1e-6
+    assert (
+        sum(abs(v) for v in pfba_solution.fluxes.values())
+        <= sum(abs(v) for v in fba_solution.fluxes.values()) + 1e-6
+    )
 
 
 def test_fba_returns_plain_flux_solution(toy_model):

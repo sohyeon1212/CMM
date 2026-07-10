@@ -29,9 +29,14 @@ class DirectionMap:
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "directions", {str(k): int(v) for k, v in self.directions.items()}
-        )
+        normalized = {str(k): int(v) for k, v in self.directions.items()}
+        invalid = {
+            key: value for key, value in normalized.items() if value not in {-1, 0, 1}
+        }
+        if invalid:
+            raise ValueError(f"direction values must be -1, 0, or 1; got {invalid}")
+        object.__setattr__(self, "directions", normalized)
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
     def __getitem__(self, reaction_id: str) -> int:
         return self.directions[reaction_id]
@@ -65,10 +70,30 @@ def gene_log2_fold_change(
 ) -> dict[str, float]:
     """log2((target + pseudo) / (source + pseudo)) over genes present in both states."""
 
+    if pseudocount < 0 or not math.isfinite(pseudocount):
+        raise ValueError("pseudocount must be finite and non-negative")
     genes = set(source) & set(target)
     out: dict[str, float] = {}
     for g in genes:
-        out[g] = math.log2((target[g] + pseudocount) / (source[g] + pseudocount))
+        source_value = float(source[g])
+        target_value = float(target[g])
+        if (
+            not math.isfinite(source_value)
+            or not math.isfinite(target_value)
+            or source_value < 0
+            or target_value < 0
+        ):
+            raise ValueError(
+                f"expression for gene {g!r} must be finite and non-negative"
+            )
+        numerator = target_value + pseudocount
+        denominator = source_value + pseudocount
+        if denominator == 0:
+            out[g] = 0.0 if numerator == 0 else math.inf
+        elif numerator == 0:
+            out[g] = -math.inf
+        else:
+            out[g] = math.log2(numerator / denominator)
     return out
 
 
@@ -82,6 +107,8 @@ def gene_directions(
 ) -> dict[str, int]:
     """Discretize gene log2 fold change into +1 (up in target) / -1 (down) / 0."""
 
+    if up_threshold < 0 or down_threshold < 0:
+        raise ValueError("fold-change thresholds must be non-negative")
     lfc = gene_log2_fold_change(source, target, pseudocount=pseudocount)
     out: dict[str, int] = {}
     for g, value in lfc.items():
@@ -137,7 +164,9 @@ def reaction_directions(
     forward, so an up-regulated enzyme means "turn on" (increase).
     """
 
-    rxn_ids = list(reactions) if reactions is not None else [r.id for r in model.reactions]
+    rxn_ids = (
+        list(reactions) if reactions is not None else [r.id for r in model.reactions]
+    )
     directions: dict[str, int] = {}
     for rid in rxn_ids:
         rxn = model.reactions.get_by_id(rid)

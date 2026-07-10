@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import math
 from typing import Literal
 
 from cobra import Model
@@ -30,6 +31,14 @@ class ReactionBound:
             raise ValueError(
                 f"lower_bound must be <= upper_bound for reaction {self.reaction_id!r}"
             )
+        for label, value in (
+            ("lower_bound", self.lower_bound),
+            ("upper_bound", self.upper_bound),
+        ):
+            if value is not None and not math.isfinite(value):
+                raise ValueError(
+                    f"{label} for reaction {self.reaction_id!r} must be finite"
+                )
 
 
 @dataclass(frozen=True)
@@ -51,6 +60,10 @@ class ObjectiveSpec:
                 raise ValueError(
                     f"objective coefficient for reaction {reaction_id!r} must not be 0"
                 )
+            if not math.isfinite(coefficient):
+                raise ValueError(
+                    f"objective coefficient for reaction {reaction_id!r} must be finite"
+                )
 
 
 @dataclass(frozen=True)
@@ -67,6 +80,9 @@ class Condition:
             raise ValueError("condition name must not be empty")
         for bound in self.bounds:
             bound.validate()
+        reaction_ids = [bound.reaction_id for bound in self.bounds]
+        if len(reaction_ids) != len(set(reaction_ids)):
+            raise ValueError("condition contains duplicate reaction bound overrides")
         if self.objective is not None:
             self.objective.validate()
 
@@ -77,8 +93,16 @@ class Condition:
 
         for bound in self.bounds:
             reaction = model.reactions.get_by_id(bound.reaction_id)
-            new_lower = bound.lower_bound if bound.lower_bound is not None else reaction.lower_bound
-            new_upper = bound.upper_bound if bound.upper_bound is not None else reaction.upper_bound
+            new_lower = (
+                bound.lower_bound
+                if bound.lower_bound is not None
+                else reaction.lower_bound
+            )
+            new_upper = (
+                bound.upper_bound
+                if bound.upper_bound is not None
+                else reaction.upper_bound
+            )
             # Assign atomically: cobra validates lower <= upper on each scalar assignment, so a
             # new value that crosses the current opposite bound would raise mid-assignment (R11).
             reaction.bounds = (new_lower, new_upper)

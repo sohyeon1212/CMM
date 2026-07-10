@@ -4,6 +4,7 @@ from cmm.features._perturbation import (
     Perturbation,
     blocked_reactions_for_genes,
     gene_perturbations,
+    grouped_gene_perturbations,
     reaction_perturbations,
 )
 from cmm.features.comparison import (
@@ -85,6 +86,7 @@ __all__ = [
     "fseof",
     "fvseof",
     "gene_perturbations",
+    "grouped_gene_perturbations",
     "knockout_comparison",
     "moma",
     "production_envelope",

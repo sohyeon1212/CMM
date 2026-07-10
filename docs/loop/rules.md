@@ -1,5 +1,8 @@
 # Failure-Derived Rules (Strategy 2: continual-learning memory)
 
+> Archived implementation-loop rules. They are not current scientific method definitions;
+> use `docs/VALIDATION.md` and `docs/design-revert-metabolism.md` instead.
+
 Append-only. Each rule is a *verified fact* generalized from a real failure, so later
 stories reference the rule instead of rediscovering the cause. Format:
 

@@ -70,7 +70,9 @@ def test_fseof_finds_known_succinate_targets(ecoli_core):
     # amplification targets and must appear.
     assert "FRD7" in amplification
     assert "PPC" in amplification
-    assert SUCC in amplification
+    # The enforced exchange is a tautological scan signal, not an actionable gene target.
+    assert SUCC not in amplification
+    assert SUCC in result.amplification_targets(actionable_only=False)
 
 
 def test_fseof_trends_shape(ecoli_core):
@@ -93,13 +95,18 @@ def test_fvseof_finds_robust_succinate_targets(ecoli_core):
     # ...and robustly forced (FVA minimum rises, not just the mean).
     robust = set(result.robust_targets())
     assert "FRD7" in robust
-    assert robust <= amplification  # robust targets are a subset of amplification targets
+    assert (
+        robust <= amplification
+    )  # robust targets are a subset of amplification targets
 
 
 def test_fvseof_ranges_shape_and_columns(ecoli_core):
-    result = fvseof(ecoli_core, SUCC, BIOMASS, n_steps=3, aerobic=False, reactions=_FVSEOF_RXNS)
+    result = fvseof(
+        ecoli_core, SUCC, BIOMASS, n_steps=3, aerobic=False, reactions=_FVSEOF_RXNS
+    )
     assert result.mean.shape == (len(_FVSEOF_RXNS), 3)
     assert result.forced.shape == (len(_FVSEOF_RXNS), 3)
+    assert result.capacity.shape == (len(_FVSEOF_RXNS), 3)
     # The forced minimum magnitude is never negative (it is a |flux| lower bound).
     assert (result.forced.to_numpy() >= -1e-9).all()
     assert len(result.enforced_levels) == 3
@@ -108,9 +115,51 @@ def test_fvseof_ranges_shape_and_columns(ecoli_core):
 def test_fvseof_zero_yield_product_is_consistent(ecoli_core):
     # A blocked product collapses every enforced level to 0; result stays shape-consistent.
     ecoli_core.reactions.EX_succ_e.bounds = (0.0, 0.0)
-    result = fvseof(ecoli_core, SUCC, BIOMASS, n_steps=4, aerobic=False, reactions=["FRD7", "PPC"])
+    result = fvseof(
+        ecoli_core, SUCC, BIOMASS, n_steps=4, aerobic=False, reactions=["FRD7", "PPC"]
+    )
     assert result.metadata["max_product"] == pytest.approx(0.0, abs=1e-9)
-    assert len(result.enforced_levels) == result.mean.shape[1]  # no level/column mismatch
+    assert (
+        len(result.enforced_levels) == result.mean.shape[1]
+    )  # no level/column mismatch
+
+
+def test_fseof_zero_yield_product_is_consistent(ecoli_core):
+    ecoli_core.reactions.EX_succ_e.bounds = (0.0, 0.0)
+    result = fseof(
+        ecoli_core, SUCC, BIOMASS, n_steps=4, aerobic=False, reactions=["FRD7", "PPC"]
+    )
+    scan_columns = [c for c in result.trends.columns if isinstance(c, float)]
+    assert result.enforced_levels == (0.0,)
+    assert scan_columns == [0.0]
+    assert result.amplification_targets() == []
+
+
+def test_fvseof_accepts_explicit_grouping_reaction_constraints(ecoli_core):
+    result = fvseof(
+        ecoli_core,
+        SUCC,
+        BIOMASS,
+        n_steps=3,
+        aerobic=False,
+        reactions=["FRD7", "FUM"],
+        group_constraints=[{"FRD7": 1.0, "FUM": -1.0}],
+    )
+    assert result.metadata["n_group_constraints"] == 1
+    assert set(result.slope.index) == {"FRD7", "FUM"}
+
+
+@pytest.mark.parametrize(
+    ("function", "kwargs", "message"),
+    [
+        (fseof, {"n_steps": 1}, "n_steps"),
+        (fseof, {"fraction_min": 0.9, "fraction_max": 0.1}, "fractions"),
+        (fvseof, {"biomass_fraction": 0.0}, "biomass_fraction"),
+    ],
+)
+def test_flux_scans_validate_parameters(ecoli_core, function, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        function(ecoli_core, SUCC, BIOMASS, aerobic=False, **kwargs)
 
 
 def test_fvseof_does_not_mutate_model(ecoli_core):

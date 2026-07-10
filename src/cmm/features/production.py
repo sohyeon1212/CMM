@@ -7,7 +7,7 @@ results so the visualization layer and the GUI can render them without re-solvin
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -15,6 +15,8 @@ import pandas as pd
 from cobra import Model
 from cobra.flux_analysis import flux_variability_analysis as _cobra_fva
 from cobra.flux_analysis import production_envelope as _cobra_envelope
+
+from cmm.core.provenance import run_provenance
 
 _CO2_IDS = ("EX_co2_e", "EX_co2(e)", "EX_co2_e_")
 
@@ -30,8 +32,11 @@ class ProductionYield:
     molar_yield: float
     status: str
     aerobic: bool
-    carbon_ceiling: float | None = None  # max mol product / mol substrate from substrate C
+    carbon_ceiling: float | None = (
+        None  # max mol product / mol substrate from substrate C
+    )
     co2_exchange: float = 0.0  # net CO2 exchange (negative = fixation)
+    metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def co2_fixed(self) -> bool:
@@ -58,6 +63,7 @@ class ProductionEnvelope:
     product: str
     objective: str
     points: tuple[EnvelopePoint, ...]
+    metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def max_growth(self) -> float:
@@ -81,7 +87,9 @@ class FseofResult:
     product: str
     biomass: str
     enforced_levels: tuple[float, ...]
-    trends: pd.DataFrame  # index reaction_id; columns = enforced levels; + 'classification'
+    trends: (
+        pd.DataFrame
+    )  # index reaction_id; columns = enforced levels; + 'classification'
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -89,11 +97,17 @@ class FseofResult:
         # cannot corrupt this (or another caller's) cached result.
         object.__setattr__(self, "trends", self.trends.copy())
 
-    def amplification_targets(self) -> list[str]:
-        return self.trends.index[self.trends["classification"] == "amplify"].tolist()
+    def amplification_targets(self, *, actionable_only: bool = True) -> list[str]:
+        selected = self.trends["classification"] == "amplify"
+        if actionable_only and "actionable" in self.trends:
+            selected &= self.trends["actionable"].astype(bool)
+        return self.trends.index[selected].tolist()
 
-    def knockout_targets(self) -> list[str]:
-        return self.trends.index[self.trends["classification"] == "knockdown"].tolist()
+    def knockout_targets(self, *, actionable_only: bool = True) -> list[str]:
+        selected = self.trends["classification"] == "knockdown"
+        if actionable_only and "actionable" in self.trends:
+            selected &= self.trends["actionable"].astype(bool)
+        return self.trends.index[selected].tolist()
 
 
 @dataclass(frozen=True)
@@ -109,21 +123,32 @@ class FvseofResult:
     product: str
     biomass: str
     enforced_levels: tuple[float, ...]
-    mean: pd.DataFrame   # reaction x level: midpoint flux
-    forced: pd.DataFrame  # reaction x level: forced minimum |flux| (0 if the range spans 0)
-    classification: pd.Series  # reaction -> amplify / knockdown / none (on |mean| trend)
+    mean: pd.DataFrame  # reaction x level: midpoint flux
+    forced: (
+        pd.DataFrame
+    )  # reaction x level: forced minimum |flux| (0 if the range spans 0)
+    capacity: pd.DataFrame  # reaction x level: FVA range width
+    classification: (
+        pd.Series
+    )  # reaction -> amplify / knockdown / none (on |mean| trend)
     robust: pd.Series  # reaction -> bool (forced-min |flux| monotonically rises)
+    slope: pd.Series  # reaction -> q_slope of |Vavg| versus enforced product
+    capacity_slope: pd.Series  # reaction -> slope of FVA range width
+    actionable: pd.Series  # reaction -> has GPR and is internal/non-objective
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mean", self.mean.copy())
         object.__setattr__(self, "forced", self.forced.copy())
+        object.__setattr__(self, "capacity", self.capacity.copy())
 
     def amplification_targets(self) -> list[str]:
-        return self.classification.index[self.classification == "amplify"].tolist()
+        selected = (self.classification == "amplify") & self.actionable.astype(bool)
+        return self.classification.index[selected].tolist()
 
     def knockout_targets(self) -> list[str]:
-        return self.classification.index[self.classification == "knockdown"].tolist()
+        selected = (self.classification == "knockdown") & self.actionable.astype(bool)
+        return self.classification.index[selected].tolist()
 
     def robust_targets(self) -> list[str]:
         """Amplification targets that are robustly forced (FVA minimum also rises)."""
@@ -164,13 +189,19 @@ def _detect_substrate(model: Model, unlimited: float = -999.0) -> str:
     # inside a context guard so the probe does not disturb the caller's model state.
     with model:
         solution = model.optimize()
+    if solution.status != "optimal":
+        raise ValueError(
+            f"cannot detect substrate from a model with solver status {solution.status!r}"
+        )
     uptaken = [
         (rxn.id, solution.fluxes[rxn.id])
         for rxn in model.exchanges
         if solution.fluxes[rxn.id] < 0 and _carbon_count(rxn) > 0
     ]
     if not uptaken:
-        raise ValueError("no carbon uptake exchange found; specify substrate explicitly")
+        raise ValueError(
+            "no carbon uptake exchange found; specify substrate explicitly"
+        )
     return min(uptaken, key=lambda x: x[1])[0]
 
 
@@ -203,6 +234,13 @@ def theoretical_yield(
     that so the number is never read as carbon-from-substrate alone.
     """
 
+    provenance = run_provenance(
+        model,
+        method="theoretical_yield",
+        product=product,
+        substrate=substrate,
+        aerobic=aerobic,
+    )
     with model:
         if not aerobic:
             _set_anaerobic(model)
@@ -222,13 +260,19 @@ def theoretical_yield(
         model.objective = model.reactions.get_by_id(product)
         model.objective_direction = "max"
         solution = model.optimize()
+        if solution.status != "optimal":
+            raise ValueError(
+                f"theoretical-yield optimization for {product!r} is {solution.status}"
+            )
         product_flux = float(solution.fluxes[product])
         molar_yield = product_flux / substrate_uptake
 
         substrate_carbon = _carbon_count(substrate_rxn)
         product_carbon = _carbon_count(model.reactions.get_by_id(product))
         carbon_ceiling = (
-            substrate_carbon / product_carbon if product_carbon > 0 and substrate_carbon > 0 else None
+            substrate_carbon / product_carbon
+            if product_carbon > 0 and substrate_carbon > 0
+            else None
         )
         return ProductionYield(
             product=product,
@@ -240,6 +284,7 @@ def theoretical_yield(
             aerobic=aerobic,
             carbon_ceiling=carbon_ceiling,
             co2_exchange=_net_co2(solution, model),
+            metadata=provenance,
         )
 
 
@@ -254,13 +299,28 @@ def production_envelope(
 ) -> ProductionEnvelope:
     """Growth-vs-product envelope (phenotypic phase plane) for the product."""
 
+    if points < 2:
+        raise ValueError("points must be at least 2")
     objective = objective or _objective_reaction(model)
+    provenance = run_provenance(
+        model,
+        method="production_envelope",
+        product=product,
+        objective=objective,
+        substrate=substrate,
+        aerobic=aerobic,
+        points=points,
+    )
     with model:
         if not aerobic:
             _set_anaerobic(model)
         substrate = substrate or _detect_substrate(model)
         frame = _cobra_envelope(
-            model, [product], objective=objective, carbon_sources=substrate, points=points
+            model,
+            [product],
+            objective=objective,
+            carbon_sources=substrate,
+            points=points,
         )
     envelope_points = tuple(
         EnvelopePoint(
@@ -270,7 +330,110 @@ def production_envelope(
         )
         for _, row in frame.iterrows()
     )
-    return ProductionEnvelope(product=product, objective=objective, points=envelope_points)
+    return ProductionEnvelope(
+        product=product,
+        objective=objective,
+        points=envelope_points,
+        metadata=provenance,
+    )
+
+
+def _validate_scan_parameters(
+    *,
+    n_steps: int,
+    fraction_min: float,
+    fraction_max: float,
+    tol: float,
+    biomass_fraction: float | None = None,
+) -> None:
+    if n_steps < 2:
+        raise ValueError("n_steps must be at least 2")
+    if not 0.0 <= fraction_min < fraction_max <= 1.0:
+        raise ValueError(
+            "scan fractions must satisfy 0 <= fraction_min < fraction_max <= 1"
+        )
+    if tol < 0:
+        raise ValueError("tol must be non-negative")
+    if biomass_fraction is not None and not 0.0 < biomass_fraction <= 1.0:
+        raise ValueError("biomass_fraction must be in (0, 1]")
+
+
+def _initial_product_flux(
+    model: Model, product: str, biomass: str, *, aerobic: bool
+) -> float:
+    with model:
+        if not aerobic:
+            _set_anaerobic(model)
+        model.objective = model.reactions.get_by_id(biomass)
+        model.objective_direction = "max"
+        solution = model.optimize()
+        if solution.status != "optimal":
+            raise ValueError(
+                f"cannot determine initial product flux: biomass solve is {solution.status}"
+            )
+        return float(solution.fluxes[product])
+
+
+def _scan_levels(
+    initial: float,
+    maximum: float,
+    *,
+    n_steps: int,
+    fraction_min: float,
+    fraction_max: float,
+    tol: float,
+) -> np.ndarray:
+    if maximum < initial - tol:
+        raise ValueError(
+            f"maximum product flux ({maximum:g}) is below its growth-optimal initial flux "
+            f"({initial:g}); check product direction and model bounds"
+        )
+    if maximum - initial <= tol:
+        return np.asarray([maximum], dtype=float)
+    fractions = np.linspace(fraction_min, fraction_max, n_steps)
+    return initial + fractions * (maximum - initial)
+
+
+def _actionable_reaction(model: Model, rid: str, product: str, biomass: str) -> bool:
+    rxn = model.reactions.get_by_id(rid)
+    return bool(rxn.genes) and not rxn.boundary and rid not in {product, biomass}
+
+
+def _linear_slope(levels: np.ndarray, values: np.ndarray) -> float:
+    if len(levels) < 2 or len(values) != len(levels) or not np.isfinite(values).all():
+        return float("nan")
+    if float(np.ptp(levels)) <= 1e-12:
+        return 0.0
+    return float(np.polyfit(levels, values, 1)[0])
+
+
+def _add_group_constraints(
+    model: Model, group_constraints: Iterable[Mapping[str, float]] | None
+) -> int:
+    """Add caller-supplied linear GR equalities ``sum(coeff * flux) = 0``."""
+
+    count = 0
+    for count, coefficients in enumerate(group_constraints or (), start=1):
+        if len(coefficients) < 2:
+            raise ValueError(
+                "each grouping-reaction constraint needs at least two reactions"
+            )
+        expression = 0.0
+        for rid, coefficient in coefficients.items():
+            if rid not in model.reactions:
+                raise KeyError(
+                    f"grouping-reaction constraint references unknown reaction {rid!r}"
+                )
+            if not np.isfinite(coefficient) or coefficient == 0:
+                raise ValueError(
+                    "grouping-reaction coefficients must be finite and non-zero"
+                )
+            expression += coefficient * model.reactions.get_by_id(rid).flux_expression
+        constraint = model.problem.Constraint(
+            expression, lb=0.0, ub=0.0, name=f"_fvseof_group_{count}"
+        )
+        model.add_cons_vars([constraint])
+    return count
 
 
 def fseof(
@@ -294,12 +457,39 @@ def fseof(
     that operate in the reverse direction — e.g. the reductive succinate pathway — correct.
     """
 
+    provenance = run_provenance(
+        model,
+        method="fseof",
+        product=product,
+        biomass=biomass,
+        n_steps=n_steps,
+        fraction_min=fraction_min,
+        fraction_max=fraction_max,
+        aerobic=aerobic,
+        tol=tol,
+    )
+    _validate_scan_parameters(
+        n_steps=n_steps,
+        fraction_min=fraction_min,
+        fraction_max=fraction_max,
+        tol=tol,
+    )
     biomass = biomass or _objective_reaction(model)
     yield_result = theoretical_yield(model, product, aerobic=aerobic)
     max_product = yield_result.product_flux
-    levels = np.linspace(fraction_min, fraction_max, n_steps) * max_product
+    initial_product = _initial_product_flux(model, product, biomass, aerobic=aerobic)
+    levels = _scan_levels(
+        initial_product,
+        max_product,
+        n_steps=n_steps,
+        fraction_min=fraction_min,
+        fraction_max=fraction_max,
+        tol=tol,
+    )
 
-    rxn_ids = list(reactions) if reactions is not None else [r.id for r in model.reactions]
+    rxn_ids = (
+        list(reactions) if reactions is not None else [r.id for r in model.reactions]
+    )
     columns: dict[float, dict[str, float]] = {}
     with model:
         if not aerobic:
@@ -313,19 +503,44 @@ def fseof(
             if solution.status != "optimal":
                 columns[float(level)] = {rid: float("nan") for rid in rxn_ids}
                 continue
-            columns[float(level)] = {rid: float(solution.fluxes[rid]) for rid in rxn_ids}
+            columns[float(level)] = {
+                rid: float(solution.fluxes[rid]) for rid in rxn_ids
+            }
 
     trends = pd.DataFrame(columns, index=rxn_ids)
-    trends["classification"] = [
-        _classify_trend(trends.loc[rid, list(columns.keys())].to_numpy(), tol)
+    scan_columns = list(columns.keys())
+    level_array = np.asarray(scan_columns, dtype=float)
+    slopes = {
+        rid: _linear_slope(
+            level_array,
+            np.abs(trends.loc[rid, scan_columns].to_numpy(dtype=float)),
+        )
         for rid in rxn_ids
+    }
+    trends["slope"] = pd.Series(slopes)
+    trends["classification"] = [
+        _classify_trend(trends.loc[rid, scan_columns].to_numpy(dtype=float), tol)
+        for rid in rxn_ids
+    ]
+    trends["actionable"] = [
+        _actionable_reaction(model, rid, product, biomass) for rid in rxn_ids
     ]
     return FseofResult(
         product=product,
         biomass=biomass,
         enforced_levels=tuple(float(x) for x in levels),
         trends=trends,
-        metadata={"max_product": max_product, "aerobic": aerobic},
+        metadata={
+            **provenance,
+            "initial_product": initial_product,
+            "max_product": max_product,
+            "aerobic": aerobic,
+            "n_failed_levels": sum(
+                not np.isfinite(trends[level].to_numpy(dtype=float)).all()
+                for level in scan_columns
+            ),
+            "criterion": "monotonic_flux_magnitude_with_linear_slope",
+        },
     )
 
 
@@ -350,6 +565,7 @@ def fvseof(
     biomass_fraction: float = 0.95,
     aerobic: bool = True,
     reactions: Iterable[str] | None = None,
+    group_constraints: Iterable[Mapping[str, float]] | None = None,
     tol: float = 1e-3,
 ) -> FvseofResult:
     """Flux Variability Scanning based on Enforced Objective Flux (FSEOF + FVA per step).
@@ -360,32 +576,79 @@ def fvseof(
     rises are *robust* targets (the reaction is compelled to carry more flux).
     """
 
+    provenance = run_provenance(
+        model,
+        method="fvseof",
+        product=product,
+        biomass=biomass,
+        n_steps=n_steps,
+        fraction_min=fraction_min,
+        fraction_max=fraction_max,
+        biomass_fraction=biomass_fraction,
+        aerobic=aerobic,
+        tol=tol,
+    )
+    _validate_scan_parameters(
+        n_steps=n_steps,
+        fraction_min=fraction_min,
+        fraction_max=fraction_max,
+        tol=tol,
+        biomass_fraction=biomass_fraction,
+    )
     biomass = biomass or _objective_reaction(model)
     yield_result = theoretical_yield(model, product, aerobic=aerobic)
     max_product = yield_result.product_flux
-    levels = np.linspace(fraction_min, fraction_max, n_steps) * max_product
+    initial_product = _initial_product_flux(model, product, biomass, aerobic=aerobic)
+    levels = _scan_levels(
+        initial_product,
+        max_product,
+        n_steps=n_steps,
+        fraction_min=fraction_min,
+        fraction_max=fraction_max,
+        tol=tol,
+    )
 
-    rxn_ids = list(reactions) if reactions is not None else [r.id for r in model.reactions]
+    rxn_ids = (
+        list(reactions) if reactions is not None else [r.id for r in model.reactions]
+    )
     mean_cols: dict[float, dict[str, float]] = {}
     forced_cols: dict[float, dict[str, float]] = {}
+    capacity_cols: dict[float, dict[str, float]] = {}
     with model:
         if not aerobic:
             _set_anaerobic(model)
         product_rxn = model.reactions.get_by_id(product)
         model.objective = model.reactions.get_by_id(biomass)
         model.objective_direction = "max"
+        n_group_constraints = _add_group_constraints(model, group_constraints)
         for level in levels:
             level = float(level)
             with model:
                 product_rxn.bounds = (level, level)
                 try:
+                    growth_optimum = model.slim_optimize(error_value=None)
+                    if growth_optimum is None or not np.isfinite(growth_optimum):
+                        raise ValueError("growth optimization is infeasible")
+                    target_growth = biomass_fraction * float(growth_optimum)
+                    biological_objective = model.objective.expression
+                    growth_constraint = model.problem.Constraint(
+                        biological_objective,
+                        lb=target_growth,
+                        ub=target_growth,
+                        name="_fvseof_growth_level",
+                    )
+                    model.add_cons_vars([growth_constraint])
+                    model.objective = model.problem.Objective(0.0, direction="min")
                     table = _cobra_fva(
-                        model, reaction_list=rxn_ids,
-                        fraction_of_optimum=biomass_fraction, processes=1,
+                        model,
+                        reaction_list=rxn_ids,
+                        fraction_of_optimum=0.0,
+                        processes=1,
                     )
                 except Exception:
                     mean_cols[level] = {rid: float("nan") for rid in rxn_ids}
                     forced_cols[level] = {rid: float("nan") for rid in rxn_ids}
+                    capacity_cols[level] = {rid: float("nan") for rid in rxn_ids}
                     continue
             mean_cols[level] = {
                 rid: 0.5 * (float(row["minimum"]) + float(row["maximum"]))
@@ -395,17 +658,46 @@ def fvseof(
                 rid: _forced_min_magnitude(float(row["minimum"]), float(row["maximum"]))
                 for rid, row in table.iterrows()
             }
+            capacity_cols[level] = {
+                rid: float(row["maximum"]) - float(row["minimum"])
+                for rid, row in table.iterrows()
+            }
 
     mean = pd.DataFrame(mean_cols, index=rxn_ids)
     forced = pd.DataFrame(forced_cols, index=rxn_ids)
+    capacity = pd.DataFrame(capacity_cols, index=rxn_ids)
     levels_key = list(mean_cols.keys())
+    level_array = np.asarray(levels_key, dtype=float)
     classification = pd.Series(
         [_classify_trend(mean.loc[rid, levels_key].to_numpy(), tol) for rid in rxn_ids],
         index=rxn_ids,
     )
     robust = pd.Series(
-        [_rises_monotonically(forced.loc[rid, levels_key].to_numpy(), tol) for rid in rxn_ids],
+        [
+            _rises_monotonically(forced.loc[rid, levels_key].to_numpy(), tol)
+            for rid in rxn_ids
+        ],
         index=rxn_ids,
+    )
+    slope = pd.Series(
+        {
+            rid: _linear_slope(
+                level_array, np.abs(mean.loc[rid, levels_key].to_numpy(dtype=float))
+            )
+            for rid in rxn_ids
+        }
+    )
+    capacity_slope = pd.Series(
+        {
+            rid: _linear_slope(
+                level_array, capacity.loc[rid, levels_key].to_numpy(dtype=float)
+            )
+            for rid in rxn_ids
+        }
+    )
+    actionable = pd.Series(
+        {rid: _actionable_reaction(model, rid, product, biomass) for rid in rxn_ids},
+        dtype=bool,
     )
     return FvseofResult(
         product=product,
@@ -415,30 +707,48 @@ def fvseof(
         enforced_levels=tuple(float(x) for x in levels_key),
         mean=mean,
         forced=forced,
+        capacity=capacity,
         classification=classification,
         robust=robust,
-        metadata={"max_product": max_product, "biomass_fraction": biomass_fraction},
+        slope=slope,
+        capacity_slope=capacity_slope,
+        actionable=actionable,
+        metadata={
+            **provenance,
+            "initial_product": initial_product,
+            "max_product": max_product,
+            "biomass_fraction": biomass_fraction,
+            "n_group_constraints": n_group_constraints,
+            "n_failed_levels": sum(
+                not np.isfinite(mean[level].to_numpy(dtype=float)).all()
+                for level in levels_key
+            ),
+            "criterion": "Vavg_slope_capacity_and_forced_minimum",
+        },
     )
 
 
 def _rises_monotonically(values: np.ndarray, tol: float) -> bool:
-    finite = values[np.isfinite(values)]
-    if len(finite) < 2:
+    if len(values) < 2 or not np.isfinite(values).all():
         return False
-    return bool(finite[-1] - finite[0] > tol and np.all(np.diff(finite) >= -tol))
+    return bool(values[-1] - values[0] > tol and np.all(np.diff(values) >= -tol))
 
 
 def _classify_trend(values: np.ndarray, tol: float) -> str:
-    """Classify a reaction's flux-magnitude trend across the enforced-product scan."""
+    """Classify a direction-preserving flux-magnitude slope across a scan."""
 
-    finite = np.abs(values[np.isfinite(values)])
-    if len(finite) < 2:
+    if len(values) < 2 or not np.isfinite(values).all():
+        return "none"
+    finite = np.abs(values)
+    nonzero = values[np.abs(values) > tol]
+    # A direction reversal is not an amplification/knockdown target in FSEOF/FVSEOF.
+    if len(nonzero) > 1 and np.any(np.sign(nonzero) != np.sign(nonzero[0])):
         return "none"
     start, end = finite[0], finite[-1]
-    diffs = np.diff(finite)
-    if end - start > tol and np.all(diffs >= -tol):
+    slope = float(np.polyfit(np.arange(len(finite), dtype=float), finite, 1)[0])
+    if end - start > tol and slope > tol:
         return "amplify"
-    if start - end > tol and np.all(diffs <= tol):
+    if start - end > tol and slope < -tol:
         return "knockdown"
     return "none"
 

@@ -42,11 +42,11 @@ git clone https://github.com/jyryu3161/CMM.git && cd CMM
 .venv/bin/python -m cmm.app path/to/model.xml
 ```
 
-A QP/MILP solver (Gurobi or CPLEX) unlocks the full feature set. `pip install gurobipy` ships
-a free size-limited license that already covers `e_coli_core`. With the open GLPK solver you
-get FBA / pFBA / FVA / FSEOF / theoretical yield / production envelope; MOMA, ROOM,
-revert-metabolism (QP), OptKnock (MILP) and original-MTA (MIQP) need the commercial solver.
-Check what you have under **Config → Solver status…**.
+Gurobi or CPLEX unlocks the full feature set. GLPK supports LP and MILP, so it can run
+FBA/pFBA/FVA/LAD/production scans plus ROOM and StrainDesign workflows. L2 MOMA and E-Flux2
+need QP; published MTA/rMTA need MIQP. The restricted Gurobi license is sufficient for the
+small validation models but can be too small for genome-scale mixed-integer analyses. Check
+the active capabilities under **Config → Solver status…**.
 
 ---
 
@@ -145,8 +145,9 @@ growth the cell is forced to make the product.
    guaranteed product) are highlighted. For succinate on `e_coli_core`, OptKnock finds designs
    such as `{CO2t, PGI}` (growth ≈0.20 h⁻¹, guaranteed succinate ≈9.6).
 
-This search is a bilevel MILP (delegated to the `straindesign` package) and **needs a MILP
-solver** (Gurobi/CPLEX). It can take a while on larger models — see the freeze caveat in §12.
+This search is a nested MILP (delegated to the `straindesign` package) and **needs a MILP
+solver**. OptKnock and RobustKnock are distinct module types; RobustKnock is the three-level
+worst-case formulation. It can take a while on larger models.
 
 ## 6. Omics tab — expression → flux (E-Flux2 / LAD)
 
@@ -165,8 +166,10 @@ solver** (Gurobi/CPLEX). It can take a while on larger models — see the freeze
    Gene ids are matched case-insensitively against the model's genes. Or click **Run on demo
    expression** for a deterministic synthetic run over the model's genes.
 3. The table lists active predicted fluxes (largest first); the summary reports how many
-   reactions were mapped through the GPR and the FBA optimum. With no QP solver, E-Flux2
-   degrades to pFBA (shown as `[pfba]` in the summary).
+   reactions were mapped through the GPR and the achieved biological objective. E-Flux2 is
+   strict: without QP support it raises a capability error. The Python API exposes an
+   explicit `allow_l1_fallback=True` approximation labeled `eflux2_l1_fallback`; it must not
+   be reported as E-Flux2.
 
 ---
 
@@ -223,17 +226,21 @@ Predicts the flux state after a knockout as the one closest to a reference templ
 Ranks gene/reaction knockouts that move a **source** (e.g. disease) state toward a **target**
 (e.g. healthy) state, derived from two-state differential expression.
 
-1. Set **Method** (`rmta`, `mta`, or `mta_miqp`), **Knockout level** (`gene` / `reaction`),
-   and the **transformation weight α** (0–1, default 0.9).
+1. Set **Method** (`rmta`, `mta`, or `rmta_continuous`), **Knockout level** (`gene` /
+   `reaction`), and the **transformation weight α** (0–1, default 0.66). `rmta` is the
+   published best/MOMA/worst workflow; `mta` is the published single MTA solve; the continuous
+   option is an explicitly labeled historical heuristic.
 2. **Load source CSV/TSV…** and **Load target CSV/TSV…** — each is a two-column
    gene/expression file (same format as §6). Both must load before **Run Revert** enables.
 3. **Run Revert.** The table ranks targets by score (best row highlighted); the summary names
-   the top normalization target. The reference source flux is a pFBA distribution; the
-   per-reaction desired direction comes from the source→target expression fold change combined
-   with the reference flux sign.
+   the top normalization target. The source reference is generated from the **source**
+   expression with E-Flux2 at full objective. Per-reaction desired directions come from the
+   source→target expression change and GPR logic.
 
-`rmta` and `mta` need a QP solver; `mta_miqp` (original-MTA, higher fidelity) needs MIQP
-(Gurobi/CPLEX). On an LP-only install the tab reports the capability error cleanly.
+Published `rmta` and `mta` need MIQP; `rmta_continuous` needs QP. On an unsupported solver
+the tab reports the capability error cleanly. The original studies use contextualization and
+sampling for source-state preprocessing; the deterministic E-Flux2 GUI variant must be
+disclosed in a manuscript (see `docs/design-revert-metabolism.md`).
 
 ---
 
@@ -246,9 +253,10 @@ works from two explicit predicted flux **states**.
    as in §6).
 2. Choose **Predict states with** (`eflux2` / `lad`) — each expression vector becomes a flux
    state — a **Method** (`moma` = rank by how far the minimal-adjustment state moves toward B;
-   `mta` = robust MTA on the A→B direction), the **Knockout level**, and α (for `mta`).
+   `mta` = the published single MTA MIQP on the A→B direction), the **Knockout level**, and α
+   (for `mta`).
 3. **Run transformation.** Knockouts are ranked (best highlighted) by how well they move A
-   toward B. Needs a QP solver.
+   toward B. `moma` needs QP; `mta` needs MIQP.
 
 ## 9. Flux Map tab — Escher-layout flux maps
 
@@ -347,8 +355,8 @@ QT_QPA_PLATFORM=offscreen CMM_OUTPUT_DIR=./temp_figures_new PYTHONPATH=src \
 Run the unit + scenario test suite:
 
 ```bash
-.venv/bin/python -m pytest -q      # 129 tests
-ruff check .
+uv run pytest -q -ra --strict-markers
+uv run ruff check src tests
 ```
 
 ---
@@ -357,7 +365,7 @@ ruff check .
 
 | Symptom | Cause / fix |
 |---|---|
-| "active solver … does not support QP/MILP/MIQP" | GLPK-only install. `pip install gurobipy` (or configure CPLEX) for MOMA/ROOM/revert/OptKnock. |
+| "active solver … does not support QP/MILP/MIQP" | Check the method table in §2. GLPK provides LP/MILP; install/configure a QP/MIQP backend for L2 MOMA, E-Flux2, MTA, or rMTA. |
 | Theoretical yield raises "no uptake capacity" | The chosen substrate exchange is closed (lower bound 0). Open its uptake or pick another substrate. |
 | FSEOF/FVSEOF says "not meaningful: yield is zero" | The product can't carry flux in the current medium — open its exchange / check reachability. |
 | Comparison with lad/eflux2 template shows a ⚠ synthetic note | No expression loaded — load a CSV on the Omics tab (§6/§7), or use the fba/pfba templates. |
@@ -366,6 +374,6 @@ ruff check .
 
 ---
 
-*Generated as part of a codebase review. Feature availability reflects the shipped v0.2.1
-services; see `docs/feature-roadmap.md` for planned additions and `docs/architecture.md` for
-the layering contract.*
+*Feature availability reflects CMM 0.3.0. See `docs/VALIDATION.md` for the publication
+evidence and limitations, `docs/feature-roadmap.md` for planned additions, and
+`docs/architecture.md` for the layering contract.*

@@ -42,6 +42,42 @@ def test_robustknock_returns_only_guaranteed_designs(anaerobic_ecoli):
     assert guaranteed == sorted(guaranteed, reverse=True)
 
 
+def test_optknock_and_robustknock_use_distinct_nested_searches(
+    anaerobic_ecoli, monkeypatch
+):
+    """Prevent RobustKnock from regressing to post-filtered OptKnock candidates."""
+
+    import straindesign as sd
+
+    seen: list[str] = []
+    real_module = sd.SDModule
+
+    def recording_module(model, module_type, *args, **kwargs):
+        seen.append(module_type)
+        return real_module(model, module_type, *args, **kwargs)
+
+    monkeypatch.setattr(sd, "SDModule", recording_module)
+    monkeypatch.setattr(sd, "compute_strain_designs", lambda *args, **kwargs: None)
+
+    optknock(anaerobic_ecoli, SUCC, max_knockouts=1, max_solutions=1)
+    robustknock(anaerobic_ecoli, SUCC, max_knockouts=1, max_solutions=1)
+
+    assert seen == [sd.OPTKNOCK, sd.ROBUSTKNOCK]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_knockouts": 0}, "max_knockouts"),
+        ({"max_solutions": 0}, "max_solutions"),
+        ({"min_growth": -0.1}, "min_growth"),
+    ],
+)
+def test_strain_design_validates_search_parameters(anaerobic_ecoli, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        optknock(anaerobic_ecoli, SUCC, **kwargs)
+
+
 def test_strain_design_does_not_mutate_model(anaerobic_ecoli):
     growth = anaerobic_ecoli.slim_optimize()
     optknock(anaerobic_ecoli, SUCC, max_knockouts=2, max_solutions=2)

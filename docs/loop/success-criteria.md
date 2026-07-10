@@ -1,5 +1,8 @@
 # Loop Success Criteria (Strategy 3: hard termination + test definitions)
 
+> Archived pre-0.3.0 criteria. Use `docs/VALIDATION.md` for current scientific acceptance
+> criteria and reproducibility commands.
+
 The autonomous build runs as an ordered set of stories. Each story has an explicit
 **done test** and **fail condition**. A story is PASS only when an independent verifier
 agent (Strategy 1: verifier != generator) confirms the done test against real command

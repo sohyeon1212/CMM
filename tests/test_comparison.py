@@ -14,13 +14,15 @@ from cmm.features.comparison import moma, reference_flux, room
 def test_reference_flux_fba_and_pfba(ecoli_core):
     fba_ref = reference_flux(ecoli_core, "fba")
     pfba_ref = reference_flux(ecoli_core, "pfba")
-    assert fba_ref.provenance == "imported"
+    assert fba_ref.provenance == "fba"
+    assert pfba_ref.provenance == "pfba"
     # Both reproduce growth; pFBA has the smaller total flux.
     assert fba_ref.get("Biomass_Ecoli_core") == pytest.approx(0.8739, abs=1e-3)
     assert pfba_ref.get("Biomass_Ecoli_core") == pytest.approx(0.8739, abs=1e-3)
-    assert sum(abs(v) for v in pfba_ref.fluxes.values()) <= sum(
-        abs(v) for v in fba_ref.fluxes.values()
-    ) + 1e-6
+    assert (
+        sum(abs(v) for v in pfba_ref.fluxes.values())
+        <= sum(abs(v) for v in fba_ref.fluxes.values()) + 1e-6
+    )
 
 
 def test_reference_flux_omics_templates(ecoli_core):
@@ -35,18 +37,19 @@ def test_reference_flux_omics_requires_expression(ecoli_core):
         reference_flux(ecoli_core, "eflux2")
 
 
-def test_moma_uses_chosen_template_as_reference(ecoli_core, unrestricted_qp_solver):
+def test_moma_uses_chosen_template_as_reference(branched_model):
     # Different templates -> different MOMA reference -> different perturbed distance.
-    fba_ref = reference_flux(ecoli_core, "fba")
-    pfba_ref = reference_flux(ecoli_core, "pfba")
-    with ecoli_core:
-        ecoli_core.reactions.PFK.bounds = (0.0, 0.0)
-        d_fba = moma(ecoli_core, fba_ref, linear=False).distance
-    with ecoli_core:
-        ecoli_core.reactions.PFK.bounds = (0.0, 0.0)
-        d_pfba = moma(ecoli_core, pfba_ref, linear=False).distance
+    fba_ref = reference_flux(branched_model, "fba")
+    pfba_ref = reference_flux(branched_model, "pfba")
+    with branched_model:
+        branched_model.reactions.R2.bounds = (0.0, 0.0)
+        d_fba = moma(branched_model, fba_ref, linear=False).distance
+    with branched_model:
+        branched_model.reactions.R2.bounds = (0.0, 0.0)
+        d_pfba = moma(branched_model, pfba_ref, linear=False).distance
     # pFBA template is the minimal-flux reference, so its MOMA distance differs from FBA's.
     assert d_fba >= 0 and d_pfba >= 0
+
 
 # --- perturbation enumeration / application --------------------------------
 
@@ -136,7 +139,10 @@ def test_blocked_reactions_for_genes_joint(branched_model):
 
     assert blocked_reactions_for_genes(branched_model, ["g2"]) == ("R2",)
     # Knocking out g2 and g3 together blocks both their reactions.
-    assert set(blocked_reactions_for_genes(branched_model, ["g2", "g3"])) == {"R2", "R3"}
+    assert set(blocked_reactions_for_genes(branched_model, ["g2", "g3"])) == {
+        "R2",
+        "R3",
+    }
     assert blocked_reactions_for_genes(branched_model, []) == ()
 
 
@@ -147,8 +153,12 @@ def test_knockout_comparison_gene_and_reaction_agree(branched_model):
     reference = reference_state_pfba(branched_model, name="wt")
     # Gene g2 disables exactly R2, so a gene KO and the equivalent reaction KO match.
     gene_rxns = blocked_reactions_for_genes(branched_model, ["g2"])
-    by_gene = knockout_comparison(branched_model, reference, gene_rxns, method="moma_l2")
-    by_reaction = knockout_comparison(branched_model, reference, ["R2"], method="moma_l2")
+    by_gene = knockout_comparison(
+        branched_model, reference, gene_rxns, method="moma_l2"
+    )
+    by_reaction = knockout_comparison(
+        branched_model, reference, ["R2"], method="moma_l2"
+    )
     assert by_gene.status == "optimal"
     assert by_gene.distance == pytest.approx(by_reaction.distance, abs=1e-6)
     assert by_gene.fluxes["R3"] > 1.0  # rerouted through the healthy branch
@@ -161,8 +171,12 @@ def test_knockout_comparison_multi_reaction(branched_model):
 
     reference = reference_state_pfba(branched_model, name="wt")
     # Knocking out both branches (R2 and R3) leaves no route to product -> lethal/infeasible.
-    result = knockout_comparison(branched_model, reference, ["R2", "R3"], method="moma_l2")
-    assert result.status != "optimal" or result.fluxes.get("BIOMASS", 0.0) == pytest.approx(0.0, abs=1e-6)
+    result = knockout_comparison(
+        branched_model, reference, ["R2", "R3"], method="moma_l2"
+    )
+    assert result.status != "optimal" or result.fluxes.get(
+        "BIOMASS", 0.0
+    ) == pytest.approx(0.0, abs=1e-6)
 
 
 def test_batch_comparison_ranks_targets(branched_model):
@@ -170,9 +184,15 @@ def test_batch_comparison_ranks_targets(branched_model):
     from cmm.features.comparison import batch_comparison
 
     reference = reference_state_pfba(branched_model, name="wt")
-    rows = {r.target_id: r for r in batch_comparison(
-        branched_model, reference, gene_perturbations(branched_model), method="moma_l2"
-    )}
+    rows = {
+        r.target_id: r
+        for r in batch_comparison(
+            branched_model,
+            reference,
+            gene_perturbations(branched_model),
+            method="moma_l2",
+        )
+    }
     # Every non-inert gene is scored.
     assert {"g1", "g2", "g3", "g5", "gb"} <= set(rows)
     # g3/g5 (unused healthy branch at the pFBA optimum) have no effect: distance ~0.

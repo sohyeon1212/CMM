@@ -10,7 +10,7 @@
 .EXAMPLE
   .\install.ps1                       # core + desktop GUI + strain design + gurobipy, into .\.venv
   .\install.ps1 -Dev                  # also install the test/lint tooling (pytest, ruff)
-  .\install.ps1 -NoGurobi            # skip gurobipy (open GLPK runs LP only)
+  .\install.ps1 -NoGurobi            # skip gurobipy (open GLPK runs LP/MILP, not QP/MIQP)
   .\install.ps1 -CoreOnly            # core library only (no GUI / strain-design extras)
   .\install.ps1 -Python python3.12   # use a specific interpreter
   .\install.ps1 -VenvDir C:\envs\cmm # install into a chosen venv directory (default: .\.venv)
@@ -32,6 +32,7 @@ Set-Location -Path $PSScriptRoot
 $extras = if ($CoreOnly) { "" } else { "desktop,design" }
 if ($Dev -and -not $CoreOnly) { $extras = "$extras,dev" }
 if ($Dev -and $CoreOnly)      { $extras = "dev" }
+if (-not $NoGurobi)           { $extras = if ($extras) { "$extras,solver-gurobi" } else { "solver-gurobi" } }
 
 # --- locate a Python >= 3.10 ----------------------------------------------------------
 if (-not (Get-Command $Python -ErrorAction SilentlyContinue)) {
@@ -65,11 +66,8 @@ if ($extras -ne "") {
   & $vpy -m pip install -e .
 }
 
-if (-not $NoGurobi) {
-  Write-Host "==> Installing gurobipy (free size-limited license; enables MOMA/ROOM/OptKnock/MTA on small models)"
-  & $vpy -m pip install gurobipy
-} else {
-  Write-Host "==> Skipping gurobipy (open GLPK runs FBA/pFBA/FVA/FSEOF; QP/MILP/MIQP features need Gurobi or CPLEX)"
+if ($NoGurobi) {
+  Write-Host "==> Skipping gurobipy (GLPK supports LP/MILP; L2 MOMA/E-Flux2 need QP and published MTA/rMTA need MIQP)"
 }
 
 # --- done -----------------------------------------------------------------------------

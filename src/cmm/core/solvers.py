@@ -90,7 +90,9 @@ def supports(capability: Capability, solver: object | None = None) -> bool:
     return capability in capabilities(solver)
 
 
-def require(capability: Capability, solver: object | None = None, *, feature: str | None = None) -> None:
+def require(
+    capability: Capability, solver: object | None = None, *, feature: str | None = None
+) -> None:
     """Raise :class:`SolverCapabilityError` if the capability is unavailable."""
 
     if not supports(capability, solver):
@@ -115,8 +117,9 @@ class SolverStatus:
             return None
         return (
             f"Solver '{self.name}' lacks {', '.join(missing)}; "
-            "MOMA/ROOM/revert (QP), OptKnock (MILP), and original-MTA (MIQP) need a "
-            "commercial solver (Gurobi or CPLEX)."
+            "L2 MOMA/E-Flux2/continuous-rMTA need QP, ROOM/strain design need MILP, "
+            "and published MTA/rMTA need MIQP. Select any installed backend that provides "
+            "the required capability."
         )
 
     def summary(self) -> str:

@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use CMM in published work, cite this software and the method papers listed in docs/VALIDATION.md."
+title: "CMM: Cellular Metabolic Modeling Platform"
+type: software
+version: 0.3.0
+authors:
+  - name: "CMM Contributors"
+repository-code: "https://github.com/jyryu3161/CMM"
+url: "https://github.com/jyryu3161/CMM"
+license: "MIT"

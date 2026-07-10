@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from cmm.core.flux_state import reference_state_pfba
 from cmm.omics.differential import (
     differential_expression,
@@ -65,3 +67,10 @@ def test_gpr_and_or_combination():
     dmap = reaction_directions(model, g_dirs)
     assert dmap["R_AND"] == -1
     assert dmap["R_OR"] == 1
+
+
+def test_differential_expression_rejects_invalid_values():
+    with pytest.raises(ValueError, match="non-negative"):
+        gene_directions({"g": -1.0}, {"g": 1.0})
+    with pytest.raises(ValueError, match="pseudocount"):
+        gene_directions({"g": 1.0}, {"g": 2.0}, pseudocount=-1.0)

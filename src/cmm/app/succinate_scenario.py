@@ -50,11 +50,11 @@ ESCHER_MAP = _REPO_ROOT / "test_data" / "e_coli_core.Core metabolism.json"
 # secretions (upper bound 0), leaving succinate (via FRD7) as the only NADH sink. Under
 # growth maximization this forces succinate excretion from 0 up to ~10.
 ENGINEERING_BOUNDS = {
-    "EX_o2_e": (0.0, 1000.0),    # anaerobic
-    "EX_ac_e": (0.0, 0.0),       # block acetate secretion
-    "EX_etoh_e": (0.0, 0.0),     # block ethanol
-    "EX_for_e": (0.0, 0.0),      # block formate
-    "EX_lac__D_e": (0.0, 0.0),   # block lactate
+    "EX_o2_e": (0.0, 1000.0),  # anaerobic
+    "EX_ac_e": (0.0, 0.0),  # block acetate secretion
+    "EX_etoh_e": (0.0, 0.0),  # block ethanol
+    "EX_for_e": (0.0, 0.0),  # block formate
+    "EX_lac__D_e": (0.0, 0.0),  # block lactate
 }
 
 
@@ -77,7 +77,9 @@ def generate_publication_figures(model) -> list[Path]:
     anaerobic_yield = theoretical_yield(model, SUCC, aerobic=False)
     saved.append(
         save_figure(
-            yield_figure([aerobic_yield, anaerobic_yield], title="Succinate theoretical yield"),
+            yield_figure(
+                [aerobic_yield, anaerobic_yield], title="Succinate theoretical yield"
+            ),
             OUTPUT_DIR / "fig_succinate_yield.png",
         )
     )
@@ -93,7 +95,9 @@ def generate_publication_figures(model) -> list[Path]:
     result = fseof(model, SUCC, n_steps=10, aerobic=False)
     saved.append(
         save_figure(
-            fseof_figure(result, top_n=6, title="Succinate FSEOF amplification targets"),
+            fseof_figure(
+                result, top_n=6, title="Succinate FSEOF amplification targets"
+            ),
             OUTPUT_DIR / "fig_succinate_fseof.png",
         )
     )
@@ -111,8 +115,11 @@ def generate_publication_figures(model) -> list[Path]:
     saved.append(
         save_figure(
             flux_comparison_figure(
-                dict(wt), dict(engineered), reactions,
-                reference_label="wild type", comparison_label="succinate design",
+                dict(wt),
+                dict(engineered),
+                reactions,
+                reference_label="wild type",
+                comparison_label="succinate design",
                 title="Growth-coupled succinate design (anaerobic + byproduct knockouts)",
             ),
             OUTPUT_DIR / "fig_succinate_flux_shift.png",
@@ -122,8 +129,12 @@ def generate_publication_figures(model) -> list[Path]:
     # Dependency-free schematic carbon-backbone network (fallback when no map exists).
     saved.append(
         save_figure(
-            network_flux_map(model, dict(engineered), top_n=12,
-                             title="Succinate design carbon-flux network (schematic)"),
+            network_flux_map(
+                model,
+                dict(engineered),
+                top_n=12,
+                title="Succinate design carbon-flux network (schematic)",
+            ),
             OUTPUT_DIR / "fig_succinate_network.png",
         )
     )
@@ -132,15 +143,21 @@ def generate_publication_figures(model) -> list[Path]:
     if ESCHER_MAP.exists():
         saved.append(
             save_figure(
-                escher_flux_map(ESCHER_MAP, dict(wt),
-                                title="E. coli core — wild-type flux (Escher layout)"),
+                escher_flux_map(
+                    ESCHER_MAP,
+                    dict(wt),
+                    title="E. coli core — wild-type flux (Escher layout)",
+                ),
                 OUTPUT_DIR / "fig_escher_wt.png",
             )
         )
         saved.append(
             save_figure(
-                escher_flux_map(ESCHER_MAP, dict(engineered),
-                                title="E. coli core — succinate design flux (Escher layout)"),
+                escher_flux_map(
+                    ESCHER_MAP,
+                    dict(engineered),
+                    title="E. coli core — succinate design flux (Escher layout)",
+                ),
                 OUTPUT_DIR / "fig_escher_succinate.png",
             )
         )
@@ -191,7 +208,11 @@ def run_gui_scenarios() -> list[Path]:
     # Flux Map tab: Escher-layout map coloured by the current (engineered) flux.
     if map_path:
         fluxmap_index = next(
-            (i for i in range(window.tabs.count()) if window.tabs.tabText(i) == "Flux Map"),
+            (
+                i
+                for i in range(window.tabs.count())
+                if window.tabs.tabText(i) == "Flux Map"
+            ),
             None,
         )
         if fluxmap_index is not None:

@@ -16,11 +16,13 @@ import contextlib
 import io
 from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Literal
 
 from cobra import Model
 
 from cmm.core import solvers
+from cmm.core.provenance import run_provenance
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,7 @@ class StrainDesign:
 
     knockouts: tuple[str, ...]
     growth: float
-    max_product: float        # optimistic: max product at max growth
+    max_product: float  # optimistic: max product at max growth
     guaranteed_product: float  # robust: min product at max growth
 
     @property
@@ -42,6 +44,7 @@ class StrainDesignResult:
     method: str
     product: str
     designs: tuple[StrainDesign, ...]
+    metadata: dict[str, object] = field(default_factory=dict)
 
     def best(self) -> StrainDesign | None:
         return self.designs[0] if self.designs else None
@@ -64,10 +67,15 @@ def _evaluate_design(
         for rid in kos:
             model.reactions.get_by_id(rid).bounds = (0.0, 0.0)
         growth = model.slim_optimize()
-        if growth is None or growth != growth or growth < 1e-6:  # NaN/infeasible/no growth
+        if (
+            growth is None or growth != growth or growth < 1e-6
+        ):  # NaN/infeasible/no growth
             return None
         biomass_rxn = model.reactions.get_by_id(biomass)
-        biomass_rxn.bounds = (0.999 * growth, growth)
+        # Evaluate the product range on the *growth-optimal face*.  Allowing even 0.1% less
+        # growth can open flux states that are not growth-maximal and overstate the guaranteed
+        # product, which is precisely the quantity RobustKnock is meant to protect.
+        biomass_rxn.bounds = (growth, growth)
         product_rxn = model.reactions.get_by_id(product)
         model.objective = product_rxn
         model.objective_direction = "max"
@@ -87,13 +95,16 @@ def _search_designs(
     product: str,
     biomass: str,
     *,
+    method: Literal["optknock", "robustknock"],
     max_knockouts: int,
     max_solutions: int,
     min_growth: float,
 ) -> list[tuple[str, ...]]:
     try:
         import straindesign as sd
-    except ImportError as exc:  # pragma: no cover - straindesign is a declared dependency
+    except (
+        ImportError
+    ) as exc:  # pragma: no cover - straindesign is a declared dependency
         raise RuntimeError("strain design requires the 'straindesign' package") from exc
 
     # A product that cannot carry flux in the current medium has no coupling design — and
@@ -104,16 +115,24 @@ def _search_designs(
         if (model.slim_optimize() or 0.0) < 1e-6:
             return []
 
+    module_type = sd.OPTKNOCK if method == "optknock" else sd.ROBUSTKNOCK
     module = sd.SDModule(
-        model, sd.OPTKNOCK,
+        model,
+        module_type,
         inner_objective=biomass,
         outer_objective=product,
         constraints=[f"{biomass} >= {min_growth}"],
     )
     # straindesign is chatty; silence its solver logs.
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    with (
+        contextlib.redirect_stdout(io.StringIO()),
+        contextlib.redirect_stderr(io.StringIO()),
+    ):
         solutions = sd.compute_strain_designs(
-            model, sd_modules=[module], max_cost=max_knockouts, max_solutions=max_solutions
+            model,
+            sd_modules=[module],
+            max_cost=max_knockouts,
+            max_solutions=max_solutions,
         )
     reaction_sd = getattr(solutions, "reaction_sd", None) or []
     designs: list[tuple[str, ...]] = []
@@ -134,14 +153,35 @@ def _strain_design(
     max_solutions: int,
     min_growth: float,
 ) -> StrainDesignResult:
+    if max_knockouts < 1:
+        raise ValueError("max_knockouts must be at least 1")
+    if max_solutions < 1:
+        raise ValueError("max_solutions must be at least 1")
+    if min_growth < 0:
+        raise ValueError("min_growth must be non-negative")
     solvers.require("MILP", model.solver.interface, feature=method)
     biomass = biomass or _objective_reaction(model)
+    provenance = run_provenance(
+        model,
+        method=method,
+        product=product,
+        biomass=biomass,
+        max_knockouts=max_knockouts,
+        max_solutions=max_solutions,
+        min_growth=min_growth,
+    )
     ko_sets = _search_designs(
-        model, product, biomass,
-        max_knockouts=max_knockouts, max_solutions=max_solutions, min_growth=min_growth,
+        model,
+        product,
+        biomass,
+        method=method,
+        max_knockouts=max_knockouts,
+        max_solutions=max_solutions,
+        min_growth=min_growth,
     )
     evaluated = [
-        d for d in (_evaluate_design(model, kos, product, biomass) for kos in ko_sets)
+        d
+        for d in (_evaluate_design(model, kos, product, biomass) for kos in ko_sets)
         if d is not None
     ]
     if method == "robustknock":
@@ -149,7 +189,12 @@ def _strain_design(
         evaluated.sort(key=lambda d: (-d.guaranteed_product, -d.growth))
     else:
         evaluated.sort(key=lambda d: (-d.max_product, -d.growth))
-    return StrainDesignResult(method=method, product=product, designs=tuple(evaluated))
+    return StrainDesignResult(
+        method=method,
+        product=product,
+        designs=tuple(evaluated),
+        metadata=provenance,
+    )
 
 
 def optknock(
@@ -164,8 +209,13 @@ def optknock(
     """OptKnock: knockout sets that maximize the product at maximum growth (optimistic)."""
 
     return _strain_design(
-        model, product, method="optknock", biomass=biomass,
-        max_knockouts=max_knockouts, max_solutions=max_solutions, min_growth=min_growth,
+        model,
+        product,
+        method="optknock",
+        biomass=biomass,
+        max_knockouts=max_knockouts,
+        max_solutions=max_solutions,
+        min_growth=min_growth,
     )
 
 
@@ -178,9 +228,14 @@ def robustknock(
     max_solutions: int = 8,
     min_growth: float = 0.05,
 ) -> StrainDesignResult:
-    """RobustKnock: keep only designs that guarantee product at maximum growth (worst case)."""
+    """RobustKnock: maximize guaranteed product over all growth-maximal flux states."""
 
     return _strain_design(
-        model, product, method="robustknock", biomass=biomass,
-        max_knockouts=max_knockouts, max_solutions=max_solutions, min_growth=min_growth,
+        model,
+        product,
+        method="robustknock",
+        biomass=biomass,
+        max_knockouts=max_knockouts,
+        max_solutions=max_solutions,
+        min_growth=min_growth,
     )
