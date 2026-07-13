@@ -983,6 +983,14 @@ class CmmMainWindow(QMainWindow):
         )
         self.ko_level_combo.currentTextChanged.connect(self._populate_ko_list)
         row.addWidget(self.ko_level_combo)
+        row.addWidget(QLabel("Target product (batch, optional):"))
+        self.batch_product_combo = QComboBox()
+        self.batch_product_combo.setMinimumWidth(140)
+        self.batch_product_combo.setToolTip(
+            "Optional. When set, the Batch table adds the product's wild-type and post-knockout "
+            "flux columns."
+        )
+        row.addWidget(self.batch_product_combo)
         row.addStretch(1)
         controls_layout.addLayout(row)
 
@@ -1248,12 +1256,19 @@ class CmmMainWindow(QMainWindow):
     def run_batch_comparison(self) -> None:
         """Run MOMA/ROOM once per target (each a separate single knockout) into a batch table."""
 
+        import math
+
         method_label = self.comparison_method_combo.currentText()
         template = self.template_combo.currentText()
         level = self.ko_level_combo.currentText()
         selected = self._selected_ko_targets()  # empty -> all targets of this level
         method_key = self._comparison_method_key()
         expression, synthetic_expression = self._comparison_expression()
+        product = self.batch_product_combo.currentText()
+        product = None if product in ("", "(none)") else product
+        objective_id = next(
+            (r.id for r in self.model.reactions if r.objective_coefficient != 0), None
+        )
 
         def _compute():
             reference = reference_flux(self.model, template, gene_expression=expression)
@@ -1261,13 +1276,14 @@ class CmmMainWindow(QMainWindow):
                 perts = gene_perturbations(self.model, selected or None)
             else:
                 perts = reaction_perturbations(self.model, selected or None)
-            return batch_comparison(
-                self.model, reference, perts, method=method_key
-            ), len(perts)
+            rows = batch_comparison(
+                self.model, reference, perts, method=method_key, product_reaction=product
+            )
+            return reference, rows
 
         self.status_label.setText(f"Running batch {method_label} ({level})…")
         try:
-            rows, n = self._run_in_background(
+            reference, rows = self._run_in_background(
                 _compute, label=f"Batch {method_label} over {level}s…"
             )
         except Exception as exc:
@@ -1277,36 +1293,58 @@ class CmmMainWindow(QMainWindow):
             self.status_label.setText("Batch comparison failed.")
             return
 
-        # Most-disrupted first; infeasible (NaN distance) sorted last.
-        def _sort_key(r):
-            import math
+        # Wild-type reference values (constant across knockouts).
+        wt_biomass = float(reference.get(objective_id)) if objective_id else float("nan")
+        wt_target = float(reference.get(product)) if product else float("nan")
 
-            return (0, -r.distance) if math.isfinite(r.distance) else (1, 0.0)
+        def _essential(row) -> bool:
+            """A knockout is essential if it leaves the cell unable to grow (or infeasible)."""
+            if row.status != "optimal" or not math.isfinite(row.objective):
+                return True
+            if math.isfinite(wt_biomass) and wt_biomass > 1e-9:
+                return row.objective < 0.01 * wt_biomass  # under 1% of wild-type growth
+            return row.objective < 1e-6
 
-        rows = sorted(rows, key=_sort_key)
-        self.comparison_table.setColumnCount(6)
-        self.comparison_table.setHorizontalHeaderLabels(
-            ["Target", "Kind", "#reactions", "Status", "Distance", "Objective"]
+        # Most impactful first: lowest post-knockout growth (essential/lethal) at the top.
+        rows = sorted(
+            rows,
+            key=lambda r: r.objective if math.isfinite(r.objective) else float("-inf"),
         )
+
+        headers = ["Target", "WT Biomass", "KO Biomass", "Essential"]
+        if product:
+            headers += ["WT target", "KO target"]
+        self.comparison_table.setColumnCount(len(headers))
+        self.comparison_table.setHorizontalHeaderLabels(headers)
         self.comparison_table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            dist = "infeasible" if r.status != "optimal" else f"{r.distance:.4g}"
-            self.comparison_table.setItem(i, 0, QTableWidgetItem(r.target_id))
-            self.comparison_table.setItem(i, 1, QTableWidgetItem(r.kind))
-            self.comparison_table.setItem(i, 2, QTableWidgetItem(str(r.n_reactions)))
-            self.comparison_table.setItem(i, 3, QTableWidgetItem(r.status))
-            self.comparison_table.setItem(i, 4, QTableWidgetItem(dist))
-            self.comparison_table.setItem(i, 5, QTableWidgetItem(f"{r.objective:.4g}"))
+            ko_biomass = "—" if not math.isfinite(r.objective) else f"{r.objective:.4g}"
+            cells = [
+                r.target_id,
+                f"{wt_biomass:.4g}" if math.isfinite(wt_biomass) else "—",
+                ko_biomass,
+                "yes" if _essential(r) else "no",
+            ]
+            if product:
+                ko_target = "—" if not math.isfinite(r.product_flux) else f"{r.product_flux:.4g}"
+                cells += [
+                    f"{wt_target:.4g}" if math.isfinite(wt_target) else "—",
+                    ko_target,
+                ]
+            for col, text in enumerate(cells):
+                self.comparison_table.setItem(i, col, QTableWidgetItem(text))
+
         synthetic_note = (
             " <span style='color:#b45309'>⚠ synthetic demo expression.</span>"
             if synthetic_expression
             else ""
         )
-        lethal = sum(1 for r in rows if r.status != "optimal")
+        essential_n = sum(1 for r in rows if _essential(r))
+        product_note = f" Target product: {html.escape(product)}." if product else ""
         self.comparison_summary.setText(
             f"<b>Batch {method_label}</b> vs <b>{template}</b> over {len(rows)} {level} "
-            f"knockout(s): {lethal} infeasible/lethal. Sorted by distance (most disrupted "
-            "first)." + synthetic_note
+            f"knockout(s): {essential_n} essential (growth lost). Sorted by post-knockout "
+            f"biomass (most impactful first).{product_note}" + synthetic_note
         )
         self.status_label.setText(
             f"Batch comparison complete ({method_label}, {level})."
@@ -1476,6 +1514,8 @@ class CmmMainWindow(QMainWindow):
         self.product_combo.addItems(exchanges)
         self.sd_product_combo.clear()
         self.sd_product_combo.addItems(exchanges)
+        self.batch_product_combo.clear()
+        self.batch_product_combo.addItems(["(none)", *exchanges])  # optional in batch
         self.substrate_combo.clear()
         self.substrate_combo.addItems(["auto", *exchanges])
         self._populate_ko_list()

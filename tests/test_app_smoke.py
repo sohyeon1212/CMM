@@ -379,15 +379,15 @@ def test_comparison_batch_over_genes(app):
     window.ko_level_combo.setCurrentText("gene")
     _clear_ko(window)  # nothing selected -> batch over all genes
     window.run_batch_comparison()
-    assert window.comparison_table.columnCount() == 6
+    assert window.comparison_table.columnCount() == 4  # no target product selected
     assert window.comparison_table.rowCount() == len(window.model.genes)
     assert "Batch" in window.comparison_summary.text()
-    # The batch table carries a per-target row with a status column.
+    # The batch table reports wild-type vs post-knockout biomass and essentiality per target.
     headers = [
         window.comparison_table.horizontalHeaderItem(c).text()
         for c in range(window.comparison_table.columnCount())
     ]
-    assert headers[:2] == ["Target", "Kind"]
+    assert headers == ["Target", "WT Biomass", "KO Biomass", "Essential"]
 
 
 def test_background_execution_runs_off_thread_and_stays_responsive(app):
