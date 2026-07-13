@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from cobra import Model
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
-from qtpy.QtCore import QEventLoop, QObject, Qt, QThread, QTimer, Signal
+from qtpy.QtCore import QEvent, QEventLoop, QObject, Qt, QThread, QTimer, Signal
 from qtpy.QtGui import QColor, QFont
 from qtpy.QtWidgets import (
     QAbstractItemView,
@@ -37,6 +37,7 @@ from qtpy.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -245,6 +246,55 @@ class _AnalysisWorker(QObject):
             self.finished.emit()
 
 
+class _DisabledItemDelegate(QStyledItemDelegate):
+    """Paint disabled combo entries as clearly inert, independent of the platform.
+
+    QSS ``::item:disabled`` styling is unreliable for combo popups (notably on macOS, where it
+    does not render), so disabled rows are painted here: a muted neutral fill with faint text
+    and no hover/selection highlight. Enabled rows defer to normal styled rendering.
+    """
+
+    _DISABLED_TEXT = QColor("#b3bcc7")
+    _DISABLED_FILL = QColor("#edeef1")
+
+    def paint(self, painter, option, index):
+        if not (index.flags() & Qt.ItemIsEnabled):
+            painter.save()
+            painter.fillRect(option.rect, self._DISABLED_FILL)
+            painter.setPen(self._DISABLED_TEXT)
+            text = index.data(Qt.DisplayRole)
+            painter.drawText(
+                option.rect.adjusted(8, 0, -8, 0),
+                int(Qt.AlignVCenter | Qt.AlignLeft),
+                "" if text is None else str(text),
+            )
+            painter.restore()
+            return
+        super().paint(painter, option, index)
+
+
+class _DisabledHoverCursor(QObject):
+    """Show a not-allowed cursor over disabled entries in a combo-box popup."""
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view = view
+
+    def eventFilter(self, viewport, event):  # noqa: N802 (Qt override)
+        if event.type() == QEvent.MouseMove:
+            try:
+                pos = event.position().toPoint()  # Qt6
+            except AttributeError:
+                pos = event.pos()  # Qt5
+            index = self._view.indexAt(pos)
+            enabled = (
+                bool(self._view.model().flags(index) & Qt.ItemIsEnabled)
+                if index.isValid() else True
+            )
+            viewport.setCursor(Qt.ArrowCursor if enabled else Qt.ForbiddenCursor)
+        return False
+
+
 class CmmMainWindow(QMainWindow):
     """Main platform window over a single cobra model."""
 
@@ -270,6 +320,11 @@ class CmmMainWindow(QMainWindow):
         # Real gene expression loaded from a CSV on the Omics tab, reused as the LAD/E-Flux2
         # reference template on the Comparison tab so that path is not left to synthetic data.
         self._omics_expression: dict[str, float] | None = None
+        # Which integration methods ("lad"/"eflux2") were actually computed on the Omics tab —
+        # only those are offered as a Comparison reference template.
+        self._omics_computed_methods: set[str] = set()
+        # Keep hover-cursor event filters alive for combos that grey out entries.
+        self._cursor_filters: list[_DisabledHoverCursor] = []
         # A→B transformation finder: two expression vectors → two predicted flux states.
         self._transform_source_expression: dict[str, float] | None = None
         self._transform_target_expression: dict[str, float] | None = None
@@ -495,6 +550,8 @@ class CmmMainWindow(QMainWindow):
             return
         # A new model invalidates any loaded expression / revert state.
         self._omics_expression = None
+        self._omics_computed_methods = set()
+        self._refresh_comparison_templates()  # disable LAD/E-Flux2 until recomputed
         self._revert_source_expression = None
         self._revert_target_expression = None
         self._transform_source_expression = None
@@ -971,9 +1028,13 @@ class CmmMainWindow(QMainWindow):
         self.template_combo = QComboBox()
         self.template_combo.addItems(["fba", "pfba", "lad", "eflux2"])
         self.template_combo.setToolTip(
-            "Wild-type flux template the perturbed state is compared to. "
-            "LAD/E-Flux2 use expression loaded on the Omics tab (synthetic demo data if none)."
+            "Wild-type flux template the perturbed state is compared to. LAD/E-Flux2 reuse the "
+            "expression computed on the Omics tab, and stay disabled until that is available."
         )
+        # LAD/E-Flux2 need an omics result; grey them out (delegate + not-allowed cursor) until
+        # one exists so they cannot be picked.
+        self._style_disabled_items(self.template_combo)
+        self._refresh_comparison_templates()
         row.addWidget(self.template_combo)
         row.addWidget(QLabel("Knockout level:"))
         self.ko_level_combo = QComboBox()
@@ -1141,6 +1202,42 @@ class CmmMainWindow(QMainWindow):
 
     def _selected_ko_targets(self) -> list[str]:
         return [self.ko_selected.item(i).text() for i in range(self.ko_selected.count())]
+
+    def _style_disabled_items(self, combo: QComboBox) -> None:
+        """Make a combo's disabled entries clearly inert: faint painting + not-allowed cursor."""
+
+        combo.setItemDelegate(_DisabledItemDelegate(combo))
+        view = combo.view()
+        viewport = view.viewport()
+        viewport.setMouseTracking(True)
+        filt = _DisabledHoverCursor(view)
+        viewport.installEventFilter(filt)
+        self._cursor_filters.append(filt)
+
+    def _refresh_comparison_templates(self) -> None:
+        """Enable LAD/E-Flux2 reference templates only once an omics result exists."""
+
+        combo = getattr(self, "template_combo", None)
+        if combo is None:
+            return
+        for method in ("lad", "eflux2"):
+            index = combo.findText(method)
+            if index < 0:
+                continue
+            item = combo.model().item(index)
+            if item is None:
+                continue
+            ready = method in self._omics_computed_methods
+            item.setEnabled(ready)
+            item.setToolTip(
+                "" if ready
+                else f"Compute {method.upper()} on the Omics tab to use it as a "
+                "reference template."
+            )
+        # If the current pick just became unavailable, fall back to a template that always runs.
+        current = combo.currentText()
+        if current in ("lad", "eflux2") and current not in self._omics_computed_methods:
+            combo.setCurrentText("fba")
 
     def _comparison_method_key(self) -> str:
         label = self.comparison_method_combo.currentText()
@@ -2030,9 +2127,13 @@ class CmmMainWindow(QMainWindow):
         """Store a loaded gene × condition table and list its conditions (does not compute)."""
 
         self._omics_table_df = table
-        # Discard any previous result so the show-all toggle can't re-render stale data.
+        # Discard any previous result so the show-all toggle can't re-render stale data, and
+        # so a new source's methods must be recomputed before they back a Comparison template.
         self._omics_fluxes_by_condition = None
         self._omics_conditions_order = []
+        self._omics_expression = None
+        self._omics_computed_methods = set()
+        self._refresh_comparison_templates()
         self.omics_table.setRowCount(0)
         conditions = [str(c) for c in table.columns]
         self.omics_file_label.setText(
@@ -2165,13 +2266,16 @@ class CmmMainWindow(QMainWindow):
         )
         self._render_omics_table()
 
-        # Reuse the first computed condition as the Comparison tab's LAD/E-Flux2 reference.
+        # Reuse the first computed condition as the Comparison tab's LAD/E-Flux2 reference,
+        # and record this method so only it is offered as a reference template.
         first = ok[0]
         self._omics_expression = {
             str(gene): float(value)
             for gene, value in table[first].items()
             if pd.notna(value)
         }
+        self._omics_computed_methods.add(method)
+        self._refresh_comparison_templates()  # this method is now available as a reference
         note = (
             f" ({len(failed)} infeasible: {html.escape(', '.join(failed))})" if failed else ""
         )
