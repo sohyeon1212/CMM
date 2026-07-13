@@ -137,9 +137,11 @@ def moma(
     if not linear:
         solvers.require("QP", model.solver.interface, feature="L2 MOMA")
     # COBRApy/Gurobi may leak a backend ``GurobiError`` while reading primal values from an
-    # infeasible solve.  Probe feasibility without retrieving a full solution first.
-    model.slim_optimize(error_value=None)
-    if model.solver.status == "infeasible":
+    # infeasible solve.  Probe feasibility without retrieving a full solution first.  Pass a
+    # NaN error_value so a lethal knockout returns non-optimal here instead of raising
+    # ``Infeasible`` (which would abort a whole batch run over many knockouts).
+    model.slim_optimize(error_value=float("nan"))
+    if model.solver.status != "optimal":
         return ComparisonResult(
             method=method, status="infeasible", distance=float("nan")
         )
@@ -174,8 +176,10 @@ def room(
         raise ValueError("ROOM delta and epsilon must be non-negative")
     if not linear:
         solvers.require("MILP", model.solver.interface, feature="ROOM")
-    model.slim_optimize(error_value=None)
-    if model.solver.status == "infeasible":
+    # NaN error_value so a lethal knockout returns non-optimal instead of raising Infeasible
+    # (which would abort a batch run over many knockouts).
+    model.slim_optimize(error_value=float("nan"))
+    if model.solver.status != "optimal":
         return ComparisonResult(
             method="room", status="infeasible", distance=float("nan")
         )
@@ -251,6 +255,7 @@ class BatchComparisonRow:
     distance: float
     objective: float  # objective-reaction flux at the perturbed state (e.g. growth)
     n_reactions: int  # how many reactions the knockout blocked
+    product_flux: float = float("nan")  # target-product flux at the perturbed state (if any)
 
 
 def batch_comparison(
@@ -262,12 +267,14 @@ def batch_comparison(
     delta: float = 0.03,
     epsilon: float = 1e-3,
     objective_reaction: str | None = None,
+    product_reaction: str | None = None,
 ) -> list[BatchComparisonRow]:
     """Run MOMA/ROOM for each perturbation against one reference, returning a batch table.
 
     This is the batch perturbation-response job runner: enumerate gene or reaction knockouts
     (via :mod:`cmm.features._perturbation`), score each against the same wild-type reference,
     and collect the distance, the objective (growth) at the perturbed state, and the status.
+    When ``product_reaction`` is given, each row also carries that reaction's perturbed flux.
     """
 
     objective = objective_reaction or _objective_reaction_id(model)
@@ -286,6 +293,11 @@ def batch_comparison(
             if (result.fluxes and objective is not None)
             else float("nan")
         )
+        product_flux = (
+            float(result.fluxes.get(product_reaction, float("nan")))
+            if (result.fluxes and product_reaction is not None)
+            else float("nan")
+        )
         rows.append(
             BatchComparisonRow(
                 target_id=pert.target_id,
@@ -294,6 +306,7 @@ def batch_comparison(
                 distance=result.distance,
                 objective=growth,
                 n_reactions=len(pert.reaction_ids),
+                product_flux=product_flux,
             )
         )
     return rows
