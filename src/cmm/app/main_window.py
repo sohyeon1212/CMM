@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -986,14 +987,14 @@ class CmmMainWindow(QMainWindow):
         controls_layout.addLayout(row)
 
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Knock out (select one or more):"))
+        row2.addWidget(QLabel("Knock out:"))
         run_btn = QPushButton("Run (selected as one KO)")
         run_btn.setToolTip("MOMA/ROOM with all selected targets knocked out together")
         run_btn.clicked.connect(self.run_comparison)
         batch_btn = QPushButton("Batch (each separately)")
         batch_btn.setToolTip(
-            "Run MOMA/ROOM once per target as a separate single knockout "
-            "(all targets of this level if none selected)."
+            "Run MOMA/ROOM once per target as a separate single knockout — the selected "
+            "targets, or all targets of this level when none are selected."
         )
         batch_btn.clicked.connect(self.run_batch_comparison)
         row2.addWidget(run_btn)
@@ -1001,14 +1002,56 @@ class CmmMainWindow(QMainWindow):
         row2.addStretch(1)
         controls_layout.addLayout(row2)
 
-        self.ko_list = QListWidget()
-        self.ko_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.ko_list.setMaximumHeight(120)
-        self.ko_list.setToolTip(
-            "Ctrl/Shift-click to select multiple targets. Selecting several then 'Run' knocks "
-            "them out together; 'Batch' runs each on its own."
+        # Two panels: left = searchable catalogue of all targets, right = the chosen knockout
+        # set. Add/remove moves ids between them, so the selection is always plainly visible.
+        picker = QHBoxLayout()
+
+        left = QVBoxLayout()
+        self.ko_filter = QLineEdit()
+        self.ko_filter.setPlaceholderText("Search targets…")
+        self.ko_filter.setClearButtonEnabled(True)
+        self.ko_filter.textChanged.connect(self._filter_ko_list)
+        left.addWidget(self.ko_filter)
+        self.ko_available = QListWidget()
+        self.ko_available.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.ko_available.setMaximumHeight(150)
+        self.ko_available.setToolTip("Double-click (or select and Add →) to add a target.")
+        self.ko_available.itemDoubleClicked.connect(lambda item: self._add_ko_targets([item.text()]))
+        left.addWidget(self.ko_available)
+        picker.addLayout(left, 1)
+
+        # Add / remove buttons between the two lists.
+        mid = QVBoxLayout()
+        mid.addStretch(1)
+        add_btn = QPushButton("Add →")
+        add_btn.setToolTip("Add the highlighted targets to the knockout set")
+        add_btn.clicked.connect(self._add_selected_ko)
+        remove_btn = QPushButton("← Remove")
+        remove_btn.setToolTip("Remove the highlighted targets from the knockout set")
+        remove_btn.clicked.connect(self._remove_selected_ko)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setToolTip("Empty the knockout set")
+        clear_btn.clicked.connect(self._clear_ko_selected)
+        mid.addWidget(add_btn)
+        mid.addWidget(remove_btn)
+        mid.addWidget(clear_btn)
+        mid.addStretch(1)
+        picker.addLayout(mid)
+
+        right = QVBoxLayout()
+        self.ko_selected_label = QLabel("Selected (0):")
+        right.addWidget(self.ko_selected_label)
+        self.ko_selected = QListWidget()
+        self.ko_selected.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.ko_selected.setMaximumHeight(150)
+        self.ko_selected.setToolTip("The knockout set. Double-click (or select and ← Remove) to drop one.")
+        self.ko_selected.itemDoubleClicked.connect(
+            lambda item: self._remove_ko_targets([item.text()])
         )
-        controls_layout.addWidget(self.ko_list)
+        right.addWidget(self.ko_selected)
+        picker.addLayout(right, 1)
+
+        controls_layout.addLayout(picker)
         layout.addWidget(controls)
 
         self.comparison_summary = QLabel(
@@ -1031,19 +1074,65 @@ class CmmMainWindow(QMainWindow):
         return tab
 
     def _populate_ko_list(self) -> None:
-        """Fill the knockout list with the model's genes or reactions for the current level."""
+        """Fill the available-targets catalogue for the current level; clear the chosen set."""
 
-        if not hasattr(self, "ko_list"):
+        if not hasattr(self, "ko_available"):
             return
         level = self.ko_level_combo.currentText()
-        self.ko_list.clear()
-        if level == "gene":
-            self.ko_list.addItems([g.id for g in self.model.genes])
-        else:
-            self.ko_list.addItems([r.id for r in self.model.reactions])
+        ids = (
+            [g.id for g in self.model.genes] if level == "gene"
+            else [r.id for r in self.model.reactions]
+        )
+        self.ko_available.clear()
+        self.ko_available.addItems(ids)
+        self.ko_selected.clear()  # switching level invalidates the previous selection
+        if hasattr(self, "ko_filter"):
+            self._filter_ko_list(self.ko_filter.text())
+        self._update_ko_selected_label()
+
+    def _filter_ko_list(self, text: str) -> None:
+        """Hide catalogue targets that do not match the search box (case-insensitive)."""
+
+        query = text.strip().lower()
+        for i in range(self.ko_available.count()):
+            item = self.ko_available.item(i)
+            item.setHidden(bool(query) and query not in item.text().lower())
+
+    def _add_ko_targets(self, ids) -> None:
+        """Add target ids to the chosen set, skipping ones already present."""
+
+        existing = {
+            self.ko_selected.item(i).text() for i in range(self.ko_selected.count())
+        }
+        for target_id in ids:
+            if target_id not in existing:
+                self.ko_selected.addItem(target_id)
+                existing.add(target_id)
+        self._update_ko_selected_label()
+
+    def _remove_ko_targets(self, ids) -> None:
+        drop = set(ids)
+        for i in range(self.ko_selected.count() - 1, -1, -1):
+            if self.ko_selected.item(i).text() in drop:
+                self.ko_selected.takeItem(i)
+        self._update_ko_selected_label()
+
+    def _add_selected_ko(self) -> None:
+        self._add_ko_targets([item.text() for item in self.ko_available.selectedItems()])
+
+    def _remove_selected_ko(self) -> None:
+        self._remove_ko_targets([item.text() for item in self.ko_selected.selectedItems()])
+
+    def _clear_ko_selected(self) -> None:
+        self.ko_selected.clear()
+        self._update_ko_selected_label()
+
+    def _update_ko_selected_label(self) -> None:
+        if hasattr(self, "ko_selected_label"):
+            self.ko_selected_label.setText(f"Selected ({self.ko_selected.count()}):")
 
     def _selected_ko_targets(self) -> list[str]:
-        return [item.text() for item in self.ko_list.selectedItems()]
+        return [self.ko_selected.item(i).text() for i in range(self.ko_selected.count())]
 
     def _comparison_method_key(self) -> str:
         label = self.comparison_method_combo.currentText()
@@ -1076,7 +1165,8 @@ class CmmMainWindow(QMainWindow):
         targets = self._selected_ko_targets()
         if not targets:
             self.comparison_summary.setText(
-                f"Select one or more {level}s to knock out (Ctrl/Shift-click for several)."
+                f"Add one or more {level}s to the knockout set (search on the left, then "
+                "Add →) before running."
             )
             return
         method_key = self._comparison_method_key()

@@ -29,13 +29,17 @@ def app():
     return instance
 
 
-def _select_ko(window, ids):
-    """Select the given target ids in the Comparison tab's knockout list."""
+def _clear_ko(window):
+    """Empty the Comparison tab's chosen-knockout set."""
 
-    window.ko_list.clearSelection()
-    for i in range(window.ko_list.count()):
-        if window.ko_list.item(i).text() in ids:
-            window.ko_list.item(i).setSelected(True)
+    window._clear_ko_selected()
+
+
+def _select_ko(window, ids):
+    """Set the Comparison tab's chosen-knockout set to exactly the given ids."""
+
+    window._clear_ko_selected()
+    window._add_ko_targets(list(ids))
 
 
 def test_window_builds_and_drives_services(app):
@@ -362,9 +366,9 @@ def test_comparison_multi_knockout(app):
 def test_comparison_requires_a_selection(app):
     window = CmmMainWindow(build_demo_model())
     window._goto_tab("Comparison")
-    window.ko_list.clearSelection()
+    _clear_ko(window)
     window.run_comparison()
-    assert "Select one or more" in window.comparison_summary.text()
+    assert "Add one or more" in window.comparison_summary.text()
 
 
 def test_comparison_batch_over_genes(app):
@@ -373,7 +377,7 @@ def test_comparison_batch_over_genes(app):
     window.comparison_method_combo.setCurrentText("MOMA (L2)")
     window.template_combo.setCurrentText("pfba")
     window.ko_level_combo.setCurrentText("gene")
-    window.ko_list.clearSelection()  # no selection -> batch over all genes
+    _clear_ko(window)  # nothing selected -> batch over all genes
     window.run_batch_comparison()
     assert window.comparison_table.columnCount() == 6
     assert window.comparison_table.rowCount() == len(window.model.genes)
