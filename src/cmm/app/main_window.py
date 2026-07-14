@@ -2432,12 +2432,15 @@ class CmmMainWindow(QMainWindow):
                 f"Could not read {html.escape(role)} expression: {html.escape(str(exc))}"
             )
             return
+        import os
+
+        name = os.path.basename(path)
         if role == "source":
             self._revert_source_expression = expression
-            self.revert_source_label.setText(f"{len(expression)} genes")
+            self.revert_source_label.setText(f"{name} ({len(expression)} genes)")
         else:
             self._revert_target_expression = expression
-            self.revert_target_label.setText(f"{len(expression)} genes")
+            self.revert_target_label.setText(f"{name} ({len(expression)} genes)")
         self._update_revert_run_state()
         self.status_label.setText(
             f"Loaded {role} expression ({len(expression)} genes)."
@@ -2615,12 +2618,15 @@ class CmmMainWindow(QMainWindow):
                 f"Could not read {html.escape(role)} expression: {html.escape(str(exc))}"
             )
             return
+        import os
+
+        name = os.path.basename(path)
         if role == "source":
             self._transform_source_expression = expression
-            self.transform_source_label.setText(f"{len(expression)} genes")
+            self.transform_source_label.setText(f"{name} ({len(expression)} genes)")
         else:
             self._transform_target_expression = expression
-            self.transform_target_label.setText(f"{len(expression)} genes")
+            self.transform_target_label.setText(f"{name} ({len(expression)} genes)")
         self._update_transform_run_state()
         self.status_label.setText(
             f"Loaded {role} (A→B) expression ({len(expression)} genes)."
