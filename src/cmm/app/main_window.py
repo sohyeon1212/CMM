@@ -323,6 +323,12 @@ class CmmMainWindow(QMainWindow):
         # Which integration methods ("lad"/"eflux2") were actually computed on the Omics tab —
         # only those are offered as a Comparison reference template.
         self._omics_computed_methods: set[str] = set()
+        # Last single-run MOMA/ROOM result, kept so the change-threshold can re-filter the
+        # table without re-solving.
+        self._comparison_cache: dict | None = None
+        # Last production result (kind, result) so the FSEOF/FVSEOF "show all" toggle can
+        # re-render the table without recomputing.
+        self._production_result: tuple[str, object] | None = None
         # Keep hover-cursor event filters alive for combos that grey out entries.
         self._cursor_filters: list[_DisabledHoverCursor] = []
         # A→B transformation finder: two expression vectors → two predicted flux states.
@@ -874,13 +880,30 @@ class CmmMainWindow(QMainWindow):
         self._production_canvas = None
         self._production_toolbar = None
 
+        # Right side: a header row with the FSEOF/FVSEOF "show all" toggle, above the table.
+        right_box = QWidget()
+        right_layout = QVBoxLayout(right_box)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        table_header = QHBoxLayout()
+        table_header.addWidget(QLabel("Result table:"))
+        table_header.addStretch(1)
+        self.production_show_all_check = QCheckBox("Show all reactions")
+        self.production_show_all_check.setToolTip(
+            "FSEOF/FVSEOF only. Off: amplify/knockdown targets. On: every reaction "
+            "(unchanged ones included)."
+        )
+        self.production_show_all_check.toggled.connect(self._rerender_production_table)
+        table_header.addWidget(self.production_show_all_check)
+        right_layout.addLayout(table_header)
+
         self.fseof_table = QTableWidget(0, 4)
         self._set_production_table_headers(
             ["Reaction", "Flux @ low enforce", "Flux @ high enforce", "Trend"]
         )
         self.fseof_table.verticalHeader().setVisible(False)
         self.fseof_table.setAlternatingRowColors(True)
-        results.addWidget(self.fseof_table)
+        right_layout.addWidget(self.fseof_table)
+        results.addWidget(right_box)
         results.setStretchFactor(0, 1)
         results.setStretchFactor(1, 1)
         results.setSizes([10000, 10000])
@@ -1069,6 +1092,21 @@ class CmmMainWindow(QMainWindow):
         row2.addWidget(run_btn)
         row2.addWidget(batch_btn)
         row2.addStretch(1)
+        # Significant-change threshold for the single-run table: a reaction is shown only when
+        # |perturbed - reference| exceeds this fraction of |reference| (plus a small floor).
+        # This matches ROOM's own significance criterion and hides alternate-optimum drift.
+        row2.addWidget(QLabel("Significant change ≥"))
+        self.comparison_threshold_spin = QDoubleSpinBox()
+        self.comparison_threshold_spin.setRange(0.0, 100.0)
+        self.comparison_threshold_spin.setSingleStep(1.0)
+        self.comparison_threshold_spin.setValue(3.0)
+        self.comparison_threshold_spin.setSuffix(" % of ref")
+        self.comparison_threshold_spin.setToolTip(
+            "Show a reaction only when |perturbed − reference| > this % of |reference| + 0.001. "
+            "0% shows every reaction that moved at all."
+        )
+        self.comparison_threshold_spin.valueChanged.connect(self._render_comparison_table)
+        row2.addWidget(self.comparison_threshold_spin)
         controls_layout.addLayout(row2)
 
         # Two panels: left = searchable catalogue of all targets, right = the chosen knockout
@@ -1264,6 +1302,7 @@ class CmmMainWindow(QMainWindow):
         return shown if len(targets) <= 4 else f"{shown}, +{len(targets) - 4} more"
 
     def run_comparison(self) -> None:
+        self._comparison_cache = None  # drop any prior result until this run succeeds
         method_label = self.comparison_method_combo.currentText()
         template = self.template_combo.currentText()
         level = self.ko_level_combo.currentText()
@@ -1331,10 +1370,43 @@ class CmmMainWindow(QMainWindow):
             )
             self.status_label.setText("Comparison: infeasible perturbation.")
             return
+        # Cache the raw solve so the change-threshold can re-filter without re-solving.
+        self._comparison_cache = {
+            "reference": reference,
+            "fluxes": dict(result.fluxes),
+            "method_label": method_label,
+            "template": template,
+            "level": level,
+            "ko_label": ko_label,
+            "blocked_note": blocked_note,
+            "status": result.status,
+            "distance": result.distance,
+            "synthetic_note": synthetic_note,
+        }
+        self._render_comparison_table()
+
+    def _render_comparison_table(self) -> None:
+        """Fill the single-run table with reactions whose change exceeds the threshold."""
+
+        cache = self._comparison_cache
+        if not cache:
+            return
+        reference = cache["reference"]
+        fluxes = cache["fluxes"]
+        delta = self.comparison_threshold_spin.value() / 100.0
+        epsilon = 1e-3  # absolute floor so reactions near zero reference aren't over-reported
         rows = sorted(
-            result.fluxes.items(), key=lambda kv: -abs(kv[1] - reference.get(kv[0]))
+            fluxes.items(), key=lambda kv: -abs(kv[1] - reference.get(kv[0]))
         )
-        changed = [(r, v) for r, v in rows if abs(v - reference.get(r)) > 1e-6]
+        changed = [
+            (r, v)
+            for r, v in rows
+            if abs(v - reference.get(r)) > delta * abs(reference.get(r)) + epsilon
+        ]
+        self.comparison_table.setColumnCount(3)
+        self.comparison_table.setHorizontalHeaderLabels(
+            ["Reaction", "Reference flux", "Perturbed flux"]
+        )
         self.comparison_table.setRowCount(len(changed))
         for i, (rid, flux) in enumerate(changed):
             self.comparison_table.setItem(i, 0, QTableWidgetItem(rid))
@@ -1343,17 +1415,25 @@ class CmmMainWindow(QMainWindow):
             )
             self.comparison_table.setItem(i, 2, QTableWidgetItem(f"{flux:.4g}"))
         self.comparison_summary.setText(
-            f"<b>{method_label}</b> vs <b>{template}</b> template after knocking out "
-            f"{level} {html.escape(ko_label)}{blocked_note}: status {result.status}, "
-            f"distance {result.distance:.4g}, {len(changed)} reactions changed."
-            + synthetic_note
+            f"<b>{cache['method_label']}</b> vs <b>{cache['template']}</b> template after "
+            f"knocking out {cache['level']} {html.escape(cache['ko_label'])}"
+            f"{cache['blocked_note']}: status {cache['status']}, distance "
+            f"{cache['distance']:.4g}, {len(changed)} reactions changed "
+            f"(≥ {self.comparison_threshold_spin.value():g}% of reference)."
+            + cache["synthetic_note"]
         )
-        self.status_label.setText(f"Comparison complete ({method_label}, {template}).")
+        self.status_label.setText(
+            f"Comparison complete ({cache['method_label']}, {cache['template']})."
+        )
 
     def run_batch_comparison(self) -> None:
         """Run MOMA/ROOM once per target (each a separate single knockout) into a batch table."""
 
         import math
+
+        # The batch reshapes the table; drop the single-run cache so the change-threshold
+        # spinbox can't re-render a stale single-run over the batch table.
+        self._comparison_cache = None
 
         method_label = self.comparison_method_combo.currentText()
         template = self.template_combo.currentText()
@@ -1909,15 +1989,29 @@ class CmmMainWindow(QMainWindow):
                 if header_item is not None and tip:
                     header_item.setToolTip(tip)
 
-    def _fill_fseof_table(self, result) -> None:
-        """Show FSEOF amplify/knockdown targets ranked by change in |flux| across the scan."""
+    def _rerender_production_table(self) -> None:
+        """Re-render the cached FSEOF/FVSEOF result when the show-all toggle changes."""
 
+        cached = self._production_result
+        if not cached:
+            return
+        kind, result = cached
+        if kind == "fseof":
+            self._fill_fseof_table(result)
+        elif kind == "fvseof":
+            self._fill_fvseof_table(result)
+
+    def _fill_fseof_table(self, result) -> None:
+        """Show FSEOF targets ranked by change in |flux|; all reactions when 'show all' is on."""
+
+        self._production_result = ("fseof", result)
+        show_all = self.production_show_all_check.isChecked()
         levels = list(result.enforced_levels)
         lo, hi = levels[0], levels[-1]
         rows = []
         for rid in result.trends.index:
             cls = str(result.trends.loc[rid, "classification"])
-            if cls not in ("amplify", "knockdown"):
+            if not show_all and cls not in ("amplify", "knockdown"):
                 continue
             flo = float(result.trends.loc[rid, lo])
             fhi = float(result.trends.loc[rid, hi])
@@ -1943,15 +2037,17 @@ class CmmMainWindow(QMainWindow):
             self.fseof_table.setItem(i, 3, QTableWidgetItem(cls))
 
     def _fill_fvseof_table(self, result) -> None:
-        """Show FVSEOF targets with mean flux endpoints; robust ones are flagged."""
+        """Show FVSEOF targets (robust flagged); all reactions when 'show all' is on."""
 
+        self._production_result = ("fvseof", result)
+        show_all = self.production_show_all_check.isChecked()
         levels = list(result.enforced_levels)
         lo, hi = levels[0], levels[-1]
         robust_ids = set(result.robust_targets())
         rows = []
         for rid in result.classification.index:
             cls = str(result.classification.loc[rid])
-            if cls not in ("amplify", "knockdown"):
+            if not show_all and cls not in ("amplify", "knockdown"):
                 continue
             mlo = float(result.mean.loc[rid, lo])
             mhi = float(result.mean.loc[rid, hi])
@@ -1981,6 +2077,7 @@ class CmmMainWindow(QMainWindow):
     def _fill_envelope_table(self, envelope) -> None:
         """List the production-envelope points: growth range attainable at each product flux."""
 
+        self._production_result = ("envelope", envelope)  # show-all toggle does not apply here
         frame = envelope.to_frame()
         self._set_production_table_headers(
             ["Product flux", "Growth (min)", "Growth (max)"],
@@ -2010,6 +2107,7 @@ class CmmMainWindow(QMainWindow):
     def run_theoretical_yield(self) -> None:
         def _do():
             self.fseof_table.setRowCount(0)  # yield is a scalar, not a target scan
+            self._production_result = None  # nothing for the show-all toggle to re-render
             product = self._current_product()
             result = theoretical_yield(
                 self.model,
