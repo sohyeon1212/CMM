@@ -33,8 +33,17 @@
 - Revert / Transform: the loaded source/target expression filename is shown next to each input.
 - Production: removed the redundant Run FBA button (duplicated the Simulation tab and produced
   no Production-tab output).
+- GUI: the main window opens at a narrower default (1160×760). The wide single-row control
+  bars on the Production, Comparison, Strain Design, and Omics tabs were split across rows so
+  the content minimum width no longer forces the window far wider (~1574 → ~1146 px).
+- GUI: combo popup entries are left-aligned.
 
 ### Fixed
+
+- GUI: combo-box and spin-box arrows now render (drawn from bundled SVG assets); the previous
+  CSS border-triangle never drew in Qt and showed a grey box.
+- GUI: tab labels no longer clip or overflow into a scroll button — the stylesheet font-weight
+  that Qt's tab sizing ignored was removed and tab padding trimmed so all tabs fit.
 
 - Comparison batch (MOMA/ROOM) no longer aborts the whole run when a lethal knockout makes the
   model infeasible; such a knockout is recorded as infeasible and the run continues.
