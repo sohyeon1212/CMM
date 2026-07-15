@@ -10,6 +10,9 @@ from __future__ import annotations
 import html
 import math
 from collections.abc import Mapping
+from pathlib import Path
+
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 from cobra import Model
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -136,9 +139,8 @@ QComboBox { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
 QComboBox:hover { border-color: #9bb4d0; }
 QComboBox:focus { border-color: #2f5e8f; }
 QComboBox::drop-down { border: none; width: 22px; }
-QComboBox::down-arrow { image: none; width: 0; height: 0; margin-right: 9px;
-    border-left: 4px solid transparent; border-right: 4px solid transparent;
-    border-top: 5px solid #5c6b7e; }
+QComboBox::down-arrow { image: url(__ASSETS__/down_arrow.svg);
+    width: 10px; height: 7px; margin-right: 8px; }
 QComboBox QAbstractItemView { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
     selection-background-color: #2f5e8f; selection-color: #ffffff; outline: none; }
 
@@ -146,6 +148,17 @@ QComboBox QAbstractItemView { background: #ffffff; color: #1a2433; border: 1px s
 QDoubleSpinBox, QSpinBox { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
     border-radius: 6px; padding: 3px 6px; min-height: 22px; }
 QDoubleSpinBox:focus, QSpinBox:focus { border-color: #2f5e8f; }
+/* Styling a spin box in QSS drops the native step arrows, so draw them explicitly. */
+QDoubleSpinBox::up-button, QSpinBox::up-button { subcontrol-origin: border;
+    subcontrol-position: top right; width: 16px; border-left: 1px solid #cdd6e1; }
+QDoubleSpinBox::down-button, QSpinBox::down-button { subcontrol-origin: border;
+    subcontrol-position: bottom right; width: 16px; border-left: 1px solid #cdd6e1; }
+QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover { background: #eef2f7; }
+QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {
+    image: url(__ASSETS__/up_arrow.svg); width: 9px; height: 6px; }
+QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {
+    image: url(__ASSETS__/down_arrow.svg); width: 9px; height: 6px; }
 
 /* Flux-range slider */
 QSlider::groove:horizontal { height: 5px; background: #d2dae4; border-radius: 3px; }
@@ -164,11 +177,15 @@ QHeaderView::section { background: #e8edf3; color: #34465c; padding: 6px 8px; bo
 
 /* Tabs */
 QTabWidget::pane { border: 1px solid #d2dae4; border-radius: 6px; top: -1px; background: #ffffff; }
-QTabBar::tab { background: #e6ebf2; color: #54637a; padding: 8px 18px; margin-right: 2px;
+/* No font-weight here: Qt's tabSizeHint ignores a stylesheet font-weight, so a bold label is
+   drawn wider than the tab Qt reserved for it and clips. The tab-bar font (incl. its DemiBold
+   weight) is set on the widget in code so the size hint measures the real text; the selected
+   tab is distinguished by colour + underline. */
+QTabBar::tab { background: #e6ebf2; color: #54637a; padding: 7px 13px; margin-right: 2px;
     border: 1px solid #d8dfe8; border-bottom: none;
     border-top-left-radius: 6px; border-top-right-radius: 6px; }
 QTabBar::tab:hover { background: #eef2f7; color: #2f5e8f; }
-QTabBar::tab:selected { background: #ffffff; color: #1b2b44; font-weight: 600;
+QTabBar::tab:selected { background: #ffffff; color: #1b2b44;
     border-bottom: 2px solid #2f5e8f; margin-bottom: -1px; }
 
 /* Scrollbars */
@@ -246,8 +263,8 @@ class _AnalysisWorker(QObject):
             self.finished.emit()
 
 
-class _DisabledItemDelegate(QStyledItemDelegate):
-    """Paint disabled combo entries as clearly inert, independent of the platform.
+class _ComboItemDelegate(QStyledItemDelegate):
+    """Left-align combo popup entries and paint disabled ones as clearly inert.
 
     QSS ``::item:disabled`` styling is unreliable for combo popups (notably on macOS, where it
     does not render), so disabled rows are painted here: a muted neutral fill with faint text
@@ -256,6 +273,11 @@ class _DisabledItemDelegate(QStyledItemDelegate):
 
     _DISABLED_TEXT = QColor("#b3bcc7")
     _DISABLED_FILL = QColor("#edeef1")
+    _ALIGN = int(Qt.AlignLeft | Qt.AlignVCenter)
+
+    def initStyleOption(self, option, index):  # noqa: N802 (Qt override)
+        super().initStyleOption(option, index)
+        option.displayAlignment = Qt.AlignLeft | Qt.AlignVCenter
 
     def paint(self, painter, option, index):
         if not (index.flags() & Qt.ItemIsEnabled):
@@ -263,11 +285,9 @@ class _DisabledItemDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, self._DISABLED_FILL)
             painter.setPen(self._DISABLED_TEXT)
             text = index.data(Qt.DisplayRole)
-            painter.drawText(
-                option.rect.adjusted(8, 0, -8, 0),
-                int(Qt.AlignVCenter | Qt.AlignLeft),
-                "" if text is None else str(text),
-            )
+            # Indent to match the styled left padding of enabled rows.
+            rect = option.rect.adjusted(6, 0, -6, 0)
+            painter.drawText(rect, self._ALIGN, "" if text is None else str(text))
             painter.restore()
             return
         super().paint(painter, option, index)
@@ -344,9 +364,11 @@ class CmmMainWindow(QMainWindow):
         # Guards re-entrant background runs (see _run_in_background).
         self._busy = False
         self.setWindowTitle("CMM — Cellular Metabolic Modeling Platform")
-        self.resize(1180, 740)
-        self.setStyleSheet(_STYLE)
+        self.resize(1160, 760)
+        # Qt QSS ``image: url(...)`` needs a real path; forward slashes work cross-platform.
+        self.setStyleSheet(_STYLE.replace("__ASSETS__", _ASSETS_DIR.as_posix()))
         self._build_ui()
+        self._style_all_combo_popups()
         self.load_model(model)
 
     # -- construction -------------------------------------------------------
@@ -749,22 +771,26 @@ class CmmMainWindow(QMainWindow):
         load_btn = QPushButton("Load expression CSV…")
         load_btn.clicked.connect(self.load_expression_csv)
         row.addWidget(load_btn)
-        self.omics_file_label = QLabel("no file loaded")
-        self.omics_file_label.setStyleSheet("color: #5c6b7e; font-style: italic;")
-        row.addWidget(self.omics_file_label)
         demo_btn = QPushButton("Use demo expression")
         demo_btn.clicked.connect(self.load_omics_demo)
         row.addWidget(demo_btn)
-        # Compute is separate so the method can change and re-run on the same loaded data.
+        row.addStretch(1)
+        cbox.addLayout(row)
+
+        # Row 2: the loaded filename and Compute (separate so the method can change and re-run
+        # on the same loaded data).
+        run_row = QHBoxLayout()
+        self.omics_file_label = QLabel("no file loaded")
+        self.omics_file_label.setStyleSheet("color: #5c6b7e; font-style: italic;")
+        run_row.addWidget(self.omics_file_label, 1)
         self.omics_compute_btn = QPushButton("Compute")
         self.omics_compute_btn.setEnabled(False)
         self.omics_compute_btn.setToolTip(
             "Load an expression source first, then compute the checked conditions."
         )
         self.omics_compute_btn.clicked.connect(self.compute_omics)
-        row.addWidget(self.omics_compute_btn)
-        row.addStretch(1)
-        cbox.addLayout(row)
+        run_row.addWidget(self.omics_compute_btn)
+        cbox.addLayout(run_row)
 
         # Row 2: the conditions detected in the file, each check-selectable.
         cond_row = QHBoxLayout()
@@ -832,23 +858,31 @@ class CmmMainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         controls = QGroupBox("Production design")
-        form = QHBoxLayout(controls)
-        form.addWidget(QLabel("Target product:"))
+        controls_layout = QVBoxLayout(controls)
+
+        # Row 1: the product / substrate / oxygen selectors.
+        selectors = QHBoxLayout()
+        selectors.addWidget(QLabel("Target product:"))
         self.product_combo = QComboBox()
         self.product_combo.setMinimumWidth(160)
         self.product_combo.setToolTip("Exchange reaction of the target product")
         self.product_combo.currentTextChanged.connect(self._on_product_changed)
-        form.addWidget(self.product_combo, 1)
-        form.addWidget(QLabel("substrate:"))
+        selectors.addWidget(self.product_combo, 1)
+        selectors.addWidget(QLabel("substrate:"))
         self.substrate_combo = QComboBox()
         self.substrate_combo.setMinimumWidth(140)
         self.substrate_combo.setToolTip(
             "Carbon substrate (auto = detect from the medium)"
         )
-        form.addWidget(self.substrate_combo, 1)
+        selectors.addWidget(self.substrate_combo, 1)
         self.anaerobic_combo = QComboBox()
         self.anaerobic_combo.addItems(["aerobic", "anaerobic"])
-        form.addWidget(self.anaerobic_combo)
+        selectors.addWidget(self.anaerobic_combo)
+        controls_layout.addLayout(selectors)
+
+        # Row 2: the analysis actions, kept on their own line so the controls box does not
+        # force the whole window wide.
+        actions = QHBoxLayout()
         yield_btn = QPushButton("Theoretical yield")
         yield_btn.clicked.connect(self.run_theoretical_yield)
         envelope_btn = QPushButton("Production envelope")
@@ -857,11 +891,13 @@ class CmmMainWindow(QMainWindow):
         fseof_btn.clicked.connect(self.run_fseof_plot)
         fvseof_btn = QPushButton("FVSEOF (robust)")
         fvseof_btn.clicked.connect(self.run_fvseof_plot)
-        form.addWidget(yield_btn)
-        form.addWidget(envelope_btn)
-        form.addWidget(fseof_btn)
-        form.addWidget(fvseof_btn)
+        actions.addWidget(yield_btn)
+        actions.addWidget(envelope_btn)
+        actions.addWidget(fseof_btn)
+        actions.addWidget(fvseof_btn)
+        actions.addStretch(1)
         self._production_buttons = [yield_btn, envelope_btn, fseof_btn, fvseof_btn]
+        controls_layout.addLayout(actions)
         layout.addWidget(controls)
 
         self.yield_label = QLabel("Select a product and compute its theoretical yield.")
@@ -917,40 +953,48 @@ class CmmMainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         controls = QGroupBox("Growth-coupled strain design (OptKnock / RobustKnock)")
-        form = QHBoxLayout(controls)
-        form.addWidget(QLabel("Target product:"))
+        form = QVBoxLayout(controls)
+
+        # Row 1: target product + method.
+        pick_row = QHBoxLayout()
+        pick_row.addWidget(QLabel("Target product:"))
         self.sd_product_combo = QComboBox()
         self.sd_product_combo.setMinimumWidth(150)
         self.sd_product_combo.setToolTip(
             "Exchange reaction of the target product to couple to growth"
         )
-        form.addWidget(self.sd_product_combo, 1)
-        form.addWidget(QLabel("Method:"))
+        pick_row.addWidget(self.sd_product_combo, 1)
+        pick_row.addWidget(QLabel("Method:"))
         self.sd_method_combo = QComboBox()
         self.sd_method_combo.addItems(["optknock", "robustknock"])
         self.sd_method_combo.setToolTip(
             "OptKnock maximizes product at max growth (optimistic); RobustKnock keeps only "
             "designs that guarantee product at max growth (worst case)."
         )
-        form.addWidget(self.sd_method_combo)
-        form.addWidget(QLabel("max KOs:"))
+        pick_row.addWidget(self.sd_method_combo)
+        form.addLayout(pick_row)
+
+        # Row 2: search limits + run.
+        limit_row = QHBoxLayout()
+        limit_row.addWidget(QLabel("max KOs:"))
         self.sd_max_ko_spin = QSpinBox()
         self.sd_max_ko_spin.setRange(1, 6)
         self.sd_max_ko_spin.setValue(3)
         self.sd_max_ko_spin.setToolTip(
             "Maximum number of reaction knockouts per design"
         )
-        form.addWidget(self.sd_max_ko_spin)
-        form.addWidget(QLabel("solutions:"))
+        limit_row.addWidget(self.sd_max_ko_spin)
+        limit_row.addWidget(QLabel("solutions:"))
         self.sd_max_sol_spin = QSpinBox()
         self.sd_max_sol_spin.setRange(1, 20)
         self.sd_max_sol_spin.setValue(5)
         self.sd_max_sol_spin.setToolTip("Maximum number of designs to enumerate")
-        form.addWidget(self.sd_max_sol_spin)
+        limit_row.addWidget(self.sd_max_sol_spin)
         self.sd_run_btn = QPushButton("Run design")
         self.sd_run_btn.clicked.connect(self.run_strain_design)
-        form.addWidget(self.sd_run_btn)
-        form.addStretch(1)
+        limit_row.addWidget(self.sd_run_btn)
+        limit_row.addStretch(1)
+        form.addLayout(limit_row)
         layout.addWidget(controls)
 
         self.sd_summary = QLabel(
@@ -1067,17 +1111,37 @@ class CmmMainWindow(QMainWindow):
         )
         self.ko_level_combo.currentTextChanged.connect(self._populate_ko_list)
         row.addWidget(self.ko_level_combo)
-        row.addWidget(QLabel("Target product (batch, optional):"))
+        row.addStretch(1)
+        controls_layout.addLayout(row)
+
+        # Row 2: the optional batch product and the single-run significance threshold.
+        opts = QHBoxLayout()
+        opts.addWidget(QLabel("Batch product (optional):"))
         self.batch_product_combo = QComboBox()
         self.batch_product_combo.setMinimumWidth(140)
         self.batch_product_combo.setToolTip(
             "Optional. When set, the Batch table adds the product's wild-type and post-knockout "
             "flux columns."
         )
-        row.addWidget(self.batch_product_combo)
-        row.addStretch(1)
-        controls_layout.addLayout(row)
+        opts.addWidget(self.batch_product_combo, 1)
+        # Significant-change threshold for the single-run table: a reaction is shown only when
+        # |perturbed - reference| exceeds this fraction of |reference| (plus a small floor).
+        # This matches ROOM's own significance criterion and hides alternate-optimum drift.
+        opts.addWidget(QLabel("Significant change ≥"))
+        self.comparison_threshold_spin = QDoubleSpinBox()
+        self.comparison_threshold_spin.setRange(0.0, 100.0)
+        self.comparison_threshold_spin.setSingleStep(1.0)
+        self.comparison_threshold_spin.setValue(3.0)
+        self.comparison_threshold_spin.setSuffix(" % of ref")
+        self.comparison_threshold_spin.setToolTip(
+            "Show a reaction only when |perturbed − reference| > this % of |reference| + 0.001. "
+            "0% shows every reaction that moved at all."
+        )
+        self.comparison_threshold_spin.valueChanged.connect(self._render_comparison_table)
+        opts.addWidget(self.comparison_threshold_spin)
+        controls_layout.addLayout(opts)
 
+        # Row 3: the knock-out actions.
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("Knock out:"))
         run_btn = QPushButton("Run (selected as one KO)")
@@ -1092,21 +1156,6 @@ class CmmMainWindow(QMainWindow):
         row2.addWidget(run_btn)
         row2.addWidget(batch_btn)
         row2.addStretch(1)
-        # Significant-change threshold for the single-run table: a reaction is shown only when
-        # |perturbed - reference| exceeds this fraction of |reference| (plus a small floor).
-        # This matches ROOM's own significance criterion and hides alternate-optimum drift.
-        row2.addWidget(QLabel("Significant change ≥"))
-        self.comparison_threshold_spin = QDoubleSpinBox()
-        self.comparison_threshold_spin.setRange(0.0, 100.0)
-        self.comparison_threshold_spin.setSingleStep(1.0)
-        self.comparison_threshold_spin.setValue(3.0)
-        self.comparison_threshold_spin.setSuffix(" % of ref")
-        self.comparison_threshold_spin.setToolTip(
-            "Show a reaction only when |perturbed − reference| > this % of |reference| + 0.001. "
-            "0% shows every reaction that moved at all."
-        )
-        self.comparison_threshold_spin.valueChanged.connect(self._render_comparison_table)
-        row2.addWidget(self.comparison_threshold_spin)
         controls_layout.addLayout(row2)
 
         # Two panels: left = searchable catalogue of all targets, right = the chosen knockout
@@ -1241,10 +1290,16 @@ class CmmMainWindow(QMainWindow):
     def _selected_ko_targets(self) -> list[str]:
         return [self.ko_selected.item(i).text() for i in range(self.ko_selected.count())]
 
+    def _style_all_combo_popups(self) -> None:
+        """Centre every combo's popup entries (Qt defaults to left-aligned)."""
+
+        for combo in self.findChildren(QComboBox):
+            combo.setItemDelegate(_ComboItemDelegate(combo))
+
     def _style_disabled_items(self, combo: QComboBox) -> None:
         """Make a combo's disabled entries clearly inert: faint painting + not-allowed cursor."""
 
-        combo.setItemDelegate(_DisabledItemDelegate(combo))
+        combo.setItemDelegate(_ComboItemDelegate(combo))
         view = combo.view()
         viewport = view.viewport()
         viewport.setMouseTracking(True)
