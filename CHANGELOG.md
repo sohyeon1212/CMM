@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Simulation: FBA and pFBA fluxes are shown in separate columns (Reaction / FBA flux /
+  pFBA flux / FVA range) so running pFBA no longer overwrites the FBA result; pFBA's minimal
+  total flux is shown directly under the objective value.
+- Production: a result table beside each plot — FSEOF/FVSEOF amplify/knockdown targets with
+  their low/high enforced-level fluxes, and the production-envelope growth range per product
+  flux — with a "Show all reactions" toggle that also lists unchanged reactions.
+- Comparison (single run): a "Significant change ≥ X % of reference" threshold (default 3%)
+  replacing the fixed 1e-6 cutoff, so alternate-optimum drift (notably ROOM) no longer reads
+  as a knockout response; the solve is cached and re-filters without re-solving.
+- Comparison (batch): the table reports wild-type and post-knockout biomass, an essentiality
+  flag, and — when a target product is selected — that product's wild-type and post-knockout
+  flux columns.
+- Omics: multi-condition expression tables are supported in one tab, computing one predicted-
+  flux column per selected condition, with a "Show all reactions" toggle.
+- `cmm-guide` project-local skill: an agent-facing operating protocol describing CMM's
+  analyses, a goal→method decision guide, the solver requirement matrix, and pitfalls.
+
+### Changed
+
+- Comparison: a two-panel knockout picker (searchable catalogue on the left, chosen knockout
+  set on the right) replaces Ctrl/Shift-click selection, making the selection visible and
+  clearable.
+- Comparison: LAD/E-Flux2 reference templates are disabled (greyed out, not selectable) until
+  their integration method has actually been computed on the Omics tab.
+- Omics: loading an expression file only stores it and shows its filename; a separate Compute
+  button runs the selected method, so the method can change without reloading.
+- Revert / Transform: the loaded source/target expression filename is shown next to each input.
+- Production: removed the redundant Run FBA button (duplicated the Simulation tab and produced
+  no Production-tab output).
+- GUI: the main window opens at a narrower default (1160×760). The wide single-row control
+  bars on the Production, Comparison, Strain Design, and Omics tabs were split across rows so
+  the content minimum width no longer forces the window far wider (~1574 → ~1146 px).
+- GUI: combo popup entries are left-aligned.
+
+### Fixed
+
+- GUI: combo-box and spin-box arrows now render (drawn from bundled SVG assets); the previous
+  CSS border-triangle never drew in Qt and showed a grey box.
+- GUI: tab labels no longer clip or overflow into a scroll button — the stylesheet font-weight
+  that Qt's tab sizing ignored was removed and tab padding trimmed so all tabs fit.
+
+- Comparison batch (MOMA/ROOM) no longer aborts the whole run when a lethal knockout makes the
+  model infeasible; such a knockout is recorded as infeasible and the run continues.
+- Revert / MTA (`_mta_miqp`, `_mta_qp`) no longer crash under Gurobi when a lethal knockout is
+  infeasible (backend "Unable to retrieve attribute 'X'"); feasibility is probed before reading
+  primals, so infeasible knockouts are skipped and the ranking completes.
+
 ## 0.3.0 — 2026-07-10
 
 ### Scientific correctness

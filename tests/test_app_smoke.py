@@ -16,6 +16,7 @@ from cmm.app.screenshots import (  # noqa: E402
     TARGET_EXPRESSION,
     build_demo_model,
 )
+from qtpy.QtCore import Qt  # noqa: E402
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
 
@@ -28,13 +29,17 @@ def app():
     return instance
 
 
-def _select_ko(window, ids):
-    """Select the given target ids in the Comparison tab's knockout list."""
+def _clear_ko(window):
+    """Empty the Comparison tab's chosen-knockout set."""
 
-    window.ko_list.clearSelection()
-    for i in range(window.ko_list.count()):
-        if window.ko_list.item(i).text() in ids:
-            window.ko_list.item(i).setSelected(True)
+    window._clear_ko_selected()
+
+
+def _select_ko(window, ids):
+    """Set the Comparison tab's chosen-knockout set to exactly the given ids."""
+
+    window._clear_ko_selected()
+    window._add_ko_targets(list(ids))
 
 
 def test_window_builds_and_drives_services(app):
@@ -273,7 +278,7 @@ def test_transformation_tab_runs(app):
     assert "A→B target" in window.transform_summary.text()
 
 
-def test_conditions_tab_runs(app, tmp_path):
+def test_omics_multi_condition_in_gui(app, tmp_path):
     from cmm.omics.conditions import read_expression_table
 
     path = tmp_path / "conditions.csv"
@@ -282,24 +287,37 @@ def test_conditions_tab_runs(app, tmp_path):
     )
 
     window = CmmMainWindow(build_demo_model())
-    assert window._tab_index("Multi-condition") is not None
+    # Multi-condition is now folded into the Omics tab.
+    assert window._tab_index("Omics") is not None
+    assert window._tab_index("Multi-condition") is None
 
-    window._condition_table = read_expression_table(str(path))
-    window.cond_source_combo.addItems(["condA", "condB"])
-    window.cond_target_combo.addItems(["condA", "condB"])
-    window.cond_source_combo.setCurrentText("condA")
-    window.cond_target_combo.setCurrentText("condB")
-    window.cond_run_btn.setEnabled(True)
-    window.cond_method_combo.setCurrentText("eflux2")
-    window.run_condition_comparison()  # must not raise
-    assert (
-        "condA" in window.cond_summary.text() and "condB" in window.cond_summary.text()
-    )
+    # Loading detects both conditions (checked by default) but does not compute.
+    window._set_omics_source(read_expression_table(str(path)), "conditions.csv")
+    assert window._checked_omics_conditions() == ["condA", "condB"]
+    assert window.omics_table.rowCount() == 0
 
-    # Identical conditions are rejected with a clear message, not a crash.
-    window.cond_target_combo.setCurrentText("condA")
-    window.run_condition_comparison()
-    assert "different conditions" in window.cond_summary.text()
+    # Compute predicts one flux column per checked condition (column name = condition).
+    # LAD is an LP so it runs without a QP solver in CI.
+    window.omics_method_combo.setCurrentText("lad")
+    window.compute_omics()  # must not raise
+    headers = [
+        window.omics_table.horizontalHeaderItem(i).text()
+        for i in range(window.omics_table.columnCount())
+    ]
+    assert headers == ["Reaction", "condA", "condB"]
+    assert window.omics_table.rowCount() > 0
+
+    # Changing the checked set and recomputing reuses the same data (no reload) and drops
+    # the unchecked condition's column.
+    for i in range(window.omics_cond_list.count()):
+        if window.omics_cond_list.item(i).text() == "condB":
+            window.omics_cond_list.item(i).setCheckState(Qt.Unchecked)
+    window.compute_omics()
+    headers = [
+        window.omics_table.horizontalHeaderItem(i).text()
+        for i in range(window.omics_table.columnCount())
+    ]
+    assert headers == ["Reaction", "condA"]
 
 
 def test_export_table_csv(app, tmp_path):
@@ -348,9 +366,9 @@ def test_comparison_multi_knockout(app):
 def test_comparison_requires_a_selection(app):
     window = CmmMainWindow(build_demo_model())
     window._goto_tab("Comparison")
-    window.ko_list.clearSelection()
+    _clear_ko(window)
     window.run_comparison()
-    assert "Select one or more" in window.comparison_summary.text()
+    assert "Add one or more" in window.comparison_summary.text()
 
 
 def test_comparison_batch_over_genes(app):
@@ -359,17 +377,17 @@ def test_comparison_batch_over_genes(app):
     window.comparison_method_combo.setCurrentText("MOMA (L2)")
     window.template_combo.setCurrentText("pfba")
     window.ko_level_combo.setCurrentText("gene")
-    window.ko_list.clearSelection()  # no selection -> batch over all genes
+    _clear_ko(window)  # nothing selected -> batch over all genes
     window.run_batch_comparison()
-    assert window.comparison_table.columnCount() == 6
+    assert window.comparison_table.columnCount() == 4  # no target product selected
     assert window.comparison_table.rowCount() == len(window.model.genes)
     assert "Batch" in window.comparison_summary.text()
-    # The batch table carries a per-target row with a status column.
+    # The batch table reports wild-type vs post-knockout biomass and essentiality per target.
     headers = [
         window.comparison_table.horizontalHeaderItem(c).text()
         for c in range(window.comparison_table.columnCount())
     ]
-    assert headers[:2] == ["Target", "Kind"]
+    assert headers == ["Target", "WT Biomass", "KO Biomass", "Essential"]
 
 
 def test_background_execution_runs_off_thread_and_stays_responsive(app):

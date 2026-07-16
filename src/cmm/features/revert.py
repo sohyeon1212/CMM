@@ -93,9 +93,12 @@ def _mta_qp(
                 if d != 0:
                     expr = expr - alpha * d * diff
         model.objective = prob.Objective(expr, direction="min")
+        # Probe feasibility first: reading primals from an infeasible solve raises a backend
+        # GurobiError, so bail out on a non-optimal (e.g. lethal-knockout) solve instead.
+        model.slim_optimize(error_value=float("nan"))
+        if model.solver.status != "optimal":
+            return {}, model.solver.status
         solution = model.optimize()
-        if solution.status != "optimal":
-            return {}, solution.status
         fluxes = {rid: float(v) for rid, v in solution.fluxes.items()}
         return fluxes, solution.status
     finally:
@@ -173,9 +176,12 @@ def _mta_miqp(
     binary_reward = (alpha / 2.0) * sum(switches) if switches else Zero
     work.objective = prob.Objective(quad - binary_reward, direction="min")
 
+    # Probe feasibility without reading primals: for an infeasible MIQP (e.g. a lethal
+    # knockout) Gurobi raises when reading ``.X``, which would abort the whole revert run.
+    work.slim_optimize(error_value=float("nan"))
+    if work.solver.status != "optimal":
+        return {}, work.solver.status
     solution = work.optimize()
-    if solution.status != "optimal":
-        return {}, solution.status
     fluxes = {rid: float(v) for rid, v in solution.fluxes.items()}
     return fluxes, solution.status
 
