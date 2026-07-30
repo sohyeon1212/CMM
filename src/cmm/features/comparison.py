@@ -255,7 +255,9 @@ class BatchComparisonRow:
     distance: float
     objective: float  # objective-reaction flux at the perturbed state (e.g. growth)
     n_reactions: int  # how many reactions the knockout blocked
-    product_flux: float = float("nan")  # target-product flux at the perturbed state (if any)
+    product_flux: float = float(
+        "nan"
+    )  # target-product flux at the perturbed state (if any)
 
 
 def batch_comparison(

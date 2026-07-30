@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from matplotlib import __version__ as matplotlib_version
 from matplotlib import cm, colormaps
 from matplotlib.colors import TwoSlopeNorm
 from matplotlib.figure import Figure
@@ -27,6 +28,16 @@ from cmm.features.production import (
     FvseofResult,
     ProductionEnvelope,
     ProductionYield,
+)
+from cmm.features.response import FluxResponseResult
+from cmm.features.sampling import SamplingResult
+
+# matplotlib 3.10 replaced violinplot's boolean `vert` with `orientation`; the project
+# supports 3.8+, so pick the spelling the installed version accepts.
+_HORIZONTAL: dict[str, object] = (
+    {"orientation": "horizontal"}
+    if tuple(int(part) for part in matplotlib_version.split(".")[:2]) >= (3, 10)
+    else {"vert": False}
 )
 
 # Okabe-Ito colour-blind-safe palette.
@@ -210,6 +221,230 @@ def fvseof_figure(
         0.0,
         -0.16,
         "solid = mean flux, dashed = forced minimum |flux|",
+        transform=ax.transAxes,
+        fontsize=font["legend"],
+        color="#555555",
+    )
+    fig.tight_layout()
+    return fig
+
+
+def _infeasible_spans(frame) -> list[tuple[float, float]]:
+    """Contiguous runs of infeasible scan points, as x-ranges bounded by their neighbours."""
+
+    xs = frame["target_flux"].to_numpy(dtype=float)
+    bad = (frame["status"] != "optimal").to_numpy()
+    spans: list[tuple[float, float]] = []
+    index = 0
+    while index < len(bad):
+        if not bad[index]:
+            index += 1
+            continue
+        start = index
+        while index + 1 < len(bad) and bad[index + 1]:
+            index += 1
+        left = xs[start] if start == 0 else (xs[start - 1] + xs[start]) / 2.0
+        right = (
+            xs[index] if index == len(bad) - 1 else (xs[index] + xs[index + 1]) / 2.0
+        )
+        spans.append((float(left), float(right)))
+        index += 1
+    return spans
+
+
+def flux_response_figure(
+    result: FluxResponseResult,
+    *,
+    title: str | None = None,
+    show_biomass: bool = True,
+    column_width: int = 2,
+) -> Figure:
+    """Response curve vs enforced target flux, with infeasible range and bottleneck marked.
+
+    When the response is a product (not biomass itself) the biomass trace is drawn on a
+    secondary axis, because the growth cost of each target flux is what decides whether a
+    point on the curve is reachable by a living strain.
+    """
+
+    # Aspect close to the square-ish panel the GUI gives this plot, so the curve keeps the
+    # width it needs instead of being squeezed by a legend reserved outside the axes.
+    fig, ax, font = _new_figure(width=6.4, height=4.6, column_width=column_width)
+    frame = result.to_frame()
+    feasible = frame[frame["status"] == "optimal"]
+
+    # Shade contiguous stretches with no solution at all — the edge of viability. Spans run
+    # to the midpoint of the neighbouring feasible point so the boundary is not overstated.
+    for start, end in _infeasible_spans(frame):
+        ax.axvspan(start, end, color="#BBBBBB", alpha=0.35, linewidth=0)
+
+    ax.plot(
+        feasible["target_flux"],
+        feasible["response_flux"],
+        marker="o",
+        markersize=5,
+        linewidth=2.2,
+        color=PALETTE[0],
+        label=f"{result.response} (maximized)",
+    )
+
+    wild_type_flux = result.wild_type["target_flux"]
+    ax.axvline(
+        wild_type_flux,
+        color=PALETTE[6],
+        linewidth=1.4,
+        linestyle=":",
+        label=f"wild type ({wild_type_flux:.3g})",
+    )
+
+    optimum = result.optimum()
+    if optimum is not None:
+        ax.plot(
+            [optimum.target_flux],
+            [optimum.response_flux],
+            marker="*",
+            markersize=15,
+            color=PALETTE[1],
+            linestyle="none",
+            label=f"optimum ({optimum.response_flux:.3g})",
+        )
+
+    bottleneck = result.bottleneck
+    if bottleneck.found and bottleneck.decline_interval is not None:
+        ax.axvspan(
+            bottleneck.decline_interval[0],
+            bottleneck.decline_interval[1],
+            color=PALETTE[1],
+            alpha=0.15,
+            label="steepest decline",
+        )
+
+    handles, labels = ax.get_legend_handles_labels()
+    if show_biomass and result.response != result.biomass and not feasible.empty:
+        twin = ax.twinx()
+        twin.plot(
+            feasible["target_flux"],
+            feasible["biomass_flux"],
+            linewidth=1.6,
+            linestyle="--",
+            color=PALETTE[2],
+            label=f"{result.biomass}",
+        )
+        twin.set_ylabel("growth rate (h$^{-1}$)", fontsize=font["label"])
+        twin.tick_params(labelsize=font["tick"])
+        twin.spines["top"].set_visible(False)
+        # Anchor at zero: with a growth floor the biomass trace is constant, and an
+        # auto-scaled axis would magnify solver noise into an apparent trend.
+        twin.set_ylim(0.0, max(float(feasible["biomass_flux"].max()), 1e-9) * 1.15)
+        twin_handles, twin_labels = twin.get_legend_handles_labels()
+        handles += twin_handles
+        labels += twin_labels
+        # A twin is drawn over its host, so the host's legend would sit under the biomass
+        # trace. Lift the host above it (hiding its own opaque background so the twin's line
+        # still shows) and keep the legend on the host, where "best" can see the response
+        # curve it needs to avoid.
+        ax.set_zorder(twin.get_zorder() + 1)
+        ax.patch.set_visible(False)
+
+    _style(
+        ax,
+        font,
+        xlabel=f"enforced {result.target} flux (mmol gDW$^{{-1}}$ h$^{{-1}}$)",
+        ylabel=f"{result.response} flux (mmol gDW$^{{-1}}$ h$^{{-1}}$)",
+        title=title or f"{result.response} response to {result.target}",
+    )
+    # Inside the axes, not reserved beside them: an outside legend costs this plot roughly a
+    # third of its width and pushes the title past the figure edge on a narrow canvas.
+    legend = ax.legend(
+        handles,
+        labels,
+        fontsize=font["legend"],
+        loc="best",
+        framealpha=1.0,
+        facecolor="white",
+        edgecolor="#CCCCCC",
+    )
+    legend.get_frame().set_linewidth(0.6)
+    fig.tight_layout()
+    return fig
+
+
+def sampling_figure(
+    result: SamplingResult,
+    *,
+    reactions: list[str] | None = None,
+    top_n: int = 8,
+    reference: dict[str, float] | None = None,
+    reference_label: str = "reference",
+    title: str = "Sampled flux distributions",
+    column_width: int = 2,
+) -> Figure:
+    """Violin plot of sampled flux per reaction, optionally against a reference solution.
+
+    Reactions default to the most variable ones, since a reaction with a near-constant
+    sampled flux is exactly the one whose value a single FBA solution already settled. A
+    reference marker far out in a violin's tail is the visual form of "this predicted flux
+    is one of many alternate optima".
+    """
+
+    samples = result.samples
+    if reactions is None:
+        spread = samples.std().sort_values(ascending=False)
+        selected = [str(rid) for rid in spread.index[:top_n]]
+    else:
+        missing = [rid for rid in reactions if rid not in samples.columns]
+        if missing:
+            raise KeyError(f"reactions not present in the sample table: {missing}")
+        selected = list(reactions)
+
+    if not selected:
+        raise ValueError("no reactions to plot")
+
+    fig, ax, font = _new_figure(
+        width=7.0, height=max(3.2, 0.5 * len(selected) + 1.6), column_width=column_width
+    )
+    data = [samples[rid].to_numpy() for rid in selected]
+    positions = np.arange(1, len(selected) + 1)
+    parts = ax.violinplot(
+        data, positions=positions, showmedians=True, widths=0.8, **_HORIZONTAL
+    )
+    for body in parts["bodies"]:
+        body.set_facecolor(PALETTE[0])
+        body.set_alpha(0.45)
+    for key in ("cmedians", "cmins", "cmaxes", "cbars"):
+        if key in parts:
+            parts[key].set_color(PALETTE[0])
+            parts[key].set_linewidth(1.2)
+
+    if reference is not None:
+        values = [reference.get(rid, float("nan")) for rid in selected]
+        ax.plot(
+            values,
+            positions,
+            marker="D",
+            markersize=7,
+            linestyle="none",
+            color=PALETTE[1],
+            label=reference_label,
+            zorder=5,
+        )
+        ax.legend(fontsize=font["legend"], frameon=False, loc="best")
+
+    ax.set_yticks(positions)
+    ax.set_yticklabels(selected, fontsize=font["tick"])
+    ax.axvline(0, color="black", linewidth=0.8, alpha=0.6)
+    _style(
+        ax,
+        font,
+        xlabel="flux (mmol gDW$^{-1}$ h$^{-1}$)",
+        ylabel="reaction",
+        title=title,
+    )
+    # Run parameters belong with the figure but not in the title, which a narrow panel
+    # clips; a caption keeps the plot reproducible without widening the heading.
+    ax.text(
+        0.0,
+        -0.14,
+        f"n = {result.n_samples}, {result.method}, seed {result.seed}",
         transform=ax.transAxes,
         fontsize=font["legend"],
         color="#555555",

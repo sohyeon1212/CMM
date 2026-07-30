@@ -22,7 +22,18 @@ from cmm.features.production import (
     production_envelope,
     theoretical_yield,
 )
+from cmm.features.response import (
+    FluxResponseResult,
+    ResponseBottleneck,
+    ResponsePoint,
+    flux_response,
+)
 from cmm.features.revert import revert_targets
+from cmm.features.sampling import (
+    SamplingResult,
+    random_flux_sampling,
+    reference_constrained_sampling,
+)
 from cmm.features.strain_design import (
     StrainDesign,
     StrainDesignResult,
@@ -50,6 +61,8 @@ INCLUDED_FEATURES = (
     "optknock",
     "robustknock",
     "revert_metabolism",
+    "flux_response_analysis",
+    "random_flux_sampling",
 )
 
 # Roadmap items described in docs/feature-roadmap.md (Phase 3 / Phase 5) that do NOT yet have
@@ -57,8 +70,6 @@ INCLUDED_FEATURES = (
 # surface. Move an entry into INCLUDED_FEATURES only when its service and tests land.
 PLANNED_FEATURES = (
     "dynamic_fba",
-    "random_flux_sampling",
-    "flux_response_analysis",
     "enzyme_constrained_modeling",
 )
 
@@ -77,12 +88,17 @@ __all__ = [
     "EXCLUDED_FEATURES",
     "BatchComparisonRow",
     "ComparisonResult",
+    "FluxResponseResult",
     "Perturbation",
+    "ResponseBottleneck",
+    "ResponsePoint",
+    "SamplingResult",
     "StrainDesign",
     "StrainDesignResult",
     "batch_comparison",
     "blocked_reactions_for_genes",
     "direction_from_states",
+    "flux_response",
     "fseof",
     "fvseof",
     "gene_perturbations",
@@ -90,7 +106,9 @@ __all__ = [
     "knockout_comparison",
     "moma",
     "production_envelope",
+    "random_flux_sampling",
     "reaction_perturbations",
+    "reference_constrained_sampling",
     "reference_flux",
     "optknock",
     "robustknock",

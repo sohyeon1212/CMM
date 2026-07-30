@@ -47,6 +47,8 @@ regression record; solver/model/license details remain part of result provenance
 | FSEOF/FVSEOF | Enforced product levels, biomass optimization/FVA, regression and boundary filtering | `test_production.py`; scan-resolution sensitivity in `test_scientific_sensitivity.py` |
 | MTA/rMTA | Official COBRA Toolbox test topology, expected score signs, published Equation 9 | `test_revert.py`; alpha sensitivity in `test_scientific_sensitivity.py` |
 | OptKnock/RobustKnock | Distinct StrainDesign module types (`OPTKNOCK` and three-level `ROBUSTKNOCK`) plus post-solve max/min product evaluation | `test_strain_design.py` |
+| Flux response | Scanned optimum reproduces the known `e_coli_core` oxygen growth optimum; competing-branch model gives an exact −1 response gradient | `test_response.py` |
+| Flux sampling | Drawn samples satisfy `S · v = 0` and every model bound; identical seeds reproduce identical ensembles | `test_sampling.py` |
 | GUI/state | Real offscreen Qt workflows, invalid-file rejection, model reload state invalidation | `test_app_smoke.py`, `test_scenarios.py` |
 | Provenance | Deterministic SHA-256 fingerprint changes with model bounds and accompanies numerical results | `test_core_primitives.py` and feature tests |
 
@@ -98,6 +100,42 @@ an alias of the optimistic value.
 References: Burgard et al. (2003), <https://doi.org/10.1002/bit.10803>; Tepper and Shlomi
 (2010), <https://doi.org/10.1093/bioinformatics/btp704>.
 
+### Flux response
+
+`flux_response` fixes the target reaction at each point of a linear scan and maximizes the
+response reaction, recording the response flux, biomass flux, and solver status per point.
+The default scan range is the target's full feasible interval (FVA at a zero fraction of the
+optimum); an explicit range may exceed the reaction's declared bounds and is then flagged
+`range_outside_bounds` in provenance. `response` defaults to the objective reaction, giving
+the robustness reading; naming a product exchange gives the production reading. Because
+maximizing a product without a growth floor returns non-growing solutions, `biomass_fraction`
+holds biomass at a fraction of the wild-type optimum across the scan. Infeasible points are
+retained with NaN fluxes and their solver status: the flux at which a scan stops being
+solvable is a reported result, not an error. The bottleneck is the steepest decline in the
+finite-difference gradient of the response curve; a curve that never declines or is flat
+within tolerance is reported as "no bottleneck", which is itself the finding.
+
+### Random flux sampling
+
+`random_flux_sampling` draws flux distributions with COBRApy's OptGP or ACHR samplers under
+the model and condition as constrained. Every run takes an explicit `seed` and defaults to
+`processes=1`, because parallel chains are seeded independently and a multi-process run is
+therefore not bit-for-bit reproducible; provenance records `reproducible` accordingly.
+`reference_constrained_sampling` first narrows each reaction to `[v * min_fraction,
+v * max_fraction]` around a reference flux state (mirrored for negative `v`, and
+`[-zero_window, zero_window]` for reactions at essentially zero flux), intersected with the
+existing bounds. Since `min_fraction <= 1 <= max_fraction`, every window contains its
+reference flux, so an empty window can only mean the reference violates the model's bounds —
+which raises rather than silently sampling a different space.
+
+Samples satisfy the steady-state and bound constraints, and `test_sampling.py` asserts
+`S · v = 0` on every drawn sample. CMM deliberately provides no post-hoc noise addition:
+perturbing sampled fluxes independently would break both constraints, so the perturbed
+vectors would no longer be flux distributions.
+
+References: Megchelenbrink et al. (2014), <https://doi.org/10.1371/journal.pone.0086587>
+(OptGP); Kaufman and Smith (1998), <https://doi.org/10.1287/opre.46.1.84> (ACHR).
+
 ### MTA and rMTA
 
 The optimization, transformation score, and robust Equation 9 are documented in
@@ -132,3 +170,7 @@ model changes; they do not replace archival storage of the model file.
   exactly; CMM does not silently claim the full preprocessing protocol of either paper.
 - Floating-point optima can vary within solver tolerance. Manuscripts should report the
   solver, tolerance, model fingerprint, parameters, and acceptance tolerance.
+- Sampler convergence is not asserted. OptGP needs large sample counts (roughly >1000) to mix;
+  a small or heavily thinned run can under-represent the feasible space without failing. Report
+  the sampler, sample count, thinning, and seed, and check stability across seeds before
+  drawing conclusions from sampled means.

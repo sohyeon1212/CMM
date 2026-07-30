@@ -8,13 +8,17 @@ from cmm.features.production import (
     production_envelope,
     theoretical_yield,
 )
+from cmm.features.response import flux_response
+from cmm.features.sampling import random_flux_sampling
 from cmm.visualization import (
     escher_flux_map,
     flux_comparison_figure,
+    flux_response_figure,
     fseof_figure,
     fvseof_figure,
     network_flux_map,
     production_envelope_figure,
+    sampling_figure,
     save_figure,
     yield_figure,
 )
@@ -87,6 +91,76 @@ def test_yield_figure(ecoli_core, tmp_path):
     assert len(ax.patches) == 2
     path = save_figure(fig, tmp_path / "yield.png")
     assert _nonblank(path)
+
+
+def test_flux_response_figure(ecoli_core, tmp_path):
+    result = flux_response(ecoli_core, "EX_o2_e", n_steps=12)
+    fig = flux_response_figure(result)
+    # Response equals the objective here, so there is no twin biomass axis.
+    assert len(fig.axes) == 1
+    ax = fig.axes[0]
+    assert "EX_o2_e" in ax.get_xlabel()
+    legend_texts = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert any("wild type" in t for t in legend_texts)
+    assert any("optimum" in t for t in legend_texts)
+    path = save_figure(fig, tmp_path / "response.png")
+    assert _nonblank(path)
+
+
+def test_flux_response_figure_adds_a_biomass_axis_for_a_product(ecoli_core, tmp_path):
+    result = flux_response(
+        ecoli_core, "PGI", response=SUCC, biomass_fraction=0.3, n_steps=12
+    )
+    fig = flux_response_figure(result)
+    # A product response gets a secondary growth axis anchored at zero.
+    assert len(fig.axes) == 2
+    twin = fig.axes[1]
+    assert "growth" in twin.get_ylabel()
+    assert twin.get_ylim()[0] == 0.0
+    path = save_figure(fig, tmp_path / "response_product.png")
+    assert _nonblank(path)
+
+
+def test_flux_response_figure_shades_infeasible_range(ecoli_core):
+    result = flux_response(
+        ecoli_core, "PGI", response=SUCC, biomass_fraction=0.3, n_steps=12
+    )
+    frame = result.to_frame()
+    assert (frame["status"] != "optimal").any()
+    fig = flux_response_figure(result)
+    # Infeasible stretches are drawn as shaded spans, not per-point lines.
+    patches = fig.axes[0].patches
+    assert len(patches) >= 1
+
+
+def test_sampling_figure(ecoli_core, tmp_path):
+    from cmm.core import pfba
+
+    result = random_flux_sampling(ecoli_core, n=80, method="achr", thinning=10, seed=2)
+    fig = sampling_figure(result, top_n=5, reference=pfba(ecoli_core).fluxes)
+    ax = fig.axes[0]
+    assert len(ax.get_yticklabels()) == 5
+    # Run parameters live in a caption so a narrow panel cannot clip them out of the title.
+    caption = " ".join(t.get_text() for t in ax.texts)
+    assert "n = 80" in caption
+    assert "seed 2" in caption
+    path = save_figure(fig, tmp_path / "sampling.png")
+    assert _nonblank(path)
+
+
+def test_sampling_figure_accepts_explicit_reactions(ecoli_core):
+    result = random_flux_sampling(ecoli_core, n=80, method="achr", thinning=10, seed=2)
+    fig = sampling_figure(result, reactions=[BIOMASS, SUCC])
+    labels = [t.get_text() for t in fig.axes[0].get_yticklabels()]
+    assert labels == [BIOMASS, SUCC]
+
+
+def test_sampling_figure_rejects_unknown_reactions(ecoli_core):
+    import pytest
+
+    result = random_flux_sampling(ecoli_core, n=80, method="achr", thinning=10, seed=2)
+    with pytest.raises(KeyError, match="not present"):
+        sampling_figure(result, reactions=["NOPE"])
 
 
 def test_figures_are_high_dpi(ecoli_core):
