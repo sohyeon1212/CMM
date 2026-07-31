@@ -193,6 +193,7 @@ flux cannot tell you whether the network *requires* that value. Sampling answers
 | **Thinning** | Keep every *n*-th iterate of the chain. Higher values give less correlated samples for the same count, at more compute. | Leave at 100. Lower it only when a run is too slow and you accept more correlation. |
 | **Seed** | Initializes the random chain. The same seed, sampler, thinning, and sample count reproduce the ensemble exactly. | Change it to check that your conclusion is stable across seeds — a conclusion that moves with the seed is not converged. |
 | **Show top** | How many of the most variable reactions to draw in the violin plot. **This affects the figure only, not the table or the exported data.** | Raise it to see more reactions; the plot gets taller. |
+| **Knockouts (optional)** | Sample a deletion strain instead of the wild type. Pick a **level** (`reaction` deletes the listed reactions; `gene` resolves each gene to its reactions through the GPR) and move targets into the chosen set. Leave the set empty for wild type. | Use it to ask what a mutant's flux space looks like — which reroutings open up, and which fluxes become forced. |
 
 ### Running it
 
@@ -211,6 +212,13 @@ alternate optima; a narrow one is genuinely pinned by the constraints. Watch for
 spanning hundreds of flux units — those are usually thermodynamically infeasible loops
 (`FRD7`/`SUCDi` in `e_coli_core`), not biology. Sampled means can be reused as a reference flux
 state for MOMA/ROOM/MTA.
+
+Knockouts are applied as a scoped condition, so the loaded model is never edited — the bounds
+you see in the left panel are unchanged after a run. If a knockout set leaves no feasible space,
+the tab reports it as a probably-lethal set rather than an error, and clears the previous
+ensemble so a stale result cannot be exported under the new settings. In `around a reference`
+mode the reference is computed **with the knockouts applied**, since a wild-type reference would
+place every deleted reaction outside its own sampling window.
 
 ## 6. Omics tab — expression → flux (E-Flux2 / LAD)
 

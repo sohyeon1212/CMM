@@ -140,10 +140,12 @@ def test_sampling_figure(ecoli_core, tmp_path):
     fig = sampling_figure(result, top_n=5, reference=pfba(ecoli_core).fluxes)
     ax = fig.axes[0]
     assert len(ax.get_yticklabels()) == 5
-    # Run parameters live in a caption so a narrow panel cannot clip them out of the title.
-    caption = " ".join(t.get_text() for t in ax.texts)
-    assert "n = 80" in caption
-    assert "seed 2" in caption
+    # Heading on the figure, run parameters on their own line under it: stacked so neither
+    # collides with the other or with the axis labels when the panel is short.
+    assert fig.get_suptitle() == "Sampled flux distributions"
+    params = ax.get_title()
+    assert "n = 80" in params
+    assert "seed 2" in params
     path = save_figure(fig, tmp_path / "sampling.png")
     assert _nonblank(path)
 

@@ -48,6 +48,8 @@ from qtpy.QtWidgets import (
 
 from cmm.core import (
     PRESET_MEDIA,
+    Condition,
+    ReactionBound,
     active_solver,
     apply_medium,
     fba,
@@ -1336,6 +1338,24 @@ class CmmMainWindow(QMainWindow):
         row2.addWidget(self.sample_export_btn)
         row2.addStretch(1)
         controls_layout.addLayout(row2)
+
+        # Optional knockouts: sampling a deletion strain answers "what does this mutant's
+        # flux space look like", which a wild-type ensemble cannot. Empty = wild type.
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Knockouts (optional) — level:"))
+        self.sample_ko_level_combo = QComboBox()
+        self.sample_ko_level_combo.addItems(["reaction", "gene"])
+        self.sample_ko_level_combo.setToolTip(
+            "Knock out reactions directly, or genes resolved to reactions through the GPR"
+        )
+        self.sample_ko_level_combo.currentTextChanged.connect(
+            lambda level: self._ko_populate("sample_ko", level)
+        )
+        row3.addWidget(self.sample_ko_level_combo)
+        row3.addStretch(1)
+        controls_layout.addLayout(row3)
+        controls_layout.addLayout(self._build_ko_picker("sample_ko", max_height=110))
+
         layout.addWidget(controls)
         self._sampling_result = None
 
@@ -1501,6 +1521,29 @@ class CmmMainWindow(QMainWindow):
                     item.setForeground(QColor("#B00020"))
                 self.fr_table.setItem(row, col, item)
 
+    def _sampling_knockout_condition(self) -> Condition | None:
+        """The Sampling tab's chosen knockouts as a Condition, or None for wild type."""
+
+        level = self.sample_ko_level_combo.currentText()
+        blocked = self._ko_blocked_reactions("sample_ko", level)
+        if not blocked:
+            return None
+        return Condition(
+            name=f"knockout:{','.join(self._ko_targets('sample_ko'))}",
+            bounds=tuple(
+                ReactionBound(reaction_id=rid, lower_bound=0.0, upper_bound=0.0)
+                for rid in blocked
+            ),
+        )
+
+    def _reference_under(self, condition: Condition | None, method: str):
+        """Build a reference flux state with the condition applied, then restore the model."""
+
+        with self.model:
+            if condition is not None:
+                condition.apply_to(self.model)
+            return reference_flux(self.model, method)
+
     def run_sampling(self) -> None:
         """Draw a flux ensemble and summarize how much each reaction actually varies."""
 
@@ -1512,6 +1555,7 @@ class CmmMainWindow(QMainWindow):
             around_reference = (
                 self.sample_mode_combo.currentText() == "around a reference"
             )
+            condition = self._sampling_knockout_condition()
 
             if around_reference:
                 reference_method = self.sample_reference_combo.currentText()
@@ -1519,8 +1563,11 @@ class CmmMainWindow(QMainWindow):
                 result = self._run_in_background(
                     lambda: reference_constrained_sampling(
                         self.model,
-                        reference_flux(self.model, reference_method),
+                        # The reference must come from the knocked-out model: a wild-type
+                        # reference would put deleted reactions outside their own windows.
+                        self._reference_under(condition, reference_method),
                         n=n,
+                        condition=condition,
                         method=method,
                         thinning=thinning,
                         seed=seed,
@@ -1532,11 +1579,32 @@ class CmmMainWindow(QMainWindow):
             else:
                 result = self._run_in_background(
                     lambda: random_flux_sampling(
-                        self.model, n=n, method=method, thinning=thinning, seed=seed
+                        self.model,
+                        n=n,
+                        condition=condition,
+                        method=method,
+                        thinning=thinning,
+                        seed=seed,
                     ),
                     label="Sampling the feasible space…",
                 )
         except Exception as exc:
+            # Drop the previous ensemble: leaving it on screen (and exportable) next to a
+            # failure message would attribute one run's samples to another run's settings.
+            self._sampling_result = None
+            self.sample_export_btn.setEnabled(False)
+            self.sample_table.setRowCount(0)
+            if condition is not None:
+                # A deletion that leaves no feasible space is a lethal knockout, which is a
+                # result about the strain rather than a failure of the run.
+                self.sample_summary.setText(
+                    f"No flux distribution could be sampled with these knockouts applied "
+                    f"({html.escape(', '.join(self._ko_targets('sample_ko')))}). The set is "
+                    f"probably lethal, or leaves a feasible space of zero volume. "
+                    f"<br><small>{html.escape(str(exc))}</small>"
+                )
+                self.status_label.setText("Sampling: knockout set appears lethal.")
+                return
             self.sample_summary.setText(f"Sampling failed: {html.escape(str(exc))}")
             self.status_label.setText(f"Sampling failed: {exc}")
             return
@@ -1553,9 +1621,18 @@ class CmmMainWindow(QMainWindow):
 
         statistics = result.statistics()
         varying = int((statistics["std"] > 1e-6).sum())
+        if condition is None:
+            strain = "wild type"
+        else:
+            targets = self._ko_targets("sample_ko")
+            level = self.sample_ko_level_combo.currentText()
+            strain = (
+                f"<b>{len(targets)}</b> {level} knockout(s): "
+                f"{html.escape(', '.join(targets))}"
+            )
         self.sample_summary.setText(
             f"Drew <b>{result.n_samples}</b> samples ({html.escape(result.method)}, "
-            f"seed {result.seed}, thinning {thinning}). "
+            f"seed {result.seed}, thinning {thinning}) on {strain}. "
             f"<b>{varying}</b> of {len(statistics)} reactions vary across the ensemble; "
             "the rest are fixed by the constraints."
         )
@@ -1682,62 +1759,7 @@ class CmmMainWindow(QMainWindow):
         row2.addStretch(1)
         controls_layout.addLayout(row2)
 
-        # Two panels: left = searchable catalogue of all targets, right = the chosen knockout
-        # set. Add/remove moves ids between them, so the selection is always plainly visible.
-        picker = QHBoxLayout()
-
-        left = QVBoxLayout()
-        self.ko_filter = QLineEdit()
-        self.ko_filter.setPlaceholderText("Search targets…")
-        self.ko_filter.setClearButtonEnabled(True)
-        self.ko_filter.textChanged.connect(self._filter_ko_list)
-        left.addWidget(self.ko_filter)
-        self.ko_available = QListWidget()
-        self.ko_available.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.ko_available.setMaximumHeight(150)
-        self.ko_available.setToolTip(
-            "Double-click (or select and Add →) to add a target."
-        )
-        self.ko_available.itemDoubleClicked.connect(
-            lambda item: self._add_ko_targets([item.text()])
-        )
-        left.addWidget(self.ko_available)
-        picker.addLayout(left, 1)
-
-        # Add / remove buttons between the two lists.
-        mid = QVBoxLayout()
-        mid.addStretch(1)
-        add_btn = QPushButton("Add →")
-        add_btn.setToolTip("Add the highlighted targets to the knockout set")
-        add_btn.clicked.connect(self._add_selected_ko)
-        remove_btn = QPushButton("← Remove")
-        remove_btn.setToolTip("Remove the highlighted targets from the knockout set")
-        remove_btn.clicked.connect(self._remove_selected_ko)
-        clear_btn = QPushButton("Clear")
-        clear_btn.setToolTip("Empty the knockout set")
-        clear_btn.clicked.connect(self._clear_ko_selected)
-        mid.addWidget(add_btn)
-        mid.addWidget(remove_btn)
-        mid.addWidget(clear_btn)
-        mid.addStretch(1)
-        picker.addLayout(mid)
-
-        right = QVBoxLayout()
-        self.ko_selected_label = QLabel("Selected (0):")
-        right.addWidget(self.ko_selected_label)
-        self.ko_selected = QListWidget()
-        self.ko_selected.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.ko_selected.setMaximumHeight(150)
-        self.ko_selected.setToolTip(
-            "The knockout set. Double-click (or select and ← Remove) to drop one."
-        )
-        self.ko_selected.itemDoubleClicked.connect(
-            lambda item: self._remove_ko_targets([item.text()])
-        )
-        right.addWidget(self.ko_selected)
-        picker.addLayout(right, 1)
-
-        controls_layout.addLayout(picker)
+        controls_layout.addLayout(self._build_ko_picker("ko"))
         layout.addWidget(controls)
 
         self.comparison_summary = QLabel(
@@ -1759,73 +1781,172 @@ class CmmMainWindow(QMainWindow):
         layout.addWidget(self.comparison_table, 1)
         return tab
 
-    def _populate_ko_list(self) -> None:
-        """Fill the available-targets catalogue for the current level; clear the chosen set."""
+    # -- Knockout picker (shared by the Comparison and Sampling tabs) --------------------
+    #
+    # Two panels: left = searchable catalogue of all targets, right = the chosen knockout
+    # set. Add/remove moves ids between them, so the selection is always plainly visible.
+    # Every widget is stored under ``<prefix>_*`` so one implementation serves both tabs.
 
-        if not hasattr(self, "ko_available"):
+    def _build_ko_picker(self, prefix: str, *, max_height: int = 150) -> QHBoxLayout:
+        picker = QHBoxLayout()
+
+        left = QVBoxLayout()
+        search = QLineEdit()
+        search.setPlaceholderText("Search targets…")
+        search.setClearButtonEnabled(True)
+        search.textChanged.connect(lambda text, p=prefix: self._ko_filter(p, text))
+        left.addWidget(search)
+        available = QListWidget()
+        available.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        available.setMaximumHeight(max_height)
+        available.setToolTip("Double-click (or select and Add →) to add a target.")
+        available.itemDoubleClicked.connect(
+            lambda item, p=prefix: self._ko_add(p, [item.text()])
+        )
+        left.addWidget(available)
+        picker.addLayout(left, 1)
+
+        mid = QVBoxLayout()
+        mid.addStretch(1)
+        add_btn = QPushButton("Add →")
+        add_btn.setToolTip("Add the highlighted targets to the knockout set")
+        add_btn.clicked.connect(
+            lambda _=False, p=prefix: self._ko_add(
+                p, [i.text() for i in getattr(self, f"{p}_available").selectedItems()]
+            )
+        )
+        remove_btn = QPushButton("← Remove")
+        remove_btn.setToolTip("Remove the highlighted targets from the knockout set")
+        remove_btn.clicked.connect(
+            lambda _=False, p=prefix: self._ko_remove(
+                p, [i.text() for i in getattr(self, f"{p}_selected").selectedItems()]
+            )
+        )
+        clear_btn = QPushButton("Clear")
+        clear_btn.setToolTip("Empty the knockout set")
+        clear_btn.clicked.connect(lambda _=False, p=prefix: self._ko_clear(p))
+        mid.addWidget(add_btn)
+        mid.addWidget(remove_btn)
+        mid.addWidget(clear_btn)
+        mid.addStretch(1)
+        picker.addLayout(mid)
+
+        right = QVBoxLayout()
+        selected_label = QLabel("Selected (0):")
+        right.addWidget(selected_label)
+        selected = QListWidget()
+        selected.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        selected.setMaximumHeight(max_height)
+        selected.setToolTip(
+            "The knockout set. Double-click (or select and ← Remove) to drop one."
+        )
+        selected.itemDoubleClicked.connect(
+            lambda item, p=prefix: self._ko_remove(p, [item.text()])
+        )
+        right.addWidget(selected)
+        picker.addLayout(right, 1)
+
+        setattr(self, f"{prefix}_filter", search)
+        setattr(self, f"{prefix}_available", available)
+        setattr(self, f"{prefix}_selected", selected)
+        setattr(self, f"{prefix}_selected_label", selected_label)
+        return picker
+
+    def _ko_populate(self, prefix: str, level: str) -> None:
+        """Fill the catalogue for the given level; clear the chosen set."""
+
+        if not hasattr(self, f"{prefix}_available"):
             return
-        level = self.ko_level_combo.currentText()
         ids = (
             [g.id for g in self.model.genes]
             if level == "gene"
             else [r.id for r in self.model.reactions]
         )
-        self.ko_available.clear()
-        self.ko_available.addItems(ids)
-        self.ko_selected.clear()  # switching level invalidates the previous selection
-        if hasattr(self, "ko_filter"):
-            self._filter_ko_list(self.ko_filter.text())
-        self._update_ko_selected_label()
+        available = getattr(self, f"{prefix}_available")
+        available.clear()
+        available.addItems(ids)
+        # Switching level invalidates the previous selection: gene ids are not reaction ids.
+        getattr(self, f"{prefix}_selected").clear()
+        self._ko_filter(prefix, getattr(self, f"{prefix}_filter").text())
+        self._ko_update_label(prefix)
 
-    def _filter_ko_list(self, text: str) -> None:
+    def _ko_filter(self, prefix: str, text: str) -> None:
         """Hide catalogue targets that do not match the search box (case-insensitive)."""
 
         query = text.strip().lower()
-        for i in range(self.ko_available.count()):
-            item = self.ko_available.item(i)
+        available = getattr(self, f"{prefix}_available")
+        for i in range(available.count()):
+            item = available.item(i)
             item.setHidden(bool(query) and query not in item.text().lower())
 
-    def _add_ko_targets(self, ids) -> None:
+    def _ko_add(self, prefix: str, ids) -> None:
         """Add target ids to the chosen set, skipping ones already present."""
 
-        existing = {
-            self.ko_selected.item(i).text() for i in range(self.ko_selected.count())
-        }
+        selected = getattr(self, f"{prefix}_selected")
+        existing = {selected.item(i).text() for i in range(selected.count())}
         for target_id in ids:
             if target_id not in existing:
-                self.ko_selected.addItem(target_id)
+                selected.addItem(target_id)
                 existing.add(target_id)
-        self._update_ko_selected_label()
+        self._ko_update_label(prefix)
+
+    def _ko_remove(self, prefix: str, ids) -> None:
+        selected = getattr(self, f"{prefix}_selected")
+        drop = set(ids)
+        for i in range(selected.count() - 1, -1, -1):
+            if selected.item(i).text() in drop:
+                selected.takeItem(i)
+        self._ko_update_label(prefix)
+
+    def _ko_clear(self, prefix: str) -> None:
+        getattr(self, f"{prefix}_selected").clear()
+        self._ko_update_label(prefix)
+
+    def _ko_update_label(self, prefix: str) -> None:
+        label = getattr(self, f"{prefix}_selected_label", None)
+        if label is not None:
+            count = getattr(self, f"{prefix}_selected").count()
+            label.setText(f"Selected ({count}):")
+
+    def _ko_targets(self, prefix: str) -> list[str]:
+        selected = getattr(self, f"{prefix}_selected")
+        return [selected.item(i).text() for i in range(selected.count())]
+
+    def _ko_blocked_reactions(self, prefix: str, level: str) -> list[str]:
+        """Chosen targets resolved to reaction ids, through the GPR when the level is gene."""
+
+        targets = self._ko_targets(prefix)
+        if not targets:
+            return []
+        if level == "gene":
+            return list(blocked_reactions_for_genes(self.model, targets))
+        return targets
+
+    # Comparison-tab aliases: the tab, its menu entries, and the tests address the picker by
+    # these names, so they stay as thin delegates onto the shared implementation.
+
+    def _populate_ko_list(self) -> None:
+        if not hasattr(self, "ko_available"):
+            return
+        self._ko_populate("ko", self.ko_level_combo.currentText())
+
+    def _filter_ko_list(self, text: str) -> None:
+        self._ko_filter("ko", text)
+
+    def _add_ko_targets(self, ids) -> None:
+        self._ko_add("ko", ids)
 
     def _remove_ko_targets(self, ids) -> None:
-        drop = set(ids)
-        for i in range(self.ko_selected.count() - 1, -1, -1):
-            if self.ko_selected.item(i).text() in drop:
-                self.ko_selected.takeItem(i)
-        self._update_ko_selected_label()
-
-    def _add_selected_ko(self) -> None:
-        self._add_ko_targets(
-            [item.text() for item in self.ko_available.selectedItems()]
-        )
-
-    def _remove_selected_ko(self) -> None:
-        self._remove_ko_targets(
-            [item.text() for item in self.ko_selected.selectedItems()]
-        )
+        self._ko_remove("ko", ids)
 
     def _clear_ko_selected(self) -> None:
-        self.ko_selected.clear()
-        self._update_ko_selected_label()
+        self._ko_clear("ko")
 
     def _update_ko_selected_label(self) -> None:
-        if hasattr(self, "ko_selected_label"):
-            self.ko_selected_label.setText(f"Selected ({self.ko_selected.count()}):")
+        self._ko_update_label("ko")
 
     def _selected_ko_targets(self) -> list[str]:
-        return [
-            self.ko_selected.item(i).text() for i in range(self.ko_selected.count())
-        ]
+        return self._ko_targets("ko")
 
     def _style_all_combo_popups(self) -> None:
         """Centre every combo's popup entries (Qt defaults to left-aligned)."""
@@ -2311,6 +2432,7 @@ class CmmMainWindow(QMainWindow):
             self.fr_target_combo.setCurrentText(exchanges[0])
 
         self._populate_ko_list()
+        self._ko_populate("sample_ko", self.sample_ko_level_combo.currentText())
         self._loading = False
         # Seed the flux-response range for the initial target; the combo was populated while
         # _loading suppressed the change handler.

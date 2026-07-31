@@ -53,6 +53,16 @@
   Sampling tab's reference options read as editable in `uniform` mode, where they do nothing.
 - Figure swapping on the plotting tabs goes through one shared helper, so Production, Flux
   Response, and Sampling no longer each repeat the canvas/toolbar teardown.
+- The Sampling tab can sample a deletion strain: an optional knockout picker (the Comparison
+  tab's two-panel selector, now shared by both tabs) applies reaction or GPR-resolved gene
+  deletions as a scoped condition, leaving the loaded model untouched. In "around a reference"
+  mode the reference is built under the same knockouts, since a wild-type reference would put
+  every deleted reaction outside its own sampling window. A knockout set that leaves no
+  feasible space is reported as probably lethal, and the previous ensemble is dropped so a
+  stale result cannot be exported under the new settings.
+- Flux Response and Sampling figures re-run their layout on every draw, so axis labels and
+  titles stay clear when the window resizes rather than only fitting the size they were
+  authored at.
 - Comparison: a two-panel knockout picker (searchable catalogue on the left, chosen knockout
   set on the right) replaces Ctrl/Shift-click selection, making the selection visible and
   clearable.

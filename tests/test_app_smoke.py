@@ -683,3 +683,91 @@ def test_tab_order_groups_related_analyses(app, ecoli_core):
     # Each new tab sits beside the analysis asking a similar question.
     assert names.index("Sampling") == names.index("Simulation") + 1
     assert names.index("Flux Response") == names.index("Comparison") + 1
+
+
+def _run_sampling(window, **overrides):
+    window.sample_n_spin.setValue(overrides.get("n", 200))
+    window.sample_method_combo.setCurrentText("achr")
+    window.sample_thinning_spin.setValue(10)
+    window.run_sampling()
+
+
+def test_sampling_applies_reaction_knockouts(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+
+    _run_sampling(window)
+    wild_type = window._sampling_result.samples["PGI"].mean()
+    assert wild_type > 1e-6
+    assert "wild type" in window.sample_summary.text()
+
+    window._ko_add("sample_ko", ["PGI"])
+    _run_sampling(window)
+    # The deleted reaction carries no flux anywhere in the ensemble.
+    assert window._sampling_result.samples["PGI"].abs().max() < 1e-6
+    assert "PGI" in window.sample_summary.text()
+    assert window._sampling_result.metadata["parameters"]["condition"] == "knockout:PGI"
+    # The knockout is a scoped condition, not an edit to the loaded model.
+    assert ecoli_core.reactions.PGI.bounds == (-1000.0, 1000.0)
+
+
+def test_sampling_resolves_gene_knockouts_through_the_gpr(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window.sample_ko_level_combo.setCurrentText("gene")
+    # b4025 is pgi; the GPR must resolve it to the PGI reaction.
+    window._ko_add("sample_ko", ["b4025"])
+    _run_sampling(window)
+    assert window._sampling_result.samples["PGI"].abs().max() < 1e-6
+    assert "gene knockout" in window.sample_summary.text()
+
+
+def test_sampling_level_switch_clears_the_selection(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window._ko_add("sample_ko", ["PGI"])
+    assert window._ko_targets("sample_ko") == ["PGI"]
+    # Reaction ids are not gene ids, so switching level must not carry them over.
+    window.sample_ko_level_combo.setCurrentText("gene")
+    assert window._ko_targets("sample_ko") == []
+    assert window.sample_ko_selected_label.text() == "Selected (0):"
+
+
+def test_reference_mode_uses_a_knocked_out_reference(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window.sample_mode_combo.setCurrentText("around a reference")
+    window._ko_add("sample_ko", ["PGI"])
+    # A wild-type reference would put PGI outside its own window and raise; the reference
+    # has to be computed under the same knockouts.
+    _run_sampling(window)
+    assert window._sampling_result is not None
+    assert window._sampling_result.samples["PGI"].abs().max() < 1e-6
+
+
+def test_lethal_knockout_is_reported_not_crashed(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    _run_sampling(window)
+    assert window._sampling_result is not None
+
+    window.sample_ko_level_combo.setCurrentText("gene")
+    window._ko_add("sample_ko", ["b2415"])  # essential in e_coli_core
+    _run_sampling(window)
+
+    assert "lethal" in window.sample_summary.text()
+    # The previous run's ensemble must not survive as an exportable result.
+    assert window._sampling_result is None
+    assert not window.sample_export_btn.isEnabled()
+    assert window.sample_table.rowCount() == 0
+
+
+def test_knockout_picker_is_independent_per_tab(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._add_ko_targets(["PGI"])  # Comparison tab picker
+    window._ko_add("sample_ko", ["ENO", "FBA"])  # Sampling tab picker
+    assert window._selected_ko_targets() == ["PGI"]
+    assert window._ko_targets("sample_ko") == ["ENO", "FBA"]
+    window._clear_ko_selected()
+    assert window._selected_ko_targets() == []
+    assert window._ko_targets("sample_ko") == ["ENO", "FBA"]

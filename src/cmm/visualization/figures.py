@@ -364,7 +364,7 @@ def flux_response_figure(
         edgecolor="#CCCCCC",
     )
     legend.get_frame().set_linewidth(0.6)
-    fig.tight_layout()
+    fig.set_layout_engine("tight")
     return fig
 
 
@@ -437,19 +437,21 @@ def sampling_figure(
         font,
         xlabel="flux (mmol gDW$^{-1}$ h$^{-1}$)",
         ylabel="reaction",
-        title=title,
+        title="",
     )
-    # Run parameters belong with the figure but not in the title, which a narrow panel
-    # clips; a caption keeps the plot reproducible without widening the heading.
-    ax.text(
-        0.0,
-        -0.14,
+    # Run parameters sit on their own line under the heading. Stacking rather than placing
+    # them beside the title keeps them legible on a narrow panel, where a side-by-side
+    # secondary title collides, and a caption pinned below the axes hits the x label.
+    ax.set_title(
         f"n = {result.n_samples}, {result.method}, seed {result.seed}",
-        transform=ax.transAxes,
         fontsize=font["legend"],
         color="#555555",
+        pad=6,
     )
-    fig.tight_layout()
+    fig.suptitle(title, fontsize=font["title"], fontweight="bold")
+    # A layout engine re-runs on every draw, so the labels stay clear when the GUI resizes
+    # the canvas; a one-shot tight_layout() only fits the size the figure was authored at.
+    fig.set_layout_engine("tight")
     return fig
 
 
