@@ -40,6 +40,13 @@
   flux columns.
 - Omics: multi-condition expression tables are supported in one tab, computing one predicted-
   flux column per selected condition, with a "Show all reactions" toggle.
+- `AGENTS.md` and `CLAUDE.md`: agent operating instructions covering the scenario router, the
+  goal→function table, the solver gate, the rules that keep results reportable, the run
+  contract, and when to stop and ask.
+- `docs/agent-reference.md`: signatures and result objects for every shipped service.
+- `docs/scenarios/`: step-by-step metabolic-engineering pipelines (`SC-01`–`SC-04`) with a
+  shared preflight and reporting contract, each step stating its preconditions, call,
+  artifacts, decision rule, and failure handling.
 
 ### Changed
 
@@ -63,6 +70,10 @@
 - Flux Response and Sampling figures re-run their layout on every draw, so axis labels and
   titles stay clear when the window resizes rather than only fitting the size they were
   authored at.
+- The `cmm-guide` project-local skill is replaced by `AGENTS.md` + `docs/agent-reference.md`.
+  Skills are only read by Claude Code; plain repository documents are read by any agent CLI,
+  and the split keeps decision-critical material in the always-loaded entry point while the
+  function reference loads on demand.
 - Comparison: a two-panel knockout picker (searchable catalogue on the left, chosen knockout
   set on the right) replaces Ctrl/Shift-click selection, making the selection visible and
   clearable.

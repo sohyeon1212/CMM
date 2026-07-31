@@ -165,6 +165,12 @@ biological prediction.
 - [Architecture and solver contracts](docs/architecture.md)
 - [Release changes](CHANGELOG.md)
 
+For driving CMM from an AI coding CLI (Claude Code, Codex, …):
+
+- [Agent operating instructions](AGENTS.md) — the scenario router, solver gate, and run contract
+- [Metabolic-engineering scenarios](docs/scenarios/README.md) — step-by-step pipelines
+- [Function reference for agents](docs/agent-reference.md) — signatures and result objects
+
 ## Citation and license
 
 CMM is open source under the [MIT License](LICENSE). Citation metadata are machine-readable
