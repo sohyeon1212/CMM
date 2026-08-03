@@ -30,25 +30,25 @@ but only run a second scenario when the user's goal actually needs it, and say w
 | The user wants | Scenario | Ends here? |
 |---|---|---|
 | Increase production of metabolite X; find over-expression and knockout targets | [`SC-01`](docs/scenarios/SC-01-production-target-discovery.md) | yes — this is the spine of a production goal |
-| A strain where production is *guaranteed*, not merely possible | [`SC-02`](docs/scenarios/SC-02-growth-coupled-strain-design.md) | yes — a distinct goal (coupling), commonly run after SC-01 |
-| Explain a metabolic difference between conditions or strains | [`SC-03`](docs/scenarios/SC-03-omics-context-engineering.md) | yes — a complete study on its own |
-| Which genes are essential; a single-deletion study | [`SC-04`](docs/scenarios/SC-04-knockout-screening.md) | yes — a complete study on its own |
-| Screen deletions *for a production goal* | [`SC-04`](docs/scenarios/SC-04-knockout-screening.md) → `SC-01` | no — the screen feeds SC-01's candidates |
-| Find targets *in a specific condition* backed by expression data | [`SC-03`](docs/scenarios/SC-03-omics-context-engineering.md) → `SC-01` | no — SC-03 picks the condition, SC-01 searches it |
+| A strain where production is *guaranteed*, not merely possible | [`SC-01`](docs/scenarios/SC-01-production-target-discovery.md), entering at **step 3** | yes — step 3 designs it, step 5a checks it |
+| Explain a metabolic difference between conditions or strains | [`SC-02`](docs/scenarios/SC-02-omics-context-engineering.md) | yes — a complete study on its own |
+| Which genes are essential; a single-deletion study | [`SC-03`](docs/scenarios/SC-03-knockout-screening.md) | yes — a complete study on its own |
+| Screen deletions *for a production goal* | [`SC-03`](docs/scenarios/SC-03-knockout-screening.md) → `SC-01` | no — the screen feeds SC-01's candidates |
+| Find targets *in a specific condition* backed by expression data | [`SC-02`](docs/scenarios/SC-02-omics-context-engineering.md) → `SC-01` | no — SC-02 picks the condition, SC-01 searches it |
 
 Korean phrasings map the same way: 생산 증대·과발현/녹아웃 표적 → SC-01; 성장 공역·균주 설계
-→ SC-02; 오믹스·조건 비교·발현 데이터 → SC-03; 넉아웃 스크리닝·필수 유전자 → SC-04.
+→ SC-01 (3단계부터); 오믹스·조건 비교·발현 데이터 → SC-02; 넉아웃 스크리닝·필수 유전자 → SC-03.
 
 How they relate:
 
 - **SC-01 is the spine of a production goal.** Start here when the goal is "make more of X"
-  and nothing narrower is being asked.
-- **SC-02 is its own goal — proving coupling — and naturally follows SC-01** (screen cheaply,
-  then design rigorously). It does not require SC-01: with a model, a product, and a MILP
-  solver it runs standalone.
-- **SC-03 and SC-04 are complete studies in their own right**, not sub-steps of SC-01. Each
-  also composes with SC-01 when the user's goal is production: SC-03 supplies the condition to
-  search in, SC-04 supplies screened knockout candidates. Neither is subordinate to it.
+  and nothing narrower is being asked. Its step 3 is the growth-coupled design search
+  (OptKnock/RobustKnock) and its step 5a checks that design with MOMA/ROOM — one runs the
+  inverse direction, the other the forward. A request that is only about coupling enters at
+  step 3 and skips the amplification half.
+- **SC-02 and SC-03 are complete studies in their own right**, not sub-steps of SC-01. Each
+  also composes with SC-01 when the user's goal is production: SC-02 supplies the condition to
+  search in, SC-03 supplies an exhaustive single-deletion picture. Neither is subordinate to it.
 
 `docs/scenarios/README.md` holds the same map with a diagram; read it when a request spans
 more than one scenario.
@@ -129,7 +129,7 @@ which solver to install. Never silently produce nothing, and never silently down
 6. **A lethal knockout is not a bug.** Removing an essential reaction makes the solve
    infeasible; that is reported as `status="infeasible"` / `essential=yes`, and an infeasible
    scan point is data. Do not treat it as an error or drop it from a table.
-7. **Rank strain designs by `guaranteed_product`, not `max_product`** (§`SC-02`).
+7. **Rank strain designs by `guaranteed_product`, not `max_product`** (`SC-01` step 3).
 8. **State the assumptions that change the answer**: which reference flux state, aerobic or
    anaerobic, which substrate, which solver. Each of these moves results materially.
 9. **Do not over-interpret a zero-flux knockout.** Knocking out a reaction carrying no flux in
@@ -150,7 +150,7 @@ results/<SC-id>_<model>_<timestamp>/
   00_provenance.json      model fingerprint, solver, versions, every parameter
   01_<step>/…             raw CSV per step, one table per analysis
   figures/                300 DPI PNG (+ PDF/SVG when asked)
-  report.md               the narrative, referencing the files above
+  report.html             the narrative, with figures placed inline
 ```
 
 Units are CMM's throughout: fluxes in mmol gDW⁻¹ h⁻¹, growth in h⁻¹, molar yield in mol/mol.

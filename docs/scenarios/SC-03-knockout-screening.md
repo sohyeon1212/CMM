@@ -1,5 +1,5 @@
 ---
-id: SC-04
+id: SC-03
 title: Knockout screening and essentiality
 goal: Screen every single knockout for lethality, growth impact, and effect on a product
 when_to_use:
@@ -21,7 +21,7 @@ steps: [preflight, baseline, screen, classify, verify, report]
 runtime: minutes on a core model; hours genome-scale
 ---
 
-# SC-04 — Knockout screening and essentiality
+# SC-03 — Knockout screening and essentiality
 
 ## Objective
 
@@ -207,7 +207,7 @@ Follow `_reporting.md`. Scenario-specific requirements:
 - Mark the `n_reactions == 0` genes as uninformative rather than neutral.
 - **Limitations** must include: essentiality here is *in silico* under one medium and changes
   with it; MOMA/ROOM assume minimal adjustment from wild type; and single-deletion screens
-  cannot find synthetic-lethal pairs or the multi-knockout designs of `SC-02`.
+  cannot find synthetic-lethal pairs or the multi-knockout designs of `SC-01` step 3.
 
 ## Cross-checks
 
@@ -221,4 +221,5 @@ Follow `_reporting.md`. Scenario-specific requirements:
 - Do not drop lethal or infeasible rows from the exported table.
 - Do not report essentiality without the medium and threshold.
 - Do not silently screen a subset; a partial screen states its coverage.
-- Do not read a beneficial single deletion as growth-coupled — that is `SC-02`.
+- Do not read a beneficial single deletion as growth-coupled — coupling is proven by
+  `SC-01` step 3's `guaranteed_product`, not by a screen.

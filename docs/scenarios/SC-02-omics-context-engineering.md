@@ -1,5 +1,5 @@
 ---
-id: SC-03
+id: SC-02
 title: Omics-driven context engineering
 goal: Explain a metabolic difference between conditions or strains, and turn it into targets
 when_to_use:
@@ -21,7 +21,7 @@ steps: [preflight, integrate, compare, interpret, target, report]
 runtime: minutes per condition
 ---
 
-# SC-03 — Omics-driven context engineering
+# SC-02 — Omics-driven context engineering
 
 ## Objective
 
@@ -31,7 +31,7 @@ the context in which to search for engineering targets.
 
 **This is a complete study on its own.** "Why does condition A outproduce B" is a finished
 answer, and the mechanism it produces is usually the point. When the goal goes further and
-asks for targets, it composes with [`SC-01`](SC-01-production-target-discovery.md): SC-03
+asks for targets, it composes with [`SC-01`](SC-01-production-target-discovery.md): SC-02
 chooses *which condition* to search in, SC-01 does the systematic search there. That is an
 option, not an obligation — neither scenario requires the other.
 

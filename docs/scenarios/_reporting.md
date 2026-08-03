@@ -34,7 +34,7 @@ results/<SC-id>_<model-id>_<YYYYMMDD-HHMMSS>/
       consensus.csv
   figures/
       *.png
-  report.md
+  report.html
 ```
 
 Step directories are numbered by the scenario's own steps; skip numbers a scenario does not
@@ -68,7 +68,7 @@ This records the model SHA-256, model id, active solver, Python/CMM/COBRApy/NumP
 versions, and the parameters you pass. Each individual result additionally carries its own
 `result.metadata` — keep those too when a step's parameters differ from the run's.
 
-Also record, in `report.md` if not in JSON: any method substitution forced by the solver, and
+Also record, in the report if not in JSON: any method substitution forced by the solver, and
 the exact CMM version or git commit.
 
 ---
@@ -106,49 +106,55 @@ save_figure(fseof_figure(result, top_n=6), run_dir / "figures" / "fseof.png")
 directories. For a manuscript also emit PDF or SVG by changing the suffix. Use
 `column_width=1` for single-column figures, `2` (default) for double.
 
-Every figure in `report.md` must be reproducible from a CSV in the same run directory.
+Every figure in the report must be reproducible from a CSV in the same run directory.
 
 ---
 
-## report.md
+## report.html
 
-```markdown
-# <Scenario title> — <model id>
+**The report is written as HTML, not Markdown**, so figures can sit next to the numbers they
+explain instead of being listed at the end. A reader opens one file and sees the argument in
+order; the PNGs stay separate at 300 DPI for reuse in a manuscript.
 
-## Summary
-Three to five sentences: the goal, the recommended targets, and the single most important
-caveat. Someone reading only this should not be misled.
+Reference figures with a **relative path** — `<img src="figures/fseof.png">` — so the run
+directory stays self-contained and portable as a folder. Do not inline base64: it bloats the
+file and hides the figures from anyone who wants the originals.
 
-## Setup
-The preflight summary table from `_preflight.md`, plus medium, aeration, substrate, solver,
-and any method substitution and why.
+### Sections, in order
 
-## Results
-One subsection per pipeline step, in order. Each states what was run, the decisive numbers,
-the figure, and the CSV they came from.
+| Section | Content |
+|---|---|
+| **Summary** | Three to five sentences: the goal, what is recommended, and the single most important caveat. Someone reading only this must not be misled. |
+| **Setup** | The preflight summary table from `_preflight.md`, plus medium, aeration, substrate, solver, and any method substitution with its reason. |
+| **Results** | One subsection per pipeline step, in order. Each states what was run, the decisive numbers, the figure, and the CSV they came from. |
+| **Recommended targets** | Target / type / evidence / predicted effect / confidence. Type is amplify, knockdown, or knockout. Evidence names the methods that agree. Confidence reflects how many independent methods agreed and whether verification passed. A scenario may use a richer shape — `SC-01` reports a strain proposal — but the columns above are the floor. |
+| **Limitations** | What the analysis does *not* establish. At minimum: model predictions requiring experimental validation; the medium and aeration assumed; any conflicting method assumptions (MOMA's minimal adjustment vs OptKnock's growth maximization); solver capability that constrained the run. |
+| **Provenance** | Model fingerprint, solver, CMM version, sampler seed, run directory, and the command or script that produced it. |
 
-## Recommended targets
-| Rank | Target | Type | Evidence | Predicted effect | Confidence |
-Type is amplify / knockdown / knockout. Evidence names the methods that agree. Predicted
-effect gives product flux and growth. Confidence reflects how many independent methods
-agreed and whether verification passed.
+### Placing figures
 
-## Limitations
-What the analysis does not establish. At minimum: these are model predictions requiring
-experimental validation; the medium and aeration assumed; any method whose assumptions
-conflict (MOMA's minimal adjustment vs OptKnock's growth maximization); solver capability
-that constrained the analysis.
+Put each figure **inside the subsection that discusses it**, immediately after the sentence
+that states its finding. A figure with no sentence pointing at it is decoration; a finding with
+no figure beside it is harder to check. Give every one a caption naming the source CSV:
 
-## Provenance
-Model fingerprint, solver, CMM version, run directory, and the command or script that
-produced it.
+```html
+<figure>
+  <img src="figures/production_envelope.png" alt="Growth versus succinate flux">
+  <figcaption>
+    <b>Figure 1.</b> Growth falls from 0.21 h<sup>-1</sup> to zero as succinate is enforced.
+    Source: <code>02_yield/production_envelope.csv</code>
+  </figcaption>
+</figure>
 ```
+
+Keep the styling minimal and self-contained in a `<style>` block — no external CSS or fonts, so
+the file renders the same anywhere. Tables should be plain `<table>` with hairline rules.
 
 ---
 
 ## Rules
 
-1. **No number in `report.md` that is not in a CSV.** If it is worth reporting it is worth
+1. **No number in the report that is not in a CSV.** If it is worth reporting it is worth
    exporting.
 2. **Report infeasible and lethal outcomes.** An infeasible scan point or an essential-gene
    knockout is a result. Silently dropping them makes a target list look cleaner than it is.

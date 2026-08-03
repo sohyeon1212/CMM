@@ -35,8 +35,9 @@ the methods your scenario needs.
 **Branch.**
 - Missing QP/MIQP and the scenario needs it → pick the LP-capable substitute and record the
   substitution, or ask the user to install gurobi/cplex/osqp. Do not proceed silently.
-- `straindesign` or Java missing and the scenario is `SC-02` → stop and tell the user; there
-  is no LP substitute for OptKnock.
+- MILP, `straindesign` or Java missing and the run needs a growth-coupled design (`SC-01`
+  step 3) → the design search cannot run. `SC-01` defines the single-deletion fallback and the
+  three disclosures the report must then carry; decide this here, not mid-run.
 
 **Artifact.** `model_id`, `model_sha256`, solver name and capabilities → `00_provenance.json`.
 
@@ -90,7 +91,7 @@ in `00_provenance.json`.
 ## Step P4 — Confirm the target product is reachable
 
 **Goal.** Establish that production design is even possible. Skip only when the run has no
-target product (`SC-04` run as an essentiality study, `SC-03` run as a condition comparison).
+target product (`SC-03` run as an essentiality study, `SC-02` run as a condition comparison).
 
 ```python
 from cmm.features import theoretical_yield
@@ -116,8 +117,8 @@ print(result.status, result.molar_yield, result.exceeds_carbon_ceiling, result.c
 
 ## Step P5 — Check gene id overlap
 
-**Goal.** Only for runs using expression data (`SC-03`, or an omics reference in `SC-01` or
-`SC-04`). An expression table whose ids do not match the model contributes nothing, silently.
+**Goal.** Only for runs using expression data (`SC-02`, or an omics reference in `SC-01` or
+`SC-03`). An expression table whose ids do not match the model contributes nothing, silently.
 
 ```python
 from cmm.omics import read_expression_table
@@ -142,7 +143,7 @@ Also required: expression values finite, non-negative, no duplicate gene rows.
 
 ## Preflight summary block
 
-Put this at the top of `report.md`:
+Put this at the top of the report:
 
 | Check | Result |
 |---|---|

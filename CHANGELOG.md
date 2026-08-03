@@ -44,7 +44,7 @@
   goal→function table, the solver gate, the rules that keep results reportable, the run
   contract, and when to stop and ask.
 - `docs/agent-reference.md`: signatures and result objects for every shipped service.
-- `docs/scenarios/`: step-by-step metabolic-engineering pipelines (`SC-01`–`SC-04`) with a
+- `docs/scenarios/`: step-by-step metabolic-engineering pipelines (`SC-01`–`SC-03`) with a
   shared preflight and reporting contract, each step stating its preconditions, call,
   artifacts, decision rule, and failure handling.
 
@@ -70,6 +70,15 @@
 - Flux Response and Sampling figures re-run their layout on every draw, so axis labels and
   titles stay clear when the window resizes rather than only fitting the size they were
   authored at.
+- `SC-02` is folded into `SC-01`. Finding knockout targets is an *inverse* problem, so the
+  design step now uses OptKnock/RobustKnock rather than a MOMA/ROOM single-deletion screen, and
+  MOMA/ROOM moves to the verification step where it belongs — predicting the built strain's
+  immediate phenotype. A gap between the MOMA prediction and the design's guaranteed product is
+  an estimate of the adaptive evolution required, not a refutation of the coupling proof.
+  Without MILP the design step falls back to a single-deletion screen and the report must state
+  that only single deletions were examined and coupling was not established. The reference-state
+  step is correspondingly narrower: OptKnock does not consult a reference, so multiple reference
+  states no longer strengthen the design, only the interpretation.
 - The `cmm-guide` project-local skill is replaced by `AGENTS.md` + `docs/agent-reference.md`.
   Skills are only read by Claude Code; plain repository documents are read by any agent CLI,
   and the split keeps decision-critical material in the always-loaded entry point while the
