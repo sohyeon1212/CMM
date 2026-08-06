@@ -12,8 +12,6 @@ import math
 from collections.abc import Mapping
 from pathlib import Path
 
-_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-
 from cobra import Model
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
@@ -50,6 +48,8 @@ from qtpy.QtWidgets import (
 
 from cmm.core import (
     PRESET_MEDIA,
+    Condition,
+    ReactionBound,
     active_solver,
     apply_medium,
     fba,
@@ -73,7 +73,12 @@ from cmm.features.production import (
     production_envelope,
     theoretical_yield,
 )
+from cmm.features.response import flux_response
 from cmm.features.revert import revert_targets
+from cmm.features.sampling import (
+    random_flux_sampling,
+    reference_constrained_sampling,
+)
 from cmm.features.strain_design import optknock, robustknock
 from cmm.features.transformation import transformation_targets
 from cmm.omics.conditions import (
@@ -84,10 +89,14 @@ from cmm.omics.differential import differential_expression
 from cmm.omics.expression import integrate_expression
 from cmm.visualization import (
     escher_flux_map,
+    flux_response_figure,
     fseof_figure,
     fvseof_figure,
     production_envelope_figure,
+    sampling_figure,
 )
+
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 # "Oxford Slate" — an academic / scientific-software palette: a deep-navy header with a
 # restrained steel-blue accent over a cool-paper canvas. Every interactive widget (menus,
@@ -143,6 +152,7 @@ QComboBox::down-arrow { image: url(__ASSETS__/down_arrow.svg);
     width: 10px; height: 7px; margin-right: 8px; }
 QComboBox QAbstractItemView { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
     selection-background-color: #2f5e8f; selection-color: #ffffff; outline: none; }
+QComboBox:disabled { background: #eef1f5; color: #9aa7b6; border-color: #dde3ea; }
 
 /* Spin boxes */
 QDoubleSpinBox, QSpinBox { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
@@ -159,6 +169,15 @@ QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {
     image: url(__ASSETS__/up_arrow.svg); width: 9px; height: 6px; }
 QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {
     image: url(__ASSETS__/down_arrow.svg); width: 9px; height: 6px; }
+/* An inert control must read as inert: without these a disabled combo or spin box is almost
+   indistinguishable from an active one, so users try to edit it and wonder why it does nothing. */
+QDoubleSpinBox:disabled, QSpinBox:disabled { background: #eef1f5; color: #9aa7b6;
+    border-color: #dde3ea; }
+QDoubleSpinBox::up-button:disabled, QSpinBox::up-button:disabled,
+QDoubleSpinBox::down-button:disabled, QSpinBox::down-button:disabled {
+    border-left-color: #dde3ea; }
+QLabel:disabled { color: #9aa7b6; }
+QCheckBox:disabled { color: #9aa7b6; }
 
 /* Flux-range slider */
 QSlider::groove:horizontal { height: 5px; background: #d2dae4; border-radius: 3px; }
@@ -309,7 +328,8 @@ class _DisabledHoverCursor(QObject):
             index = self._view.indexAt(pos)
             enabled = (
                 bool(self._view.model().flags(index) & Qt.ItemIsEnabled)
-                if index.isValid() else True
+                if index.isValid()
+                else True
             )
             viewport.setCursor(Qt.ArrowCursor if enabled else Qt.ForbiddenCursor)
         return False
@@ -328,7 +348,9 @@ class CmmMainWindow(QMainWindow):
     ):
         super().__init__(parent)
         self.model = model
-        self._fluxes: dict[str, float] = {}  # the last-run distribution (drives left panel/FVA/map)
+        self._fluxes: dict[
+            str, float
+        ] = {}  # the last-run distribution (drives left panel/FVA/map)
         self._fba_fluxes: dict[str, float] = {}  # FBA column of the simulation table
         self._pfba_fluxes: dict[str, float] = {}  # pFBA column of the simulation table
         self._loading = False
@@ -610,6 +632,8 @@ class CmmMainWindow(QMainWindow):
             "Comparison": self.comparison_table,
             "Production": self.fseof_table,
             "Strain Design": self.sd_table,
+            "Flux Response": self.fr_table,
+            "Sampling": self.sample_table,
             "Omics": self.omics_table,
             "Revert Metabolism": self.revert_table,
             "Transform (A→B)": self.transform_table,
@@ -621,6 +645,10 @@ class CmmMainWindow(QMainWindow):
         name = self.tabs.tabText(self.tabs.currentIndex())
         if name == "Production" and self._production_canvas is not None:
             return self._production_canvas.figure
+        if name == "Flux Response" and self._flux_response_canvas is not None:
+            return self._flux_response_canvas.figure
+        if name == "Sampling" and self._sampling_canvas is not None:
+            return self._sampling_canvas.figure
         if name == "Flux Map" and self._map_canvas is not None:
             return self._map_canvas.figure
         return None
@@ -740,9 +768,19 @@ class CmmMainWindow(QMainWindow):
         return box
 
     def _build_tabs(self) -> QWidget:
+        """Tabs ordered so each analysis sits next to the one asking a similar question.
+
+        Simulation/Sampling describe what the model can do with no intervention;
+        Comparison/Flux Response predict the consequence of one (discrete and continuous
+        respectively — a knockout is a response scan pinned at zero); Production/Strain Design
+        propose interventions; the rest are omics-driven.
+        """
+
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_simulation_tab(), "Simulation")
+        self.tabs.addTab(self._build_sampling_tab(), "Sampling")
         self.tabs.addTab(self._build_comparison_tab(), "Comparison")
+        self.tabs.addTab(self._build_flux_response_tab(), "Flux Response")
         self.tabs.addTab(self._build_production_tab(), "Production")
         self.tabs.addTab(self._build_strain_design_tab(), "Strain Design")
         self.tabs.addTab(self._build_omics_tab(), "Omics")
@@ -1078,6 +1116,567 @@ class CmmMainWindow(QMainWindow):
             )
         self.status_label.setText(f"Strain design complete ({method}).")
 
+    def _build_flux_response_tab(self) -> QWidget:
+        """Scan one reaction's enforced flux and watch a response reaction follow it."""
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        controls = QGroupBox(
+            "Flux response (enforced target flux → maximized response)"
+        )
+        controls_layout = QVBoxLayout(controls)
+
+        selectors = QHBoxLayout()
+        selectors.addWidget(QLabel("Target (scanned):"))
+        self.fr_target_combo = QComboBox()
+        self.fr_target_combo.setEditable(True)
+        self.fr_target_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.fr_target_combo.setMinimumWidth(160)
+        self.fr_target_combo.setToolTip(
+            "Reaction whose flux is fixed at each step of the scan"
+        )
+        self.fr_target_combo.currentTextChanged.connect(self._on_fr_target_changed)
+        selectors.addWidget(self.fr_target_combo, 1)
+        selectors.addWidget(QLabel("Response (maximized):"))
+        self.fr_response_combo = QComboBox()
+        self.fr_response_combo.setEditable(True)
+        self.fr_response_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.fr_response_combo.setMinimumWidth(160)
+        self.fr_response_combo.setToolTip(
+            "Reaction maximized at each step. '(objective)' gives the robustness reading; "
+            "a product exchange gives the production reading."
+        )
+        selectors.addWidget(self.fr_response_combo, 1)
+        controls_layout.addLayout(selectors)
+
+        options = QHBoxLayout()
+        options.addWidget(QLabel("Steps:"))
+        self.fr_steps_spin = QSpinBox()
+        self.fr_steps_spin.setRange(2, 200)
+        self.fr_steps_spin.setValue(20)
+        options.addWidget(self.fr_steps_spin)
+
+        options.addWidget(QLabel("Min growth (% of wild type):"))
+        self.fr_growth_spin = QDoubleSpinBox()
+        self.fr_growth_spin.setRange(0.0, 100.0)
+        self.fr_growth_spin.setValue(0.0)
+        self.fr_growth_spin.setSingleStep(5.0)
+        self.fr_growth_spin.setToolTip(
+            "Hold biomass at this fraction of the wild-type optimum across the scan. "
+            "0 = unconstrained, which for a product response returns the theoretical "
+            "ceiling of a non-growing cell."
+        )
+        options.addWidget(self.fr_growth_spin)
+
+        # The range is always shown and always editable. There is no auto/manual toggle: the
+        # boxes are filled with the target's detected feasible interval whenever the target
+        # changes, so "auto" and "manual" would hold the same numbers until you edit them.
+        options.addWidget(QLabel("Range min:"))
+        self.fr_min_spin = QDoubleSpinBox()
+        self.fr_min_spin.setRange(-1e6, 1e6)
+        self.fr_min_spin.setDecimals(3)
+        self.fr_min_spin.setToolTip(
+            "Lowest enforced target flux. Filled with the target's feasible minimum; edit to "
+            "scan a narrower window, or past its bounds as a what-if."
+        )
+        options.addWidget(self.fr_min_spin)
+        options.addWidget(QLabel("max:"))
+        self.fr_max_spin = QDoubleSpinBox()
+        self.fr_max_spin.setRange(-1e6, 1e6)
+        self.fr_max_spin.setDecimals(3)
+        options.addWidget(self.fr_max_spin)
+
+        self.fr_detect_btn = QPushButton("Detect range")
+        self.fr_detect_btn.setToolTip(
+            "Reset min/max to the full flux interval this reaction can carry in the current "
+            "medium (FVA with the objective unconstrained)"
+        )
+        self.fr_detect_btn.clicked.connect(self._prefill_fr_range)
+        options.addWidget(self.fr_detect_btn)
+
+        self.fr_run_btn = QPushButton("Run scan")
+        self.fr_run_btn.clicked.connect(self.run_flux_response)
+        options.addWidget(self.fr_run_btn)
+        options.addStretch(1)
+        controls_layout.addLayout(options)
+        layout.addWidget(controls)
+
+        self.fr_summary = QLabel(
+            "Pick a target reaction and run the scan to see how the response follows it."
+        )
+        self.fr_summary.setFont(QFont("", 13, QFont.Bold))
+        self.fr_summary.setWordWrap(True)
+        self.fr_summary.setTextFormat(Qt.RichText)
+        layout.addWidget(self.fr_summary)
+
+        results = QSplitter(Qt.Horizontal)
+        self.fr_canvas_holder = QVBoxLayout()
+        holder = QWidget()
+        holder.setLayout(self.fr_canvas_holder)
+        results.addWidget(holder)
+        self._flux_response_canvas = None
+        self._flux_response_toolbar = None
+
+        right_box = QWidget()
+        right_layout = QVBoxLayout(right_box)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(QLabel("Scan points:"))
+        self.fr_table = QTableWidget(0, 4)
+        self.fr_table.setHorizontalHeaderLabels(
+            ["Target flux", "Response flux", "Biomass flux", "Status"]
+        )
+        self.fr_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.fr_table.verticalHeader().setVisible(False)
+        self.fr_table.setAlternatingRowColors(True)
+        right_layout.addWidget(self.fr_table)
+        results.addWidget(right_box)
+        results.setStretchFactor(0, 1)
+        results.setStretchFactor(1, 1)
+        results.setSizes([10000, 10000])
+        layout.addWidget(results, 1)
+        return tab
+
+    def _build_sampling_tab(self) -> QWidget:
+        """Random flux sampling: what the feasible space looks like, not one optimum."""
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        controls = QGroupBox("Random flux sampling")
+        controls_layout = QVBoxLayout(controls)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Mode:"))
+        self.sample_mode_combo = QComboBox()
+        self.sample_mode_combo.addItems(["uniform", "around a reference"])
+        self.sample_mode_combo.setToolTip(
+            "'uniform' samples the whole feasible space; 'around a reference' narrows every "
+            "reaction to a window around a predicted flux state first."
+        )
+        self.sample_mode_combo.currentTextChanged.connect(self._on_sample_mode_changed)
+        row1.addWidget(self.sample_mode_combo)
+
+        # These two only mean anything in "around a reference" mode, so they are disabled —
+        # labels included — in uniform mode rather than sitting there inviting input.
+        self.sample_reference_label = QLabel("Reference:")
+        row1.addWidget(self.sample_reference_label)
+        self.sample_reference_combo = QComboBox()
+        self.sample_reference_combo.addItems(["pfba", "fba"])
+        self.sample_reference_combo.setToolTip(
+            "Which predicted flux state the sampling windows are centred on"
+        )
+        row1.addWidget(self.sample_reference_combo)
+
+        self.sample_window_label = QLabel("window ±%:")
+        row1.addWidget(self.sample_window_label)
+        self.sample_window_spin = QDoubleSpinBox()
+        self.sample_window_spin.setRange(1.0, 100.0)
+        self.sample_window_spin.setValue(20.0)
+        self.sample_window_spin.setToolTip(
+            "Half-width of the window around each reference flux, as a percentage"
+        )
+        row1.addWidget(self.sample_window_spin)
+        row1.addStretch(1)
+        controls_layout.addLayout(row1)
+        self._on_sample_mode_changed(self.sample_mode_combo.currentText())
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Samples:"))
+        self.sample_n_spin = QSpinBox()
+        self.sample_n_spin.setRange(10, 100000)
+        self.sample_n_spin.setValue(1000)
+        row2.addWidget(self.sample_n_spin)
+
+        row2.addWidget(QLabel("Sampler:"))
+        self.sample_method_combo = QComboBox()
+        self.sample_method_combo.addItems(["optgp", "achr"])
+        self.sample_method_combo.setToolTip(
+            "optgp needs a large sample count to mix; achr converges better for small runs"
+        )
+        row2.addWidget(self.sample_method_combo)
+
+        row2.addWidget(QLabel("Thinning:"))
+        self.sample_thinning_spin = QSpinBox()
+        self.sample_thinning_spin.setRange(1, 10000)
+        self.sample_thinning_spin.setValue(100)
+        self.sample_thinning_spin.setToolTip(
+            "Keep every nth iterate to reduce autocorrelation between samples"
+        )
+        row2.addWidget(self.sample_thinning_spin)
+
+        row2.addWidget(QLabel("Seed:"))
+        self.sample_seed_spin = QSpinBox()
+        self.sample_seed_spin.setRange(0, 2**31 - 1)
+        self.sample_seed_spin.setValue(0)
+        self.sample_seed_spin.setToolTip(
+            "The same seed reproduces the same samples exactly"
+        )
+        row2.addWidget(self.sample_seed_spin)
+
+        row2.addWidget(QLabel("Show top:"))
+        self.sample_top_spin = QSpinBox()
+        self.sample_top_spin.setRange(1, 40)
+        self.sample_top_spin.setValue(8)
+        self.sample_top_spin.setToolTip(
+            "How many of the most variable reactions to draw in the figure"
+        )
+        row2.addWidget(self.sample_top_spin)
+
+        self.sample_run_btn = QPushButton("Run sampling")
+        self.sample_run_btn.clicked.connect(self.run_sampling)
+        row2.addWidget(self.sample_run_btn)
+
+        # The table summarizes; the ensemble itself is the primary data, so it gets its own
+        # export rather than being reachable only through File > Export Table.
+        self.sample_export_btn = QPushButton("Export samples…")
+        self.sample_export_btn.setToolTip(
+            "Write every drawn sample to CSV: one row per sample, one column per reaction"
+        )
+        self.sample_export_btn.setEnabled(False)
+        self.sample_export_btn.clicked.connect(self.export_sampling_samples)
+        row2.addWidget(self.sample_export_btn)
+        row2.addStretch(1)
+        controls_layout.addLayout(row2)
+
+        # Optional knockouts: sampling a deletion strain answers "what does this mutant's
+        # flux space look like", which a wild-type ensemble cannot. Empty = wild type.
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Knockouts (optional) — level:"))
+        self.sample_ko_level_combo = QComboBox()
+        self.sample_ko_level_combo.addItems(["reaction", "gene"])
+        self.sample_ko_level_combo.setToolTip(
+            "Knock out reactions directly, or genes resolved to reactions through the GPR"
+        )
+        self.sample_ko_level_combo.currentTextChanged.connect(
+            lambda level: self._ko_populate("sample_ko", level)
+        )
+        row3.addWidget(self.sample_ko_level_combo)
+        row3.addStretch(1)
+        controls_layout.addLayout(row3)
+        controls_layout.addLayout(self._build_ko_picker("sample_ko", max_height=110))
+
+        layout.addWidget(controls)
+        self._sampling_result = None
+
+        self.sample_summary = QLabel(
+            "Sampling shows how much a flux can vary across equally valid solutions — "
+            "run it to see which predictions are forced and which are one of many."
+        )
+        self.sample_summary.setFont(QFont("", 13, QFont.Bold))
+        self.sample_summary.setWordWrap(True)
+        self.sample_summary.setTextFormat(Qt.RichText)
+        layout.addWidget(self.sample_summary)
+
+        results = QSplitter(Qt.Horizontal)
+        self.sample_canvas_holder = QVBoxLayout()
+        holder = QWidget()
+        holder.setLayout(self.sample_canvas_holder)
+        results.addWidget(holder)
+        self._sampling_canvas = None
+        self._sampling_toolbar = None
+
+        right_box = QWidget()
+        right_layout = QVBoxLayout(right_box)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(QLabel("Per-reaction statistics:"))
+        self.sample_table = QTableWidget(0, 6)
+        self.sample_table.setHorizontalHeaderLabels(
+            ["Reaction", "Mean", "Std", "Min", "Median", "Max"]
+        )
+        self.sample_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.sample_table.verticalHeader().setVisible(False)
+        self.sample_table.setAlternatingRowColors(True)
+        right_layout.addWidget(self.sample_table)
+        results.addWidget(right_box)
+        results.setStretchFactor(0, 1)
+        results.setStretchFactor(1, 1)
+        results.setSizes([10000, 10000])
+        layout.addWidget(results, 1)
+        return tab
+
+    def _on_fr_target_changed(self, target: str) -> None:
+        # A range belongs to the reaction it was detected for; re-seed on a switch so a scan
+        # never runs another reaction's numbers.
+        if self._loading:
+            return
+        self._prefill_fr_range()
+
+    def _prefill_fr_range(self) -> None:
+        """Fill the range boxes with the target's feasible interval in the current medium.
+
+        Runs on target change and on demand from "Detect range", so the boxes never hold a
+        placeholder or a previous reaction's numbers.
+        """
+
+        target = self.fr_target_combo.currentText().strip()
+        if not target or target not in self.model.reactions:
+            return
+        try:
+            detected = self._run_in_background(
+                lambda: fva(self.model, reactions=[target], fraction_of_optimum=0.0)[
+                    target
+                ],
+                label="Detecting the target's flux range…",
+            )
+        except Exception as exc:
+            self.status_label.setText(f"Could not detect the flux range: {exc}")
+            return
+        self.fr_min_spin.setValue(float(detected.minimum))
+        self.fr_max_spin.setValue(float(detected.maximum))
+        self.status_label.setText(
+            f"{target} can carry {detected.minimum:.4g} to {detected.maximum:.4g} "
+            "mmol gDW⁻¹ h⁻¹ in this medium."
+        )
+
+    def _on_sample_mode_changed(self, mode: str) -> None:
+        around_reference = mode == "around a reference"
+        for widget in (
+            self.sample_reference_label,
+            self.sample_reference_combo,
+            self.sample_window_label,
+            self.sample_window_spin,
+        ):
+            widget.setEnabled(around_reference)
+
+    def run_flux_response(self) -> None:
+        """Run the flux-response scan and render its curve, table, and summary."""
+
+        try:
+            target = self.fr_target_combo.currentText().strip()
+            if not target:
+                self.fr_summary.setText("Select a target reaction first.")
+                return
+            response_text = self.fr_response_combo.currentText().strip()
+            response = None if response_text in ("", "(objective)") else response_text
+            growth_percent = self.fr_growth_spin.value()
+            biomass_fraction = None if growth_percent <= 0 else growth_percent / 100.0
+            steps = self.fr_steps_spin.value()
+            target_min = self.fr_min_spin.value()
+            target_max = self.fr_max_spin.value()
+
+            result = self._run_in_background(
+                lambda: flux_response(
+                    self.model,
+                    target,
+                    response,
+                    n_steps=steps,
+                    biomass_fraction=biomass_fraction,
+                    target_min=target_min,
+                    target_max=target_max,
+                ),
+                label="Running flux response scan…",
+            )
+        except Exception as exc:
+            self.fr_summary.setText(f"Flux response failed: {html.escape(str(exc))}")
+            self.status_label.setText(f"Flux response failed: {exc}")
+            return
+
+        self._set_figure(
+            self.fr_canvas_holder, "flux_response", flux_response_figure(result)
+        )
+        self._fill_flux_response_table(result)
+
+        optimum = result.optimum()
+        window = result.feasible_range()
+        parts = [
+            f"<b>{html.escape(result.response)}</b> vs enforced "
+            f"<b>{html.escape(result.target)}</b>."
+        ]
+        if optimum is not None:
+            parts.append(
+                f"Best response {optimum.response_flux:.4g} at target "
+                f"{optimum.target_flux:.4g} (growth {optimum.biomass_flux:.4g})."
+            )
+        if window is not None:
+            parts.append(f"Feasible from {window[0]:.4g} to {window[1]:.4g}.")
+        if result.bottleneck.found:
+            parts.append(
+                f"Steepest decline {result.bottleneck.steepest_decline:.4g} per unit "
+                f"around {result.bottleneck.target_flux:.4g}."
+            )
+        else:
+            parts.append(f"No bottleneck: {result.bottleneck.message}.")
+        self.fr_summary.setText(" ".join(parts))
+        self.status_label.setText("Flux response scan complete.")
+
+    def _fill_flux_response_table(self, result) -> None:
+        frame = result.to_frame()
+        self.fr_table.setRowCount(len(frame))
+        for row, (_, record) in enumerate(frame.iterrows()):
+            values = [
+                f"{record['target_flux']:.4g}",
+                "—"
+                if math.isnan(record["response_flux"])
+                else f"{record['response_flux']:.4g}",
+                "—"
+                if math.isnan(record["biomass_flux"])
+                else f"{record['biomass_flux']:.4g}",
+                str(record["status"]),
+            ]
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if record["status"] != "optimal":
+                    item.setForeground(QColor("#B00020"))
+                self.fr_table.setItem(row, col, item)
+
+    def _sampling_knockout_condition(self) -> Condition | None:
+        """The Sampling tab's chosen knockouts as a Condition, or None for wild type."""
+
+        level = self.sample_ko_level_combo.currentText()
+        blocked = self._ko_blocked_reactions("sample_ko", level)
+        if not blocked:
+            return None
+        return Condition(
+            name=f"knockout:{','.join(self._ko_targets('sample_ko'))}",
+            bounds=tuple(
+                ReactionBound(reaction_id=rid, lower_bound=0.0, upper_bound=0.0)
+                for rid in blocked
+            ),
+        )
+
+    def _reference_under(self, condition: Condition | None, method: str):
+        """Build a reference flux state with the condition applied, then restore the model."""
+
+        with self.model:
+            if condition is not None:
+                condition.apply_to(self.model)
+            return reference_flux(self.model, method)
+
+    def run_sampling(self) -> None:
+        """Draw a flux ensemble and summarize how much each reaction actually varies."""
+
+        try:
+            n = self.sample_n_spin.value()
+            method = self.sample_method_combo.currentText()
+            thinning = self.sample_thinning_spin.value()
+            seed = self.sample_seed_spin.value()
+            around_reference = (
+                self.sample_mode_combo.currentText() == "around a reference"
+            )
+            condition = self._sampling_knockout_condition()
+
+            if around_reference:
+                reference_method = self.sample_reference_combo.currentText()
+                half_width = self.sample_window_spin.value() / 100.0
+                result = self._run_in_background(
+                    lambda: reference_constrained_sampling(
+                        self.model,
+                        # The reference must come from the knocked-out model: a wild-type
+                        # reference would put deleted reactions outside their own windows.
+                        self._reference_under(condition, reference_method),
+                        n=n,
+                        condition=condition,
+                        method=method,
+                        thinning=thinning,
+                        seed=seed,
+                        min_fraction=max(0.0, 1.0 - half_width),
+                        max_fraction=1.0 + half_width,
+                    ),
+                    label="Sampling around the reference…",
+                )
+            else:
+                result = self._run_in_background(
+                    lambda: random_flux_sampling(
+                        self.model,
+                        n=n,
+                        condition=condition,
+                        method=method,
+                        thinning=thinning,
+                        seed=seed,
+                    ),
+                    label="Sampling the feasible space…",
+                )
+        except Exception as exc:
+            # Drop the previous ensemble: leaving it on screen (and exportable) next to a
+            # failure message would attribute one run's samples to another run's settings.
+            self._sampling_result = None
+            self.sample_export_btn.setEnabled(False)
+            self.sample_table.setRowCount(0)
+            if condition is not None:
+                # A deletion that leaves no feasible space is a lethal knockout, which is a
+                # result about the strain rather than a failure of the run.
+                self.sample_summary.setText(
+                    f"No flux distribution could be sampled with these knockouts applied "
+                    f"({html.escape(', '.join(self._ko_targets('sample_ko')))}). The set is "
+                    f"probably lethal, or leaves a feasible space of zero volume. "
+                    f"<br><small>{html.escape(str(exc))}</small>"
+                )
+                self.status_label.setText("Sampling: knockout set appears lethal.")
+                return
+            self.sample_summary.setText(f"Sampling failed: {html.escape(str(exc))}")
+            self.status_label.setText(f"Sampling failed: {exc}")
+            return
+
+        top_n = self.sample_top_spin.value()
+        self._set_figure(
+            self.sample_canvas_holder,
+            "sampling",
+            sampling_figure(result, top_n=top_n),
+        )
+        self._fill_sampling_table(result)
+        self._sampling_result = result
+        self.sample_export_btn.setEnabled(True)
+
+        statistics = result.statistics()
+        varying = int((statistics["std"] > 1e-6).sum())
+        if condition is None:
+            strain = "wild type"
+        else:
+            targets = self._ko_targets("sample_ko")
+            level = self.sample_ko_level_combo.currentText()
+            strain = (
+                f"<b>{len(targets)}</b> {level} knockout(s): "
+                f"{html.escape(', '.join(targets))}"
+            )
+        self.sample_summary.setText(
+            f"Drew <b>{result.n_samples}</b> samples ({html.escape(result.method)}, "
+            f"seed {result.seed}, thinning {thinning}) on {strain}. "
+            f"<b>{varying}</b> of {len(statistics)} reactions vary across the ensemble; "
+            "the rest are fixed by the constraints."
+        )
+        self.status_label.setText("Flux sampling complete.")
+
+    def export_sampling_samples(self) -> None:
+        """Write the full sampled ensemble to CSV — one row per sample, one column per reaction."""
+
+        result = self._sampling_result
+        if result is None:
+            self.status_label.setText("Run sampling first, then export the ensemble.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export samples to CSV", "", "CSV files (*.csv);;All files (*)"
+        )
+        if not path:
+            return
+        frame = result.to_frame()
+        try:
+            frame.to_csv(path, index_label="sample")
+        except OSError as exc:
+            self.status_label.setText(f"Could not write CSV: {exc}")
+            return
+        self.status_label.setText(
+            f"Exported {len(frame)} samples x {len(frame.columns)} reactions to {path}."
+        )
+
+    def _fill_sampling_table(self, result) -> None:
+        statistics = result.statistics().sort_values("std", ascending=False)
+        self.sample_table.setRowCount(len(statistics))
+        for row, (reaction_id, record) in enumerate(statistics.iterrows()):
+            values = [
+                str(reaction_id),
+                f"{record['mean']:.4g}",
+                f"{record['std']:.4g}",
+                f"{record['minimum']:.4g}",
+                f"{record['median']:.4g}",
+                f"{record['maximum']:.4g}",
+            ]
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.sample_table.setItem(row, col, item)
+
     def _build_comparison_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -1137,7 +1736,9 @@ class CmmMainWindow(QMainWindow):
             "Show a reaction only when |perturbed − reference| > this % of |reference| + 0.001. "
             "0% shows every reaction that moved at all."
         )
-        self.comparison_threshold_spin.valueChanged.connect(self._render_comparison_table)
+        self.comparison_threshold_spin.valueChanged.connect(
+            self._render_comparison_table
+        )
         opts.addWidget(self.comparison_threshold_spin)
         controls_layout.addLayout(opts)
 
@@ -1158,56 +1759,7 @@ class CmmMainWindow(QMainWindow):
         row2.addStretch(1)
         controls_layout.addLayout(row2)
 
-        # Two panels: left = searchable catalogue of all targets, right = the chosen knockout
-        # set. Add/remove moves ids between them, so the selection is always plainly visible.
-        picker = QHBoxLayout()
-
-        left = QVBoxLayout()
-        self.ko_filter = QLineEdit()
-        self.ko_filter.setPlaceholderText("Search targets…")
-        self.ko_filter.setClearButtonEnabled(True)
-        self.ko_filter.textChanged.connect(self._filter_ko_list)
-        left.addWidget(self.ko_filter)
-        self.ko_available = QListWidget()
-        self.ko_available.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.ko_available.setMaximumHeight(150)
-        self.ko_available.setToolTip("Double-click (or select and Add →) to add a target.")
-        self.ko_available.itemDoubleClicked.connect(lambda item: self._add_ko_targets([item.text()]))
-        left.addWidget(self.ko_available)
-        picker.addLayout(left, 1)
-
-        # Add / remove buttons between the two lists.
-        mid = QVBoxLayout()
-        mid.addStretch(1)
-        add_btn = QPushButton("Add →")
-        add_btn.setToolTip("Add the highlighted targets to the knockout set")
-        add_btn.clicked.connect(self._add_selected_ko)
-        remove_btn = QPushButton("← Remove")
-        remove_btn.setToolTip("Remove the highlighted targets from the knockout set")
-        remove_btn.clicked.connect(self._remove_selected_ko)
-        clear_btn = QPushButton("Clear")
-        clear_btn.setToolTip("Empty the knockout set")
-        clear_btn.clicked.connect(self._clear_ko_selected)
-        mid.addWidget(add_btn)
-        mid.addWidget(remove_btn)
-        mid.addWidget(clear_btn)
-        mid.addStretch(1)
-        picker.addLayout(mid)
-
-        right = QVBoxLayout()
-        self.ko_selected_label = QLabel("Selected (0):")
-        right.addWidget(self.ko_selected_label)
-        self.ko_selected = QListWidget()
-        self.ko_selected.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.ko_selected.setMaximumHeight(150)
-        self.ko_selected.setToolTip("The knockout set. Double-click (or select and ← Remove) to drop one.")
-        self.ko_selected.itemDoubleClicked.connect(
-            lambda item: self._remove_ko_targets([item.text()])
-        )
-        right.addWidget(self.ko_selected)
-        picker.addLayout(right, 1)
-
-        controls_layout.addLayout(picker)
+        controls_layout.addLayout(self._build_ko_picker("ko"))
         layout.addWidget(controls)
 
         self.comparison_summary = QLabel(
@@ -1229,66 +1781,172 @@ class CmmMainWindow(QMainWindow):
         layout.addWidget(self.comparison_table, 1)
         return tab
 
-    def _populate_ko_list(self) -> None:
-        """Fill the available-targets catalogue for the current level; clear the chosen set."""
+    # -- Knockout picker (shared by the Comparison and Sampling tabs) --------------------
+    #
+    # Two panels: left = searchable catalogue of all targets, right = the chosen knockout
+    # set. Add/remove moves ids between them, so the selection is always plainly visible.
+    # Every widget is stored under ``<prefix>_*`` so one implementation serves both tabs.
 
-        if not hasattr(self, "ko_available"):
+    def _build_ko_picker(self, prefix: str, *, max_height: int = 150) -> QHBoxLayout:
+        picker = QHBoxLayout()
+
+        left = QVBoxLayout()
+        search = QLineEdit()
+        search.setPlaceholderText("Search targets…")
+        search.setClearButtonEnabled(True)
+        search.textChanged.connect(lambda text, p=prefix: self._ko_filter(p, text))
+        left.addWidget(search)
+        available = QListWidget()
+        available.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        available.setMaximumHeight(max_height)
+        available.setToolTip("Double-click (or select and Add →) to add a target.")
+        available.itemDoubleClicked.connect(
+            lambda item, p=prefix: self._ko_add(p, [item.text()])
+        )
+        left.addWidget(available)
+        picker.addLayout(left, 1)
+
+        mid = QVBoxLayout()
+        mid.addStretch(1)
+        add_btn = QPushButton("Add →")
+        add_btn.setToolTip("Add the highlighted targets to the knockout set")
+        add_btn.clicked.connect(
+            lambda _=False, p=prefix: self._ko_add(
+                p, [i.text() for i in getattr(self, f"{p}_available").selectedItems()]
+            )
+        )
+        remove_btn = QPushButton("← Remove")
+        remove_btn.setToolTip("Remove the highlighted targets from the knockout set")
+        remove_btn.clicked.connect(
+            lambda _=False, p=prefix: self._ko_remove(
+                p, [i.text() for i in getattr(self, f"{p}_selected").selectedItems()]
+            )
+        )
+        clear_btn = QPushButton("Clear")
+        clear_btn.setToolTip("Empty the knockout set")
+        clear_btn.clicked.connect(lambda _=False, p=prefix: self._ko_clear(p))
+        mid.addWidget(add_btn)
+        mid.addWidget(remove_btn)
+        mid.addWidget(clear_btn)
+        mid.addStretch(1)
+        picker.addLayout(mid)
+
+        right = QVBoxLayout()
+        selected_label = QLabel("Selected (0):")
+        right.addWidget(selected_label)
+        selected = QListWidget()
+        selected.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        selected.setMaximumHeight(max_height)
+        selected.setToolTip(
+            "The knockout set. Double-click (or select and ← Remove) to drop one."
+        )
+        selected.itemDoubleClicked.connect(
+            lambda item, p=prefix: self._ko_remove(p, [item.text()])
+        )
+        right.addWidget(selected)
+        picker.addLayout(right, 1)
+
+        setattr(self, f"{prefix}_filter", search)
+        setattr(self, f"{prefix}_available", available)
+        setattr(self, f"{prefix}_selected", selected)
+        setattr(self, f"{prefix}_selected_label", selected_label)
+        return picker
+
+    def _ko_populate(self, prefix: str, level: str) -> None:
+        """Fill the catalogue for the given level; clear the chosen set."""
+
+        if not hasattr(self, f"{prefix}_available"):
             return
-        level = self.ko_level_combo.currentText()
         ids = (
-            [g.id for g in self.model.genes] if level == "gene"
+            [g.id for g in self.model.genes]
+            if level == "gene"
             else [r.id for r in self.model.reactions]
         )
-        self.ko_available.clear()
-        self.ko_available.addItems(ids)
-        self.ko_selected.clear()  # switching level invalidates the previous selection
-        if hasattr(self, "ko_filter"):
-            self._filter_ko_list(self.ko_filter.text())
-        self._update_ko_selected_label()
+        available = getattr(self, f"{prefix}_available")
+        available.clear()
+        available.addItems(ids)
+        # Switching level invalidates the previous selection: gene ids are not reaction ids.
+        getattr(self, f"{prefix}_selected").clear()
+        self._ko_filter(prefix, getattr(self, f"{prefix}_filter").text())
+        self._ko_update_label(prefix)
 
-    def _filter_ko_list(self, text: str) -> None:
+    def _ko_filter(self, prefix: str, text: str) -> None:
         """Hide catalogue targets that do not match the search box (case-insensitive)."""
 
         query = text.strip().lower()
-        for i in range(self.ko_available.count()):
-            item = self.ko_available.item(i)
+        available = getattr(self, f"{prefix}_available")
+        for i in range(available.count()):
+            item = available.item(i)
             item.setHidden(bool(query) and query not in item.text().lower())
 
-    def _add_ko_targets(self, ids) -> None:
+    def _ko_add(self, prefix: str, ids) -> None:
         """Add target ids to the chosen set, skipping ones already present."""
 
-        existing = {
-            self.ko_selected.item(i).text() for i in range(self.ko_selected.count())
-        }
+        selected = getattr(self, f"{prefix}_selected")
+        existing = {selected.item(i).text() for i in range(selected.count())}
         for target_id in ids:
             if target_id not in existing:
-                self.ko_selected.addItem(target_id)
+                selected.addItem(target_id)
                 existing.add(target_id)
-        self._update_ko_selected_label()
+        self._ko_update_label(prefix)
+
+    def _ko_remove(self, prefix: str, ids) -> None:
+        selected = getattr(self, f"{prefix}_selected")
+        drop = set(ids)
+        for i in range(selected.count() - 1, -1, -1):
+            if selected.item(i).text() in drop:
+                selected.takeItem(i)
+        self._ko_update_label(prefix)
+
+    def _ko_clear(self, prefix: str) -> None:
+        getattr(self, f"{prefix}_selected").clear()
+        self._ko_update_label(prefix)
+
+    def _ko_update_label(self, prefix: str) -> None:
+        label = getattr(self, f"{prefix}_selected_label", None)
+        if label is not None:
+            count = getattr(self, f"{prefix}_selected").count()
+            label.setText(f"Selected ({count}):")
+
+    def _ko_targets(self, prefix: str) -> list[str]:
+        selected = getattr(self, f"{prefix}_selected")
+        return [selected.item(i).text() for i in range(selected.count())]
+
+    def _ko_blocked_reactions(self, prefix: str, level: str) -> list[str]:
+        """Chosen targets resolved to reaction ids, through the GPR when the level is gene."""
+
+        targets = self._ko_targets(prefix)
+        if not targets:
+            return []
+        if level == "gene":
+            return list(blocked_reactions_for_genes(self.model, targets))
+        return targets
+
+    # Comparison-tab aliases: the tab, its menu entries, and the tests address the picker by
+    # these names, so they stay as thin delegates onto the shared implementation.
+
+    def _populate_ko_list(self) -> None:
+        if not hasattr(self, "ko_available"):
+            return
+        self._ko_populate("ko", self.ko_level_combo.currentText())
+
+    def _filter_ko_list(self, text: str) -> None:
+        self._ko_filter("ko", text)
+
+    def _add_ko_targets(self, ids) -> None:
+        self._ko_add("ko", ids)
 
     def _remove_ko_targets(self, ids) -> None:
-        drop = set(ids)
-        for i in range(self.ko_selected.count() - 1, -1, -1):
-            if self.ko_selected.item(i).text() in drop:
-                self.ko_selected.takeItem(i)
-        self._update_ko_selected_label()
-
-    def _add_selected_ko(self) -> None:
-        self._add_ko_targets([item.text() for item in self.ko_available.selectedItems()])
-
-    def _remove_selected_ko(self) -> None:
-        self._remove_ko_targets([item.text() for item in self.ko_selected.selectedItems()])
+        self._ko_remove("ko", ids)
 
     def _clear_ko_selected(self) -> None:
-        self.ko_selected.clear()
-        self._update_ko_selected_label()
+        self._ko_clear("ko")
 
     def _update_ko_selected_label(self) -> None:
-        if hasattr(self, "ko_selected_label"):
-            self.ko_selected_label.setText(f"Selected ({self.ko_selected.count()}):")
+        self._ko_update_label("ko")
 
     def _selected_ko_targets(self) -> list[str]:
-        return [self.ko_selected.item(i).text() for i in range(self.ko_selected.count())]
+        return self._ko_targets("ko")
 
     def _style_all_combo_popups(self) -> None:
         """Centre every combo's popup entries (Qt defaults to left-aligned)."""
@@ -1323,7 +1981,8 @@ class CmmMainWindow(QMainWindow):
             ready = method in self._omics_computed_methods
             item.setEnabled(ready)
             item.setToolTip(
-                "" if ready
+                ""
+                if ready
                 else f"Compute {method.upper()} on the Omics tab to use it as a "
                 "reference template."
             )
@@ -1449,10 +2108,10 @@ class CmmMainWindow(QMainWindow):
         reference = cache["reference"]
         fluxes = cache["fluxes"]
         delta = self.comparison_threshold_spin.value() / 100.0
-        epsilon = 1e-3  # absolute floor so reactions near zero reference aren't over-reported
-        rows = sorted(
-            fluxes.items(), key=lambda kv: -abs(kv[1] - reference.get(kv[0]))
+        epsilon = (
+            1e-3  # absolute floor so reactions near zero reference aren't over-reported
         )
+        rows = sorted(fluxes.items(), key=lambda kv: -abs(kv[1] - reference.get(kv[0])))
         changed = [
             (r, v)
             for r, v in rows
@@ -1509,7 +2168,11 @@ class CmmMainWindow(QMainWindow):
             else:
                 perts = reaction_perturbations(self.model, selected or None)
             rows = batch_comparison(
-                self.model, reference, perts, method=method_key, product_reaction=product
+                self.model,
+                reference,
+                perts,
+                method=method_key,
+                product_reaction=product,
             )
             return reference, rows
 
@@ -1526,7 +2189,9 @@ class CmmMainWindow(QMainWindow):
             return
 
         # Wild-type reference values (constant across knockouts).
-        wt_biomass = float(reference.get(objective_id)) if objective_id else float("nan")
+        wt_biomass = (
+            float(reference.get(objective_id)) if objective_id else float("nan")
+        )
         wt_target = float(reference.get(product)) if product else float("nan")
 
         def _essential(row) -> bool:
@@ -1558,7 +2223,11 @@ class CmmMainWindow(QMainWindow):
                 "yes" if _essential(r) else "no",
             ]
             if product:
-                ko_target = "—" if not math.isfinite(r.product_flux) else f"{r.product_flux:.4g}"
+                ko_target = (
+                    "—"
+                    if not math.isfinite(r.product_flux)
+                    else f"{r.product_flux:.4g}"
+                )
                 cells += [
                     f"{wt_target:.4g}" if math.isfinite(wt_target) else "—",
                     ko_target,
@@ -1635,7 +2304,9 @@ class CmmMainWindow(QMainWindow):
         # FBA and pFBA fluxes live in separate columns so running pFBA adds to — rather than
         # overwrites — the FBA result and the two can be compared side by side.
         self.sim_table = QTableWidget(0, 4)
-        self.sim_table.setHorizontalHeaderLabels(["Reaction", "FBA flux", "pFBA flux", "FVA range"])
+        self.sim_table.setHorizontalHeaderLabels(
+            ["Reaction", "FBA flux", "pFBA flux", "FVA range"]
+        )
         _sim_header = self.sim_table.horizontalHeader()
         _sim_header.setSectionResizeMode(0, QHeaderView.Stretch)
         for _c in (1, 2, 3):
@@ -1750,8 +2421,22 @@ class CmmMainWindow(QMainWindow):
         self.batch_product_combo.addItems(["(none)", *exchanges])  # optional in batch
         self.substrate_combo.clear()
         self.substrate_combo.addItems(["auto", *exchanges])
+
+        # Flux response scans any reaction, not just exchanges, so it gets the full list.
+        reaction_ids = sorted(r.id for r in model.reactions)
+        self.fr_target_combo.clear()
+        self.fr_target_combo.addItems(reaction_ids)
+        self.fr_response_combo.clear()
+        self.fr_response_combo.addItems(["(objective)", *reaction_ids])
+        if exchanges:
+            self.fr_target_combo.setCurrentText(exchanges[0])
+
         self._populate_ko_list()
+        self._ko_populate("sample_ko", self.sample_ko_level_combo.currentText())
         self._loading = False
+        # Seed the flux-response range for the initial target; the combo was populated while
+        # _loading suppressed the change handler.
+        self._prefill_fr_range()
         if self._default_product and self._default_product in exchanges:
             self.product_combo.setCurrentText(self._default_product)
             self.sd_product_combo.setCurrentText(self._default_product)
@@ -1766,6 +2451,14 @@ class CmmMainWindow(QMainWindow):
             self.yield_label.setText(
                 "No exchange reactions in this model — production design unavailable."
             )
+
+        # A sampled ensemble belongs to the model it was drawn from; drop it on a reload so a
+        # stale export cannot be attributed to the new model.
+        self._sampling_result = None
+        if hasattr(self, "sample_export_btn"):
+            self.sample_export_btn.setEnabled(False)
+            self.sample_table.setRowCount(0)
+            self.fr_table.setRowCount(0)
 
         self._fluxes = {}
         self._fba_fluxes = {}
@@ -1930,8 +2623,12 @@ class CmmMainWindow(QMainWindow):
             self.sim_table.setItem(row, 0, QTableWidgetItem(rid))
             fba = self._fba_fluxes.get(rid)
             pfba = self._pfba_fluxes.get(rid)
-            self.sim_table.setItem(row, 1, QTableWidgetItem(f"{fba:.3g}" if fba is not None else "—"))
-            self.sim_table.setItem(row, 2, QTableWidgetItem(f"{pfba:.3g}" if pfba is not None else "—"))
+            self.sim_table.setItem(
+                row, 1, QTableWidgetItem(f"{fba:.3g}" if fba is not None else "—")
+            )
+            self.sim_table.setItem(
+                row, 2, QTableWidgetItem(f"{pfba:.3g}" if pfba is not None else "—")
+            )
             if fva_ranges is not None:
                 rng = fva_ranges.get(rid)
                 text = f"[{rng.minimum:.3g}, {rng.maximum:.3g}]" if rng else "—"
@@ -2013,24 +2710,37 @@ class CmmMainWindow(QMainWindow):
                 f"{html.escape(product)}."
             )
 
-    def _set_production_figure(self, fig) -> None:
-        if self._production_canvas is not None:
-            old_fig = self._production_canvas.figure
-            self.production_canvas_holder.removeWidget(self._production_canvas)
-            self._production_canvas.setParent(None)
-            if self._production_toolbar is not None:
-                self.production_canvas_holder.removeWidget(self._production_toolbar)
-                self._production_toolbar.setParent(None)
+    def _set_figure(self, holder, key: str, fig) -> None:
+        """Swap the figure shown in a tab's canvas holder, releasing the previous one.
+
+        ``key`` names the ``_<key>_canvas`` / ``_<key>_toolbar`` attribute pair so every
+        plotting tab shares one implementation instead of repeating the teardown dance.
+        """
+
+        canvas = getattr(self, f"_{key}_canvas", None)
+        toolbar = getattr(self, f"_{key}_toolbar", None)
+        if canvas is not None:
+            old_fig = canvas.figure
+            holder.removeWidget(canvas)
+            canvas.setParent(None)
+            if toolbar is not None:
+                holder.removeWidget(toolbar)
+                toolbar.setParent(None)
             old_fig.clf()  # release the previous figure so it is not leaked
         # Figures are authored at 300 DPI for file export; render on screen at a lower DPI
         # so the canvas fits the panel instead of clipping.
         fig.set_dpi(100)
-        self._production_canvas = FigureCanvas(fig)
+        canvas = FigureCanvas(fig)
         # A matplotlib toolbar gives interactive zoom/pan and a "Save the figure" button.
-        self._production_toolbar = NavigationToolbar(self._production_canvas, self)
-        self.production_canvas_holder.addWidget(self._production_toolbar)
-        self.production_canvas_holder.addWidget(self._production_canvas)
-        self._production_canvas.draw()
+        toolbar = NavigationToolbar(canvas, self)
+        holder.addWidget(toolbar)
+        holder.addWidget(canvas)
+        canvas.draw()
+        setattr(self, f"_{key}_canvas", canvas)
+        setattr(self, f"_{key}_toolbar", toolbar)
+
+    def _set_production_figure(self, fig) -> None:
+        self._set_figure(self.production_canvas_holder, "production", fig)
 
     def _set_production_table_headers(self, labels: list[str], tooltips=None) -> None:
         """Re-shape the shared production results table for whichever analysis just ran."""
@@ -2132,7 +2842,10 @@ class CmmMainWindow(QMainWindow):
     def _fill_envelope_table(self, envelope) -> None:
         """List the production-envelope points: growth range attainable at each product flux."""
 
-        self._production_result = ("envelope", envelope)  # show-all toggle does not apply here
+        self._production_result = (
+            "envelope",
+            envelope,
+        )  # show-all toggle does not apply here
         frame = envelope.to_frame()
         self._set_production_table_headers(
             ["Product flux", "Growth (min)", "Growth (max)"],
@@ -2144,9 +2857,15 @@ class CmmMainWindow(QMainWindow):
         )
         self.fseof_table.setRowCount(len(frame))
         for i, (_, record) in enumerate(frame.iterrows()):
-            self.fseof_table.setItem(i, 0, QTableWidgetItem(f"{record['product_flux']:.4g}"))
-            self.fseof_table.setItem(i, 1, QTableWidgetItem(f"{record['growth_min']:.4g}"))
-            self.fseof_table.setItem(i, 2, QTableWidgetItem(f"{record['growth_max']:.4g}"))
+            self.fseof_table.setItem(
+                i, 0, QTableWidgetItem(f"{record['product_flux']:.4g}")
+            )
+            self.fseof_table.setItem(
+                i, 1, QTableWidgetItem(f"{record['growth_min']:.4g}")
+            )
+            self.fseof_table.setItem(
+                i, 2, QTableWidgetItem(f"{record['growth_max']:.4g}")
+            )
 
     def _run_production(self, action) -> None:
         """Run a production analysis, surfacing any error instead of crashing the UI."""
@@ -2162,7 +2881,9 @@ class CmmMainWindow(QMainWindow):
     def run_theoretical_yield(self) -> None:
         def _do():
             self.fseof_table.setRowCount(0)  # yield is a scalar, not a target scan
-            self._production_result = None  # nothing for the show-all toggle to re-render
+            self._production_result = (
+                None  # nothing for the show-all toggle to re-render
+            )
             product = self._current_product()
             result = theoretical_yield(
                 self.model,
@@ -2296,7 +3017,9 @@ class CmmMainWindow(QMainWindow):
         self.omics_cond_list.clear()
         for cond in conditions:
             item = QListWidgetItem(cond)
-            item.setFlags((item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsSelectable)
+            item.setFlags(
+                (item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsSelectable
+            )
             item.setCheckState(Qt.Checked)  # compute all conditions by default
             self.omics_cond_list.addItem(item)
         self.omics_cond_list.blockSignals(False)
@@ -2382,7 +3105,8 @@ class CmmMainWindow(QMainWindow):
 
         try:
             predictions = self._run_in_background(
-                _compute, label=f"Computing {method} for {len(conditions)} condition(s)…"
+                _compute,
+                label=f"Computing {method} for {len(conditions)} condition(s)…",
             )
         except Exception as exc:
             self.omics_summary.setText(
@@ -2415,7 +3139,12 @@ class CmmMainWindow(QMainWindow):
         self._omics_fluxes_by_condition = per_condition
         self._omics_conditions_order = ok
         n_active = len(
-            {rid for cond in ok for rid, v in per_condition[cond].items() if abs(v) > 1e-6}
+            {
+                rid
+                for cond in ok
+                for rid, v in per_condition[cond].items()
+                if abs(v) > 1e-6
+            }
         )
         self._render_omics_table()
 
@@ -2430,7 +3159,9 @@ class CmmMainWindow(QMainWindow):
         self._omics_computed_methods.add(method)
         self._refresh_comparison_templates()  # this method is now available as a reference
         note = (
-            f" ({len(failed)} infeasible: {html.escape(', '.join(failed))})" if failed else ""
+            f" ({len(failed)} infeasible: {html.escape(', '.join(failed))})"
+            if failed
+            else ""
         )
         self.omics_summary.setText(
             f"<b>{method.upper()}</b>: {len(ok)} condition(s) × {n_active} active "

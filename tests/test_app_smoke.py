@@ -453,3 +453,321 @@ def test_window_renders_non_blank(app):
         for y in range(0, image.height(), max(1, image.height() // 20))
     }
     assert len(colors) > 5
+
+
+def test_flux_response_tab_runs(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Flux Response")
+    window.fr_target_combo.setCurrentText("PGI")
+    window.fr_response_combo.setCurrentText("EX_succ_e")
+    window.fr_growth_spin.setValue(30.0)
+    window.fr_steps_spin.setValue(10)
+    window.run_flux_response()
+
+    assert window.fr_table.rowCount() == 10
+    assert "EX_succ_e" in window.fr_summary.text()
+    assert "PGI" in window.fr_summary.text()
+    # The scan table is the tab's export target and the curve is its figure.
+    assert window._active_table() is window.fr_table
+    assert window._active_figure() is not None
+
+
+def test_flux_response_tab_reports_infeasible_points(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Flux Response")
+    window.fr_target_combo.setCurrentText("PGI")
+    window.fr_response_combo.setCurrentText("EX_succ_e")
+    window.fr_growth_spin.setValue(30.0)
+    window.fr_steps_spin.setValue(12)
+    window.run_flux_response()
+
+    statuses = [
+        window.fr_table.item(r, 3).text() for r in range(window.fr_table.rowCount())
+    ]
+    # A growth floor makes the extremes of the range unsolvable; they are shown, not hidden.
+    assert "infeasible" in statuses
+    infeasible_row = statuses.index("infeasible")
+    assert window.fr_table.item(infeasible_row, 1).text() == "—"
+
+
+def test_flux_response_tab_surfaces_errors(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Flux Response")
+    window.fr_target_combo.setCurrentText("NOT_A_REACTION")
+    window.run_flux_response()
+    assert "failed" in window.fr_summary.text().lower()
+
+
+def test_flux_response_manual_range(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Flux Response")
+    window.fr_target_combo.setCurrentText("PGI")
+    # The range boxes are always editable; narrowing them narrows the scan.
+    assert window.fr_min_spin.isEnabled()
+    window.fr_min_spin.setValue(-5.0)
+    window.fr_max_spin.setValue(5.0)
+    window.fr_steps_spin.setValue(6)
+    window.run_flux_response()
+    assert window.fr_table.rowCount() == 6
+    assert float(window.fr_table.item(0, 0).text()) == pytest.approx(-5.0, abs=1e-6)
+
+
+def test_sampling_tab_runs(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window.sample_n_spin.setValue(120)
+    window.sample_method_combo.setCurrentText("achr")
+    window.sample_thinning_spin.setValue(10)
+    window.sample_seed_spin.setValue(4)
+    window.run_sampling()
+
+    assert window.sample_table.rowCount() == len(ecoli_core.reactions)
+    assert "120" in window.sample_summary.text()
+    assert "seed 4" in window.sample_summary.text()
+    assert window._active_table() is window.sample_table
+    assert window._active_figure() is not None
+
+
+def test_sampling_tab_reference_mode(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    # The reference controls stay disabled until the mode needs them.
+    assert not window.sample_reference_combo.isEnabled()
+    window.sample_mode_combo.setCurrentText("around a reference")
+    assert window.sample_reference_combo.isEnabled()
+    assert window.sample_window_spin.isEnabled()
+
+    window.sample_n_spin.setValue(120)
+    window.sample_method_combo.setCurrentText("achr")
+    window.sample_thinning_spin.setValue(10)
+    window.run_sampling()
+    assert window.sample_table.rowCount() == len(ecoli_core.reactions)
+
+
+def test_sampling_table_exports_to_csv(app, ecoli_core, tmp_path):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window.sample_n_spin.setValue(120)
+    window.sample_method_combo.setCurrentText("achr")
+    window.sample_thinning_spin.setValue(10)
+    window.run_sampling()
+
+    out = tmp_path / "samples.csv"
+    from qtpy import QtWidgets
+
+    QtWidgets.QFileDialog.getSaveFileName = staticmethod(
+        lambda *a, **k: (str(out), "CSV")
+    )
+    window.export_table_csv()
+    assert out.exists()
+    assert out.read_text().splitlines()[0].startswith("Reaction,Mean,Std")
+
+
+def test_sampling_exports_raw_ensemble(app, ecoli_core, tmp_path):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    # Nothing to export until a run has happened.
+    assert not window.sample_export_btn.isEnabled()
+
+    window.sample_n_spin.setValue(120)
+    window.sample_method_combo.setCurrentText("achr")
+    window.sample_thinning_spin.setValue(10)
+    window.run_sampling()
+    assert window.sample_export_btn.isEnabled()
+
+    out = tmp_path / "ensemble.csv"
+    from qtpy import QtWidgets
+
+    QtWidgets.QFileDialog.getSaveFileName = staticmethod(
+        lambda *a, **k: (str(out), "CSV")
+    )
+    window.export_sampling_samples()
+    assert out.exists()
+
+    import pandas as pd
+
+    frame = pd.read_csv(out, index_col="sample")
+    # One row per drawn sample, one column per reaction — the raw ensemble, not the summary.
+    assert frame.shape == (120, len(ecoli_core.reactions))
+
+
+def test_sampling_table_covers_every_reaction(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window.sample_n_spin.setValue(120)
+    window.sample_method_combo.setCurrentText("achr")
+    window.sample_thinning_spin.setValue(10)
+    window.sample_top_spin.setValue(5)
+    window.run_sampling()
+
+    # The statistics table is complete; only the figure is restricted to the top-N.
+    assert window.sample_table.rowCount() == len(ecoli_core.reactions)
+    listed = {
+        window.sample_table.item(r, 0).text()
+        for r in range(window.sample_table.rowCount())
+    }
+    assert listed == {r.id for r in ecoli_core.reactions}
+    assert len(window._sampling_canvas.figure.axes[0].get_yticklabels()) == 5
+
+
+def test_reloading_a_model_clears_the_ensemble(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window.sample_n_spin.setValue(120)
+    window.sample_method_combo.setCurrentText("achr")
+    window.sample_thinning_spin.setValue(10)
+    window.run_sampling()
+    assert window._sampling_result is not None
+
+    window.load_model(build_demo_model())
+    assert window._sampling_result is None
+    assert not window.sample_export_btn.isEnabled()
+    assert window.sample_table.rowCount() == 0
+
+
+def test_range_is_seeded_with_the_theoretical_interval(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Flux Response")
+    window.fr_target_combo.setCurrentText("PGI")
+
+    # Not a placeholder: PGI can carry -50..10 in this medium.
+    assert window.fr_min_spin.value() == pytest.approx(-50.0, abs=1e-3)
+    assert window.fr_max_spin.value() == pytest.approx(10.0, abs=1e-3)
+
+    # Switching target re-seeds rather than keeping the previous reaction's numbers.
+    window.fr_target_combo.setCurrentText("EX_o2_e")
+    assert window.fr_min_spin.value() == pytest.approx(-60.0, abs=1e-3)
+    assert window.fr_max_spin.value() == pytest.approx(0.0, abs=1e-3)
+
+    # A manual edit survives until the user asks for a reset.
+    window.fr_min_spin.setValue(-5.0)
+    window._prefill_fr_range()
+    assert window.fr_min_spin.value() == pytest.approx(-60.0, abs=1e-3)
+
+
+def test_reference_controls_are_disabled_in_uniform_mode(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    reference_widgets = (
+        window.sample_reference_label,
+        window.sample_reference_combo,
+        window.sample_window_label,
+        window.sample_window_spin,
+    )
+
+    assert window.sample_mode_combo.currentText() == "uniform"
+    # Uniform sampling has no reference, so neither the combo nor its label invites input.
+    assert not any(widget.isEnabled() for widget in reference_widgets)
+
+    window.sample_mode_combo.setCurrentText("around a reference")
+    assert all(widget.isEnabled() for widget in reference_widgets)
+
+    window.sample_mode_combo.setCurrentText("uniform")
+    assert not any(widget.isEnabled() for widget in reference_widgets)
+
+
+def test_tab_order_groups_related_analyses(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert names == [
+        "Simulation",
+        "Sampling",
+        "Comparison",
+        "Flux Response",
+        "Production",
+        "Strain Design",
+        "Omics",
+        "Revert Metabolism",
+        "Transform (A→B)",
+    ]
+    # Each new tab sits beside the analysis asking a similar question.
+    assert names.index("Sampling") == names.index("Simulation") + 1
+    assert names.index("Flux Response") == names.index("Comparison") + 1
+
+
+def _run_sampling(window, **overrides):
+    window.sample_n_spin.setValue(overrides.get("n", 200))
+    window.sample_method_combo.setCurrentText("achr")
+    window.sample_thinning_spin.setValue(10)
+    window.run_sampling()
+
+
+def test_sampling_applies_reaction_knockouts(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+
+    _run_sampling(window)
+    wild_type = window._sampling_result.samples["PGI"].mean()
+    assert wild_type > 1e-6
+    assert "wild type" in window.sample_summary.text()
+
+    window._ko_add("sample_ko", ["PGI"])
+    _run_sampling(window)
+    # The deleted reaction carries no flux anywhere in the ensemble.
+    assert window._sampling_result.samples["PGI"].abs().max() < 1e-6
+    assert "PGI" in window.sample_summary.text()
+    assert window._sampling_result.metadata["parameters"]["condition"] == "knockout:PGI"
+    # The knockout is a scoped condition, not an edit to the loaded model.
+    assert ecoli_core.reactions.PGI.bounds == (-1000.0, 1000.0)
+
+
+def test_sampling_resolves_gene_knockouts_through_the_gpr(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window.sample_ko_level_combo.setCurrentText("gene")
+    # b4025 is pgi; the GPR must resolve it to the PGI reaction.
+    window._ko_add("sample_ko", ["b4025"])
+    _run_sampling(window)
+    assert window._sampling_result.samples["PGI"].abs().max() < 1e-6
+    assert "gene knockout" in window.sample_summary.text()
+
+
+def test_sampling_level_switch_clears_the_selection(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window._ko_add("sample_ko", ["PGI"])
+    assert window._ko_targets("sample_ko") == ["PGI"]
+    # Reaction ids are not gene ids, so switching level must not carry them over.
+    window.sample_ko_level_combo.setCurrentText("gene")
+    assert window._ko_targets("sample_ko") == []
+    assert window.sample_ko_selected_label.text() == "Selected (0):"
+
+
+def test_reference_mode_uses_a_knocked_out_reference(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    window.sample_mode_combo.setCurrentText("around a reference")
+    window._ko_add("sample_ko", ["PGI"])
+    # A wild-type reference would put PGI outside its own window and raise; the reference
+    # has to be computed under the same knockouts.
+    _run_sampling(window)
+    assert window._sampling_result is not None
+    assert window._sampling_result.samples["PGI"].abs().max() < 1e-6
+
+
+def test_lethal_knockout_is_reported_not_crashed(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Sampling")
+    _run_sampling(window)
+    assert window._sampling_result is not None
+
+    window.sample_ko_level_combo.setCurrentText("gene")
+    window._ko_add("sample_ko", ["b2415"])  # essential in e_coli_core
+    _run_sampling(window)
+
+    assert "lethal" in window.sample_summary.text()
+    # The previous run's ensemble must not survive as an exportable result.
+    assert window._sampling_result is None
+    assert not window.sample_export_btn.isEnabled()
+    assert window.sample_table.rowCount() == 0
+
+
+def test_knockout_picker_is_independent_per_tab(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._add_ko_targets(["PGI"])  # Comparison tab picker
+    window._ko_add("sample_ko", ["ENO", "FBA"])  # Sampling tab picker
+    assert window._selected_ko_targets() == ["PGI"]
+    assert window._ko_targets("sample_ko") == ["ENO", "FBA"]
+    window._clear_ko_selected()
+    assert window._selected_ko_targets() == []
+    assert window._ko_targets("sample_ko") == ["ENO", "FBA"]

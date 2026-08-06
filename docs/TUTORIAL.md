@@ -149,6 +149,77 @@ This search is a nested MILP (delegated to the `straindesign` package) and **nee
 solver**. OptKnock and RobustKnock are distinct module types; RobustKnock is the three-level
 worst-case formulation. It can take a while on larger models.
 
+## 5c. Flux Response tab — how far does one reaction carry the network?
+
+Fixes the **target** reaction's flux at each point of a scan and maximizes the **response**
+reaction there, so you see a curve instead of a single operating point.
+
+1. Pick a **Target (scanned)** reaction — the one you would over-express or throttle.
+2. Pick a **Response (maximized)** reaction. Leave it on `(objective)` to ask "how sensitive
+   is growth to this reaction, and where does it break?"; pick a product exchange to ask
+   "how much product does this reaction's flux buy me?"
+3. Set **Min growth (% of wild type)** when the response is a product. At 0 the scan
+   maximizes product with no growth floor, which returns a non-growing theoretical ceiling;
+   at 30 the curve describes a cell that still grows at 30% of wild type.
+4. **Range min**/**max** is the scanned interval. It is filled automatically whenever you pick
+   a target with the full flux interval that reaction can carry in the current medium — found
+   by FVA with the objective unconstrained — so it never starts from a placeholder or the
+   previous reaction's numbers. Edit either box to scan a narrower window, and press
+   **Detect range** to reset to the detected interval. You may set values beyond the
+   reaction's own declared bounds as a what-if; the result records that under
+   `range_outside_bounds`.
+5. Click **Run scan**. The curve shows the wild-type flux, the optimum, any shaded range that
+   has no solution at all, and the steepest-decline bottleneck if there is one. The table
+   beside it lists every scan point; infeasible points are shown in red rather than dropped.
+
+A response that never declines means the target does not limit the response over that range.
+A flat response means the objective is simply insensitive to that reaction — both are
+findings, not failures.
+
+## 5d. Sampling tab — is a predicted flux forced, or one of many?
+
+FBA reports one optimal solution out of many that are equally optimal, so a single predicted
+flux cannot tell you whether the network *requires* that value. Sampling answers that.
+
+### What each option controls
+
+| Option | What it does | When to change it |
+|---|---|---|
+| **Mode** | `uniform` samples the whole feasible space defined by the model and medium — "what can this network do at all?". `around a reference` first narrows every reaction to a window around one predicted flux state, then samples inside that — "how much could this *prediction* vary?" | Use `uniform` to test whether a predicted flux is forced. Use `around a reference` to put an uncertainty range on a specific prediction. |
+| **Reference** | Which predicted flux state the windows are centred on: `pfba` (the unique minimal-total-flux solution) or `fba`. CMM computes that state for you from the current model and medium — you are choosing the *method*, not supplying numbers. **Greyed out in `uniform` mode**, which has no reference. | `pfba` unless you specifically want the plain FBA solution. |
+| **window ±%** | The half-width of each reaction's window, as a percentage of its reference flux. 20 confines each reaction to ±20% of its predicted value, intersected with its existing bounds; reactions at essentially zero flux get a small window around zero instead. **Greyed out in `uniform` mode.** | Narrow (5–10) to ask how tightly the prediction is determined; wide (30–50) to explore around it. |
+| **Samples** | How many flux distributions to draw. | ≥1000 for `optgp`. Fewer is faster but under-represents the space. |
+| **Sampler** | `optgp` (parallel-capable hit-and-run, needs a large sample count to mix well) or `achr` (artificial centering hit-and-run, single process, better convergence at small counts). | `achr` for quick runs under ~1000 samples; `optgp` for large ones. |
+| **Thinning** | Keep every *n*-th iterate of the chain. Higher values give less correlated samples for the same count, at more compute. | Leave at 100. Lower it only when a run is too slow and you accept more correlation. |
+| **Seed** | Initializes the random chain. The same seed, sampler, thinning, and sample count reproduce the ensemble exactly. | Change it to check that your conclusion is stable across seeds — a conclusion that moves with the seed is not converged. |
+| **Show top** | How many of the most variable reactions to draw in the violin plot. **This affects the figure only, not the table or the exported data.** | Raise it to see more reactions; the plot gets taller. |
+| **Knockouts (optional)** | Sample a deletion strain instead of the wild type. Pick a **level** (`reaction` deletes the listed reactions; `gene` resolves each gene to its reactions through the GPR) and move targets into the chosen set. Leave the set empty for wild type. | Use it to ask what a mutant's flux space looks like — which reroutings open up, and which fluxes become forced. |
+
+### Running it
+
+Click **Run sampling**. Then:
+
+- The **violin plot** shows the `Show top` most variable reactions — the informative ones, since a
+  reaction with near-constant sampled flux is exactly the one a single FBA already settled.
+- The **table lists every reaction in the model**, sorted by standard deviation descending, with
+  mean, std, min, median, and max. It is not a subset.
+- **Export samples…** writes the raw ensemble to CSV: one row per sample, one column per
+  reaction. Use this for your own statistics; the table's summary is available separately
+  through *File → Export Table to CSV*.
+
+A reaction with a wide sampled distribution is one whose FBA value was an arbitrary choice among
+alternate optima; a narrow one is genuinely pinned by the constraints. Watch for reactions
+spanning hundreds of flux units — those are usually thermodynamically infeasible loops
+(`FRD7`/`SUCDi` in `e_coli_core`), not biology. Sampled means can be reused as a reference flux
+state for MOMA/ROOM/MTA.
+
+Knockouts are applied as a scoped condition, so the loaded model is never edited — the bounds
+you see in the left panel are unchanged after a run. If a knockout set leaves no feasible space,
+the tab reports it as a probably-lethal set rather than an error, and clears the previous
+ensemble so a stale result cannot be exported under the new settings. In `around a reference`
+mode the reference is computed **with the knockouts applied**, since a wild-type reference would
+place every deleted reaction outside its own sampling window.
+
 ## 6. Omics tab — expression → flux (E-Flux2 / LAD)
 
 1. Choose a **Method**: `eflux2` (scale reaction bounds by normalized expression, then
@@ -285,6 +356,8 @@ from cmm.features.comparison import (
     moma, room, reference_flux, knockout_comparison, batch_comparison,
 )
 from cmm.features._perturbation import gene_perturbations, blocked_reactions_for_genes
+from cmm.features.response import flux_response
+from cmm.features.sampling import random_flux_sampling, reference_constrained_sampling
 from cmm.features.strain_design import optknock, robustknock
 from cmm.features.transformation import transformation_targets
 from cmm.omics.expression import integrate_expression
@@ -326,6 +399,17 @@ for row in sorted(batch, key=lambda r: -r.distance)[:5]:            # most-disru
 # Multi-condition omics comparison (log2 fold-change of flux magnitude)
 # preds = predict_condition_fluxes(model, expression_dataframe, method="eflux2")
 # lc = flux_log_change(preds.fluxes("condA"), preds.fluxes("condB"))
+
+# Verifying a target: does forcing flux through it buy product, and where does it break?
+resp = flux_response(model, "PGI", "EX_succ_e", biomass_fraction=0.3, n_steps=20)
+print(resp.optimum(), resp.feasible_range(), resp.bottleneck.found)
+resp.to_frame().to_csv("flux_response.csv", index=False)
+
+# Is a predicted flux forced, or one of many alternate optima?
+ens = random_flux_sampling(model, n=1000, seed=0)        # add achr for small runs
+print(ens.statistics().loc[["EX_succ_e", "PGI"]])
+near = reference_constrained_sampling(model, ref, n=1000, seed=0)   # around a prediction
+sampled_reference = ens.to_flux_state()                   # reusable MOMA/ROOM/MTA reference
 ```
 
 Export publication figures directly:

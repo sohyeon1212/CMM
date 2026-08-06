@@ -9,6 +9,8 @@ as shipped functionality.
 - Core: conditions, media, FBA, pFBA, FVA, `FluxState`, solver contracts, provenance.
 - Perturbation: gene/reaction/multiple knockout resolution, L1/L2 MOMA, ROOM, batch runs.
 - Production: yield, production envelope, FSEOF, FVSEOF, OptKnock, RobustKnock.
+- Validation: flux-response scans with bottleneck detection; seeded uniform and
+  reference-constrained random flux sampling with sampling-mean `FluxState` construction.
 - Omics: GPR mapping, LAD, E-Flux2, multi-condition prediction, differential directions.
 - Transformation: MOMA A→B ranking, published MTA, published rMTA, explicit continuous
   heuristic.
@@ -35,8 +37,6 @@ contracts:
 ## Planned scientific services
 
 - Dynamic FBA with explicit exchange/update callbacks.
-- Reproducible random flux sampling and sampling-mean `FluxState` construction.
-- Flux-response analysis over bound and objective sweeps.
 - Enzyme-constrained model extensions and validated import/export.
 - Automated construction of FVSEOF grouping-reaction constraints from physiological data.
 

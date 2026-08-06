@@ -4,6 +4,28 @@
 
 ### Added
 
+- `flux_response`: scan an enforced flux through one reaction and maximize a response
+  reaction at each point. Omitting the response gives the robustness reading (growth vs the
+  target); naming a product exchange gives the production reading, with biomass recorded
+  throughout and an optional `biomass_fraction` growth floor so the curve describes a viable
+  strain rather than a non-growing ceiling. Reports the feasible window, the optimum, and the
+  steepest-decline bottleneck; infeasible scan points are returned with their solver status
+  instead of raising.
+- `random_flux_sampling` and `reference_constrained_sampling`: seeded, single-process-by-
+  default flux sampling (OptGP/ACHR) over the feasible space, or narrowed to a window around
+  a reference flux state. Results carry per-reaction statistics, a correlation matrix over
+  varying reactions, and a bridge to `FluxState` for use as a MOMA/ROOM/MTA reference.
+- Two GUI tabs, Flux Response and Sampling, each with a plot beside its result table, CSV
+  export, and 300 DPI figure export. The Sampling tab additionally exports the raw ensemble
+  (one row per sample, one column per reaction) separately from the per-reaction summary
+  table, and clears it on model reload so a stale export cannot be attributed to a new model.
+  The Flux Response tab's scan range is always shown and editable, filled with the target's
+  detected feasible interval on every target change and resettable with "Detect range", so a
+  scan never starts from a placeholder or another reaction's numbers.
+- `flux_response_figure` and `sampling_figure` publication figures: the response curve with
+  its infeasible range, wild-type marker, optimum, bottleneck band, and a secondary growth
+  axis for product responses; and per-reaction sampled-flux violins against a reference
+  solution.
 - Simulation: FBA and pFBA fluxes are shown in separate columns (Reaction / FBA flux /
   pFBA flux / FVA range) so running pFBA no longer overwrites the FBA result; pFBA's minimal
   total flux is shown directly under the objective value.
@@ -18,11 +40,49 @@
   flux columns.
 - Omics: multi-condition expression tables are supported in one tab, computing one predicted-
   flux column per selected condition, with a "Show all reactions" toggle.
-- `cmm-guide` project-local skill: an agent-facing operating protocol describing CMM's
-  analyses, a goal→method decision guide, the solver requirement matrix, and pitfalls.
+- `AGENTS.md` and `CLAUDE.md`: agent operating instructions covering the scenario router, the
+  goal→function table, the solver gate, the rules that keep results reportable, the run
+  contract, and when to stop and ask.
+- `docs/agent-reference.md`: signatures and result objects for every shipped service.
+- `docs/scenarios/`: step-by-step metabolic-engineering pipelines (`SC-01`–`SC-03`) with a
+  shared preflight and reporting contract, each step stating its preconditions, call,
+  artifacts, decision rule, and failure handling.
 
 ### Changed
 
+- Tabs are reordered so each analysis sits next to the one asking a similar question:
+  Simulation and Sampling (what the model can do with no intervention), Comparison and Flux
+  Response (the consequence of one — discrete and continuous respectively), then Production and
+  Strain Design (proposing interventions), then the omics-driven tabs. Names and behavior are
+  unchanged.
+- Disabled combo boxes, spin boxes, and their labels are now visibly inert (muted fill and
+  text). Previously a disabled control was almost indistinguishable from an active one, so the
+  Sampling tab's reference options read as editable in `uniform` mode, where they do nothing.
+- Figure swapping on the plotting tabs goes through one shared helper, so Production, Flux
+  Response, and Sampling no longer each repeat the canvas/toolbar teardown.
+- The Sampling tab can sample a deletion strain: an optional knockout picker (the Comparison
+  tab's two-panel selector, now shared by both tabs) applies reaction or GPR-resolved gene
+  deletions as a scoped condition, leaving the loaded model untouched. In "around a reference"
+  mode the reference is built under the same knockouts, since a wild-type reference would put
+  every deleted reaction outside its own sampling window. A knockout set that leaves no
+  feasible space is reported as probably lethal, and the previous ensemble is dropped so a
+  stale result cannot be exported under the new settings.
+- Flux Response and Sampling figures re-run their layout on every draw, so axis labels and
+  titles stay clear when the window resizes rather than only fitting the size they were
+  authored at.
+- `SC-02` is folded into `SC-01`. Finding knockout targets is an *inverse* problem, so the
+  design step now uses OptKnock/RobustKnock rather than a MOMA/ROOM single-deletion screen, and
+  MOMA/ROOM moves to the verification step where it belongs — predicting the built strain's
+  immediate phenotype. A gap between the MOMA prediction and the design's guaranteed product is
+  an estimate of the adaptive evolution required, not a refutation of the coupling proof.
+  Without MILP the design step falls back to a single-deletion screen and the report must state
+  that only single deletions were examined and coupling was not established. The reference-state
+  step is correspondingly narrower: OptKnock does not consult a reference, so multiple reference
+  states no longer strengthen the design, only the interpretation.
+- The `cmm-guide` project-local skill is replaced by `AGENTS.md` + `docs/agent-reference.md`.
+  Skills are only read by Claude Code; plain repository documents are read by any agent CLI,
+  and the split keeps decision-critical material in the always-loaded entry point while the
+  function reference loads on demand.
 - Comparison: a two-panel knockout picker (searchable catalogue on the left, chosen knockout
   set on the right) replaces Ctrl/Shift-click selection, making the selection visible and
   clearable.
@@ -40,6 +100,9 @@
 
 ### Fixed
 
+- The `ruff check` and `ruff format --check` release gates pass again. `main_window.py` had a
+  module-level assignment above its imports, which made every import in the file an `E402`
+  error (17 in total), and two files were unformatted.
 - GUI: combo-box and spin-box arrows now render (drawn from bundled SVG assets); the previous
   CSS border-triangle never drew in Qt and showed a grey box.
 - GUI: tab labels no longer clip or overflow into a scroll button — the stylesheet font-weight

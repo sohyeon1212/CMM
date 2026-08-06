@@ -30,6 +30,8 @@ Zenodo or an equivalent long-term repository and its DOI added to this section,
 - Omics: LAD, strict two-stage E-Flux2, multi-condition flux prediction, and log2 changes.
 - Production: theoretical yield with carbon/CO₂ disclosure, production envelopes, FSEOF,
   and FVA-based FVSEOF with optional grouping-reaction constraints.
+- Response and sampling: flux-response scans with bottleneck detection, and seeded random
+  flux sampling both uniform and constrained around a reference flux state.
 - Strain design: distinct OptKnock and three-level RobustKnock modules through StrainDesign,
   followed by independent maximum/guaranteed-product evaluation.
 - Normalization: published MTA MIQP, published rMTA best/MOMA/worst scoring, and an explicitly
@@ -75,7 +77,7 @@ Solver capability is checked before a solve; a method never silently changes for
 
 | Class | Methods |
 |---|---|
-| LP | FBA, pFBA, FVA, LAD, yield, envelope, FSEOF, FVSEOF |
+| LP | FBA, pFBA, FVA, LAD, yield, envelope, FSEOF, FVSEOF, flux response, flux sampling |
 | MILP | ROOM, OptKnock, RobustKnock |
 | QP | L2 MOMA, E-Flux2, `rmta_continuous` |
 | MIQP | published MTA and rMTA |
@@ -103,6 +105,19 @@ scan = fseof(model, "EX_succ_e", n_steps=8, aerobic=False)
 print(growth.objective_value, minimal.status)
 print(yield_result.molar_yield, yield_result.metadata["model_sha256"])
 print(scan.amplification_targets())
+```
+
+Verifying a predicted target — does forcing flux through it actually buy product, and is the
+prediction forced or just one of many optima?
+
+```python
+from cmm.features import flux_response, random_flux_sampling
+
+response = flux_response(model, "PGI", "EX_succ_e", biomass_fraction=0.3)
+print(response.optimum(), response.bottleneck.found, response.feasible_range())
+
+ensemble = random_flux_sampling(model, n=1000, seed=0)
+print(ensemble.statistics().loc["EX_succ_e"])
 ```
 
 Expression integration:
@@ -149,6 +164,12 @@ biological prediction.
 - [MTA/rMTA design and equations](docs/design-revert-metabolism.md)
 - [Architecture and solver contracts](docs/architecture.md)
 - [Release changes](CHANGELOG.md)
+
+For driving CMM from an AI coding CLI (Claude Code, Codex, …):
+
+- [Agent operating instructions](AGENTS.md) — the scenario router, solver gate, and run contract
+- [Metabolic-engineering scenarios](docs/scenarios/README.md) — step-by-step pipelines
+- [Function reference for agents](docs/agent-reference.md) — signatures and result objects
 
 ## Citation and license
 
