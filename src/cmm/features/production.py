@@ -9,21 +9,53 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import cast
+import warnings
 
 import numpy as np
 import pandas as pd
-from cobra import Model
+from cobra import Model, Reaction
 from cobra.flux_analysis import flux_variability_analysis as _cobra_fva
 from cobra.flux_analysis import production_envelope as _cobra_envelope
 
+from cmm.core.condition import Condition
+from cmm.core.media import MediumApplication
 from cmm.core.provenance import run_provenance
 
 _CO2_IDS = ("EX_co2_e", "EX_co2(e)", "EX_co2_e_")
+_O2_IDS = ("EX_o2_e", "EX_o2(e)", "EX_o2_e_")
+
+#: Tolerance on a carbon flux, in mmol C gDW-1 h-1, below which it is treated as zero.
+_CARBON_TOL = 1e-6
+
+
+@dataclass(frozen=True)
+class CarbonUptake:
+    """One carbon-containing uptake flux and the carbon it carries."""
+
+    reaction_id: str
+    uptake: float  # positive: mmol gDW-1 h-1 entering the model
+    carbon_atoms: float  # carbon atoms per unit flux of the exchange
+
+    @property
+    def carbon_flux(self) -> float:
+        """Carbon entering through this exchange, in mmol C gDW-1 h-1."""
+
+        return self.uptake * self.carbon_atoms
 
 
 @dataclass(frozen=True)
 class ProductionYield:
-    """Maximum product flux and yield per substrate at a fixed substrate uptake."""
+    """Maximum product flux and yield per substrate at a fixed substrate uptake.
+
+    The carbon ceiling is a plain carbon balance — the carbon actually taken up divided by
+    the carbon in one unit of product — computed over **every** organic uptake, not the one
+    nominated substrate, following COBRApy's ``carbon_yield`` convention of summing element
+    counts over the exchanges that carry them. It is textbook carbon balance and is
+    deliberately cited to no primary paper. CO2 is excluded from the ceiling and accounted
+    separately: including it would make a CO2-inflated yield unfalsifiable by construction,
+    which is exactly the defect ``co2_carbon_fraction`` exists to expose.
+    """
 
     product: str
     substrate: str
@@ -33,10 +65,26 @@ class ProductionYield:
     status: str
     aerobic: bool
     carbon_ceiling: float | None = (
-        None  # max mol product / mol substrate from substrate C
+        None  # max mol product / mol substrate from all organic C uptake
     )
     co2_exchange: float = 0.0  # net CO2 exchange (negative = fixation)
+    product_carbon: float = 0.0  # carbon atoms per unit product flux
+    carbon_uptake: tuple[
+        CarbonUptake, ...
+    ] = ()  # every organic carbon uptake, incl. substrate
     metadata: dict[str, object] = field(default_factory=dict)
+
+    @property
+    def co_substrates(self) -> tuple[CarbonUptake, ...]:
+        """Carbon sources other than the nominated substrate that feed this yield."""
+
+        return tuple(u for u in self.carbon_uptake if u.reaction_id != self.substrate)
+
+    @property
+    def co2_uptake(self) -> float:
+        """Net CO2 *taken up*, as a positive flux (0.0 when CO2 is being released)."""
+
+        return max(0.0, -self.co2_exchange)
 
     @property
     def co2_fixed(self) -> bool:
@@ -45,10 +93,54 @@ class ProductionYield:
         return self.co2_exchange < -1e-6
 
     @property
+    def product_carbon_flux(self) -> float:
+        """Carbon leaving in the product, in mmol C gDW-1 h-1."""
+
+        return self.product_flux * self.product_carbon
+
+    @property
+    def co2_carbon_fraction(self) -> float:
+        """Fraction of the product's carbon supplied by net CO2 uptake.
+
+        This is the number ``co2_fixed`` alone never gave: a bare boolean cannot say whether
+        CO2 contributed 1% or 30% of the product carbon.
+        """
+
+        if self.product_carbon_flux <= _CARBON_TOL:
+            return 0.0
+        return self.co2_uptake / self.product_carbon_flux
+
+    @property
+    def excess_carbon(self) -> float:
+        """Product carbon above what the organic uptake supplies, in mmol C gDW-1 h-1."""
+
+        organic = sum(u.carbon_flux for u in self.carbon_uptake)
+        return max(0.0, self.product_carbon_flux - organic)
+
+    @property
     def exceeds_carbon_ceiling(self) -> bool:
         if self.carbon_ceiling is None:
             return False
         return self.molar_yield > self.carbon_ceiling + 1e-6
+
+    @property
+    def co2_explains_excess(self) -> bool:
+        """Whether CO2 uptake quantitatively accounts for the carbon above the ceiling."""
+
+        return (
+            self.exceeds_carbon_ceiling
+            and self.co2_uptake >= self.excess_carbon - _CARBON_TOL
+        )
+
+    @property
+    def carbon_imbalance(self) -> bool:
+        """Yield above the ceiling that CO2 uptake does *not* account for.
+
+        True means carbon is entering from somewhere neither the organic uptakes nor the CO2
+        exchange explain — a modelling error, not a metabolic result.
+        """
+
+        return self.exceeds_carbon_ceiling and not self.co2_explains_excess
 
 
 @dataclass(frozen=True)
@@ -112,28 +204,47 @@ class FseofResult:
 
 @dataclass(frozen=True)
 class FvseofResult:
-    """Flux Variability Scanning based on Enforced Objective Flux.
+    """Flux Variability Scanning based on Enforced Objective Flux (Park et al. 2012).
 
     Like FSEOF but runs FVA at each enforced product level, so each reaction has a flux
-    *range* per step. A reaction is a *robust* amplification target when its forced-minimum
-    flux magnitude rises with enforced product — it cannot avoid carrying more flux — which
-    FSEOF (single FBA) cannot distinguish.
+    *range* per step, summarised by Park's two statistics: ``V_avg = (V'max + V'min)/2``
+    (here ``mean``) and ``l_sol = V'max - V'min`` (here ``capacity``).
+
+    **Classification follows Park's nine types**, taken from the *joint* sign of the change
+    in V_avg and the change in l_sol across the scan — see :func:`_park_flux_type`. Types
+    1-3 (V_avg rising) are the amplification candidates, types 4-6 (V_avg falling) the
+    knockdown candidates, types 7-9 (no clear V_avg trend) neither. Within the amplification
+    band Park prioritise "reactions with smaller values of l_sol", which is the order
+    :meth:`amplification_targets` returns.
+
+    **The ``robust`` flag is CMM's own construct and is not in Park et al.** It marks
+    reactions whose *forced minimum* |flux| rises monotonically — the reaction cannot avoid
+    carrying more flux, which single-FBA FSEOF cannot distinguish. It is useful and is kept,
+    but it is not Park's variability criterion: Park's variability signal is the change in
+    l_sol, which is what the nine types encode. The two are related but not equivalent —
+    a forced minimum can rise while l_sol also rises, and l_sol can shrink while the forced
+    minimum stays at 0 because the interval still straddles zero.
     """
 
     product: str
     biomass: str
     enforced_levels: tuple[float, ...]
-    mean: pd.DataFrame  # reaction x level: midpoint flux
+    mean: pd.DataFrame  # reaction x level: V_avg, Park's (V'max + V'min)/2
     forced: (
         pd.DataFrame
-    )  # reaction x level: forced minimum |flux| (0 if the range spans 0)
-    capacity: pd.DataFrame  # reaction x level: FVA range width
+    )  # reaction x level: forced minimum |flux| (0 if the range spans 0); CMM's own
+    capacity: pd.DataFrame  # reaction x level: l_sol, Park's V'max - V'min
     classification: (
         pd.Series
-    )  # reaction -> amplify / knockdown / none (on |mean| trend)
-    robust: pd.Series  # reaction -> bool (forced-min |flux| monotonically rises)
-    slope: pd.Series  # reaction -> q_slope of |Vavg| versus enforced product
-    capacity_slope: pd.Series  # reaction -> slope of FVA range width
+    )  # reaction -> amplify (types 1-3) / knockdown (4-6) / none (7-9)
+    park_type: pd.Series  # reaction -> Park nine-type index, 1-9
+    robust: (
+        pd.Series
+    )  # reaction -> bool (forced-min |flux| monotonically rises); CMM's own
+    # Park's q_slope regresses the *signed* flux; this regresses |V_avg|, matching CMM's
+    # magnitude convention for reactions that run in reverse. Different quantity, same role.
+    slope: pd.Series  # reaction -> linear slope of |V_avg| versus enforced product
+    capacity_slope: pd.Series  # reaction -> slope of l_sol (Park's delta l_sol)
     actionable: pd.Series  # reaction -> has GPR and is internal/non-objective
     metadata: dict = field(default_factory=dict)
 
@@ -142,31 +253,53 @@ class FvseofResult:
         object.__setattr__(self, "forced", self.forced.copy())
         object.__setattr__(self, "capacity", self.capacity.copy())
 
+    def _mean_capacity(self) -> pd.Series:
+        """Mean l_sol per reaction across the scan, Park's amplification priority key."""
+
+        return self.capacity.mean(axis=1)
+
     def amplification_targets(self) -> list[str]:
+        """Actionable type 1-3 reactions, smallest mean l_sol first (Park's priority)."""
+
         selected = (self.classification == "amplify") & self.actionable.astype(bool)
-        return self.classification.index[selected].tolist()
+        ranked = self._mean_capacity()[selected].sort_values(kind="stable")
+        return ranked.index.tolist()
 
     def knockout_targets(self) -> list[str]:
         selected = (self.classification == "knockdown") & self.actionable.astype(bool)
         return self.classification.index[selected].tolist()
 
+    def targets_of_type(self, *types: int) -> list[str]:
+        """Actionable reactions in the given Park types, in scan order."""
+
+        selected = self.park_type.isin(types) & self.actionable.astype(bool)
+        return self.park_type.index[selected].tolist()
+
     def robust_targets(self) -> list[str]:
-        """Amplification targets that are robustly forced (FVA minimum also rises)."""
+        """Amplification targets also flagged ``robust`` — CMM's flag, not Park's."""
 
         amp = set(self.amplification_targets())
         return [rid for rid in self.robust.index[self.robust] if rid in amp]
 
 
-def _carbon_count(rxn) -> int:
-    """Total carbon atoms across the reaction's metabolites (0 if none/unknown)."""
+def _carbon_count(rxn) -> float:
+    """Carbon atoms carried per unit flux of ``rxn``, weighted by stoichiometry.
 
-    total = 0
-    for met in rxn.metabolites:
+    Element counts are multiplied by their stoichiometric coefficients and summed, as
+    COBRApy's ``_reaction_elements`` does, then taken in magnitude so the result is a
+    per-unit-flux atom count rather than a signed balance. Ignoring the coefficients — as
+    this did before — counts a mass-balanced internal reaction as carbon-rich (PFK scored
+    32 carbons, giving it a meaningless "carbon ceiling") and mis-counts any exchange whose
+    coefficient is not -1.
+    """
+
+    total = 0.0
+    for met, coefficient in rxn.metabolites.items():
         try:
-            total += int(met.elements.get("C", 0))
-        except (AttributeError, TypeError):
+            total += float(coefficient) * float(met.elements.get("C", 0))
+        except (AttributeError, TypeError, ValueError):
             continue
-    return total
+    return abs(total)
 
 
 def _detect_substrate(model: Model, unlimited: float = -999.0) -> str:
@@ -205,11 +338,120 @@ def _detect_substrate(model: Model, unlimited: float = -999.0) -> str:
     return min(uptaken, key=lambda x: x[1])[0]
 
 
-def _set_anaerobic(model: Model) -> None:
-    for oxygen_id in ("EX_o2_e", "EX_o2(e)", "EX_o2_e_"):
-        if oxygen_id in model.reactions:
-            model.reactions.get_by_id(oxygen_id).lower_bound = 0.0
-            return
+def _exchange(model: Model, candidates: Iterable[str]):
+    """The first of ``candidates`` present in the model, or None."""
+
+    for reaction_id in candidates:
+        if reaction_id in model.reactions:
+            return model.reactions.get_by_id(reaction_id)
+    return None
+
+
+def _apply_condition(model: Model, *, condition: Condition | None) -> None:
+    """Apply the run condition to ``model`` in place (caller supplies a ``with model:``).
+
+    ``condition`` is the *only* way to state the environment of a production run as of
+    0.4.0. The ``aerobic=True|False`` flag it replaces was a second, redundant way of saying
+    what the medium already says, and because ``optknock``/``robustknock`` never accepted it
+    a caller could pass ``aerobic=False`` and still receive an aerobic design in silence.
+    Anaerobiosis is now stated the same way as everything else — a
+    :class:`~cmm.core.condition.Condition` closing the oxygen exchange, on top of a medium
+    (``glucose_anaerobic``) whose CO2 uptake is already closed by ``cmm.core.media``.
+    """
+
+    if condition is not None:
+        condition.apply_to(model)
+
+
+def _condition_provenance(
+    model: Model, condition: Condition | None
+) -> dict[str, object]:
+    """Full record of the condition a run actually solved under.
+
+    A result file must state its own conditions rather than leave a reader to reconstruct
+    them from a model fingerprint: the medium as applied, the oxygen exchange bounds, and
+    every carbon uptake with its rate. The medium half is written through
+    :meth:`~cmm.core.media.MediumApplication.to_provenance` so its shape matches what
+    ``cmm.core.media`` already records. Call this *after* the condition has been applied.
+    """
+
+    application = MediumApplication(
+        medium=condition.name if condition is not None else "model as loaded",
+        applied={
+            reaction_id: float(rate) for reaction_id, rate in model.medium.items()
+        },
+    )
+    oxygen = _exchange(model, _O2_IDS)
+    return {
+        "condition": condition.name if condition is not None else None,
+        "medium": application.to_provenance(),
+        "oxygen_exchange": (
+            None
+            if oxygen is None
+            else {
+                "reaction_id": oxygen.id,
+                "lower_bound": float(oxygen.lower_bound),
+                "upper_bound": float(oxygen.upper_bound),
+            }
+        ),
+        "aerobic": _is_aerobic(model),
+        "carbon_uptake": [
+            {"reaction_id": u.reaction_id, "uptake_rate": u.uptake}
+            for u in _carbon_uptake_bounds(model)
+        ],
+    }
+
+
+def _record_condition(
+    provenance: dict[str, object], applied: dict[str, object]
+) -> None:
+    """Attach an applied-condition record to a ``run_provenance`` parameter block."""
+
+    cast(dict[str, object], provenance["parameters"])["applied_condition"] = applied
+
+
+def _is_aerobic(model: Model) -> bool:
+    """Whether the oxygen exchange is open for uptake (True when the model has none)."""
+
+    oxygen = _exchange(model, _O2_IDS)
+    return oxygen is None or oxygen.lower_bound < -1e-9
+
+
+def _carbon_uptake_bounds(model: Model) -> tuple[CarbonUptake, ...]:
+    """Carbon-containing exchanges open for uptake, at their *bound* (not their flux)."""
+
+    co2 = _exchange(model, _CO2_IDS)
+    co2_id = None if co2 is None else co2.id
+    return tuple(
+        CarbonUptake(rxn.id, abs(float(rxn.lower_bound)), carbon)
+        for rxn in model.exchanges
+        if rxn.lower_bound < 0.0
+        and rxn.id != co2_id
+        and (carbon := _carbon_count(rxn)) > 0
+    )
+
+
+def _carbon_uptake_fluxes(model: Model, solution) -> tuple[CarbonUptake, ...]:
+    """Carbon-containing exchanges actually *consumed* in a solution, excluding CO2.
+
+    CO2 is excluded deliberately and reported on its own: folding it into the carbon
+    ceiling would raise the ceiling by exactly the amount that inflated the yield, so no
+    guard could ever fire.
+    """
+
+    co2 = _exchange(model, _CO2_IDS)
+    co2_id = None if co2 is None else co2.id
+    uptakes = []
+    for rxn in model.exchanges:
+        if rxn.id == co2_id:
+            continue
+        flux = float(solution.fluxes[rxn.id])
+        if flux >= -_CARBON_TOL:
+            continue
+        carbon = _carbon_count(rxn)
+        if carbon > 0:
+            uptakes.append(CarbonUptake(rxn.id, -flux, carbon))
+    return tuple(sorted(uptakes, key=lambda u: -u.carbon_flux))
 
 
 def _net_co2(solution, model: Model) -> float:
@@ -219,19 +461,49 @@ def _net_co2(solution, model: Model) -> float:
     return 0.0
 
 
+def _require_boundary(model: Model, reaction_id: str, role: str):
+    """Fetch an exchange reaction, refusing an internal one.
+
+    ``theoretical_yield(model, "PFK")`` used to return 17.66 mol/mol against a ceiling of
+    0.1875 — a number with no meaning, because a yield is defined per unit of *exchanged*
+    product. Refuse it at the door.
+    """
+
+    reaction = model.reactions.get_by_id(reaction_id)
+    if not reaction.boundary:
+        raise ValueError(
+            f"{role} {reaction_id!r} is not a boundary (exchange) reaction: "
+            f"'{reaction.reaction}'. A molar yield is defined per unit of product leaving "
+            "the system, so both product and substrate must be exchange reactions; pass the "
+            "corresponding EX_ reaction instead."
+        )
+    return reaction
+
+
 def theoretical_yield(
     model: Model,
     product: str,
     substrate: str | None = None,
     *,
-    aerobic: bool = True,
+    condition: Condition | None = None,
 ) -> ProductionYield:
     """Maximum molar yield of ``product`` per ``substrate`` taken up.
 
     Maximizes the product exchange with the substrate uptake fixed exactly (so the yield
-    denominator is deterministic). The reported yield can exceed the substrate's own carbon
-    ceiling when the model fixes external CO2; ``carbon_ceiling`` and ``co2_exchange`` expose
-    that so the number is never read as carbon-from-substrate alone.
+    denominator is deterministic). Both ``product`` and ``substrate`` must be exchange
+    reactions; an internal reaction raises.
+
+    ``carbon_ceiling`` is a carbon balance over **every** organic uptake the solution
+    consumes, not the nominated substrate alone, so a co-fed model is measured against the
+    carbon it actually receives. CO2 is held out of that balance and reported separately:
+    ``co2_carbon_fraction`` states how much of the product's carbon net CO2 uptake supplies,
+    and ``carbon_imbalance`` flags an excess that CO2 does *not* explain. A yield obtained by
+    fixing CO2 also warns, because ``co2_fixed`` on its own let a 15.9%-inflated yield pass
+    every guard simply by sitting below the ceiling.
+
+    ``condition`` is the supported way to state the aeration, medium and substrate of a run;
+    the applied condition is recorded in full under
+    ``metadata["parameters"]["applied_condition"]``.
     """
 
     provenance = run_provenance(
@@ -239,13 +511,13 @@ def theoretical_yield(
         method="theoretical_yield",
         product=product,
         substrate=substrate,
-        aerobic=aerobic,
+        condition=condition.name if condition is not None else None,
     )
     with model:
-        if not aerobic:
-            _set_anaerobic(model)
+        _apply_condition(model, condition=condition)
+        product_rxn = _require_boundary(model, product, "product")
         substrate = substrate or _detect_substrate(model)
-        substrate_rxn = model.reactions.get_by_id(substrate)
+        substrate_rxn = _require_boundary(model, substrate, "substrate")
         substrate_uptake = abs(substrate_rxn.lower_bound)
         if substrate_uptake <= 1e-9:
             # A closed substrate (lower_bound 0) gives a 0 denominator and a NaN yield. This
@@ -257,7 +529,9 @@ def theoretical_yield(
                 f"before computing a theoretical yield."
             )
         substrate_rxn.bounds = (-substrate_uptake, -substrate_uptake)
-        model.objective = model.reactions.get_by_id(product)
+        _record_condition(provenance, _condition_provenance(model, condition))
+        run_aerobic = _is_aerobic(model)
+        model.objective = product_rxn
         model.objective_direction = "max"
         solution = model.optimize()
         if solution.status != "optimal":
@@ -267,25 +541,55 @@ def theoretical_yield(
         product_flux = float(solution.fluxes[product])
         molar_yield = product_flux / substrate_uptake
 
-        substrate_carbon = _carbon_count(substrate_rxn)
-        product_carbon = _carbon_count(model.reactions.get_by_id(product))
+        carbon_uptake = _carbon_uptake_fluxes(model, solution)
+        product_carbon = _carbon_count(product_rxn)
+        total_carbon_in = sum(u.carbon_flux for u in carbon_uptake)
         carbon_ceiling = (
-            substrate_carbon / product_carbon
-            if product_carbon > 0 and substrate_carbon > 0
+            total_carbon_in / (product_carbon * substrate_uptake)
+            if product_carbon > 0 and total_carbon_in > 0
             else None
         )
-        return ProductionYield(
+        result = ProductionYield(
             product=product,
             substrate=substrate,
             product_flux=product_flux,
             substrate_uptake=substrate_uptake,
             molar_yield=molar_yield,
             status=solution.status,
-            aerobic=aerobic,
+            aerobic=run_aerobic,
             carbon_ceiling=carbon_ceiling,
             co2_exchange=_net_co2(solution, model),
+            product_carbon=product_carbon,
+            carbon_uptake=carbon_uptake,
             metadata=provenance,
         )
+    _warn_on_co2_contribution(result)
+    return result
+
+
+def _warn_on_co2_contribution(result: ProductionYield) -> None:
+    """Say so when CO2 uptake is holding up the yield, and by how much.
+
+    ``co2_fixed`` alone never fired as a guard: it is a boolean that a caller reading a
+    single yield number does not see, and the only active check compared the yield with a
+    ceiling it could sit below while still being CO2-inflated.
+    """
+
+    if result.co2_carbon_fraction <= 1e-9:
+        return
+    detail = (
+        f"{result.product} yield {result.molar_yield:.4f} mol/mol {result.substrate} "
+        f"draws {result.co2_carbon_fraction:.1%} of its product carbon from net CO2 uptake "
+        f"({result.co2_uptake:.4f} mmol gDW-1 h-1). Close the CO2 exchange for uptake "
+        "unless the condition genuinely supplies CO2."
+    )
+    if result.carbon_imbalance:
+        detail += (
+            f" The yield also exceeds the carbon ceiling {result.carbon_ceiling} by more "
+            f"than CO2 uptake accounts for ({result.excess_carbon:.4f} mmol C gDW-1 h-1 "
+            "unexplained) - check the model's carbon balance."
+        )
+    warnings.warn(detail, UserWarning, stacklevel=3)
 
 
 def production_envelope(
@@ -294,10 +598,18 @@ def production_envelope(
     *,
     objective: str | None = None,
     substrate: str | None = None,
-    aerobic: bool = True,
+    condition: Condition | None = None,
     points: int = 20,
 ) -> ProductionEnvelope:
-    """Growth-vs-product envelope (phenotypic phase plane) for the product."""
+    """Growth-vs-product envelope: the feasible product range at each growth rate.
+
+    This is the production envelope of Burgard et al. (2003), who introduced it alongside
+    OptKnock as the projection of the flux cone onto the (growth, product) plane. It is
+    **not** a phenotypic phase plane: a phase plane varies two *substrate uptake* rates and
+    partitions them into regions of constant shadow price, whereas this varies the product
+    flux and reports the growth range at each level. "Production envelope" is the term used
+    by Feist et al. (2010) for exactly this object.
+    """
 
     if points < 2:
         raise ValueError("points must be at least 2")
@@ -308,13 +620,13 @@ def production_envelope(
         product=product,
         objective=objective,
         substrate=substrate,
-        aerobic=aerobic,
+        condition=condition.name if condition is not None else None,
         points=points,
     )
     with model:
-        if not aerobic:
-            _set_anaerobic(model)
+        _apply_condition(model, condition=condition)
         substrate = substrate or _detect_substrate(model)
+        _record_condition(provenance, _condition_provenance(model, condition))
         frame = _cobra_envelope(
             model,
             [product],
@@ -359,11 +671,14 @@ def _validate_scan_parameters(
 
 
 def _initial_product_flux(
-    model: Model, product: str, biomass: str, *, aerobic: bool
+    model: Model,
+    product: str,
+    biomass: str,
+    *,
+    condition: Condition | None,
 ) -> float:
     with model:
-        if not aerobic:
-            _set_anaerobic(model)
+        _apply_condition(model, condition=condition)
         model.objective = model.reactions.get_by_id(biomass)
         model.objective_direction = "max"
         solution = model.optimize()
@@ -394,9 +709,22 @@ def _scan_levels(
     return initial + fractions * (maximum - initial)
 
 
+#: Placeholder gene identifiers that stand for "spontaneous / no catalysing gene" rather than
+#: a real gene. BiGG models (``e_coli_core``, ``iJO1366``) use ``s0001``. A reaction whose GPR
+#: contains only these has no gene a strain engineer could delete, so it is not actionable even
+#: though ``reaction.genes`` is non-empty.
+PSEUDO_GENE_IDS = frozenset({"s0001", "spontaneous", "SPONTANEOUS"})
+
+
+def _has_real_gene(rxn: Reaction) -> bool:
+    """True when the reaction's GPR names at least one non-placeholder gene."""
+
+    return any(gene.id not in PSEUDO_GENE_IDS for gene in rxn.genes)
+
+
 def _actionable_reaction(model: Model, rid: str, product: str, biomass: str) -> bool:
     rxn = model.reactions.get_by_id(rid)
-    return bool(rxn.genes) and not rxn.boundary and rid not in {product, biomass}
+    return _has_real_gene(rxn) and not rxn.boundary and rid not in {product, biomass}
 
 
 def _linear_slope(levels: np.ndarray, values: np.ndarray) -> float:
@@ -407,30 +735,38 @@ def _linear_slope(levels: np.ndarray, values: np.ndarray) -> float:
     return float(np.polyfit(levels, values, 1)[0])
 
 
-def _add_group_constraints(
-    model: Model, group_constraints: Iterable[Mapping[str, float]] | None
+def _add_linear_flux_couplings(
+    model: Model, couplings: Iterable[Mapping[str, float]] | None
 ) -> int:
-    """Add caller-supplied linear GR equalities ``sum(coeff * flux) = 0``."""
+    """Add caller-supplied linear flux equalities ``sum(coeff * flux) = 0``.
+
+    **These are not Park et al.'s grouping-reaction (GR) constraints**, and were renamed so
+    the name stops implying that they are. Park derive reaction groups automatically from
+    STRING genomic-context analysis and impose two constructs on them: binary on/off
+    indicators tying the two members' activity (``y_v1 = y_v2``, a MILP construct), and a
+    flux-scale *inequality* ``|v1 - mean| + |v2 - mean| <= delta`` with ``delta = 0.3`` on
+    fluxes normalised by the carbon uptake rate. CMM takes neither: it takes whatever linear
+    equalities the caller supplies, on raw fluxes, with no automated grouping, and stays a
+    pure LP. Automated STRING-based grouping is tracked as future work in the roadmap.
+    """
 
     count = 0
-    for count, coefficients in enumerate(group_constraints or (), start=1):
+    for count, coefficients in enumerate(couplings or (), start=1):
         if len(coefficients) < 2:
-            raise ValueError(
-                "each grouping-reaction constraint needs at least two reactions"
-            )
+            raise ValueError("each linear flux coupling needs at least two reactions")
         expression = 0.0
         for rid, coefficient in coefficients.items():
             if rid not in model.reactions:
                 raise KeyError(
-                    f"grouping-reaction constraint references unknown reaction {rid!r}"
+                    f"linear flux coupling references unknown reaction {rid!r}"
                 )
             if not np.isfinite(coefficient) or coefficient == 0:
                 raise ValueError(
-                    "grouping-reaction coefficients must be finite and non-zero"
+                    "linear flux coupling coefficients must be finite and non-zero"
                 )
             expression += coefficient * model.reactions.get_by_id(rid).flux_expression
         constraint = model.problem.Constraint(
-            expression, lb=0.0, ub=0.0, name=f"_fvseof_group_{count}"
+            expression, lb=0.0, ub=0.0, name=f"_fvseof_coupling_{count}"
         )
         model.add_cons_vars([constraint])
     return count
@@ -444,17 +780,29 @@ def fseof(
     n_steps: int = 10,
     fraction_min: float = 0.1,
     fraction_max: float = 0.9,
-    aerobic: bool = True,
+    condition: Condition | None = None,
     reactions: Iterable[str] | None = None,
     tol: float = 1e-3,
 ) -> FseofResult:
     """Scan enforced product flux and classify each reaction's flux trend (Choi 2010).
 
     At each enforced product level (a fraction of the theoretical maximum) the product flux
-    is fixed and biomass is maximized. Reactions whose flux *magnitude* rises monotonically
-    with enforced product are amplification targets; those whose magnitude falls are
-    knockdown/knockout targets. Classifying on magnitude (not signed flux) keeps reactions
-    that operate in the reverse direction — e.g. the reductive succinate pathway — correct.
+    is fixed and biomass is maximized, exactly as Choi et al. specify.
+
+    **The selection criterion is CMM's own, not Choi et al.'s**, and is deliberately kept
+    (see the deviation register). Choi select on ``|v|max > |v_initial|`` and
+    ``v_max * v_min >= 0``, baselined at the growth-optimal wild-type flux. CMM instead
+    requires the flux *magnitude* to rise from the first to the last scan level **and** the
+    linear regression of that magnitude against enforced product to have positive slope,
+    with no direction reversal anywhere in the scan; the baseline is the first scan level,
+    not ``v_initial``. It does **not** test monotonicity at every step — the provenance
+    string used to claim it did. CMM's rule is the stricter of the two: on anaerobic
+    ``e_coli_core``/succinate Choi's additionally admits the acetate branch (``ACKr``,
+    ``ACt2r``, ``EX_ac_e``, ``PTAr``), which 12 of 18 OptKnock and 8 of 41 RobustKnock
+    designs for the same target *delete*.
+
+    Classifying on magnitude rather than signed flux keeps reactions that operate in the
+    reverse direction — e.g. the reductive succinate pathway — correct.
     """
 
     provenance = run_provenance(
@@ -465,7 +813,7 @@ def fseof(
         n_steps=n_steps,
         fraction_min=fraction_min,
         fraction_max=fraction_max,
-        aerobic=aerobic,
+        condition=condition.name if condition is not None else None,
         tol=tol,
     )
     _validate_scan_parameters(
@@ -475,9 +823,11 @@ def fseof(
         tol=tol,
     )
     biomass = biomass or _objective_reaction(model)
-    yield_result = theoretical_yield(model, product, aerobic=aerobic)
+    yield_result = theoretical_yield(model, product, condition=condition)
     max_product = yield_result.product_flux
-    initial_product = _initial_product_flux(model, product, biomass, aerobic=aerobic)
+    initial_product = _initial_product_flux(
+        model, product, biomass, condition=condition
+    )
     levels = _scan_levels(
         initial_product,
         max_product,
@@ -492,8 +842,8 @@ def fseof(
     )
     columns: dict[float, dict[str, float]] = {}
     with model:
-        if not aerobic:
-            _set_anaerobic(model)
+        _apply_condition(model, condition=condition)
+        _record_condition(provenance, _condition_provenance(model, condition))
         product_rxn = model.reactions.get_by_id(product)
         model.objective = model.reactions.get_by_id(biomass)
         model.objective_direction = "max"
@@ -534,12 +884,19 @@ def fseof(
             **provenance,
             "initial_product": initial_product,
             "max_product": max_product,
-            "aerobic": aerobic,
+            "aerobic": yield_result.aerobic,
             "n_failed_levels": sum(
                 not np.isfinite(trends[level].to_numpy(dtype=float)).all()
                 for level in scan_columns
             ),
-            "criterion": "monotonic_flux_magnitude_with_linear_slope",
+            # Names what is computed: endpoint difference AND positive linear-regression
+            # slope of |flux|, with no direction reversal. Monotonicity is NOT tested - the
+            # previous string said it was, and three amplify calls were non-monotonic.
+            "criterion": (
+                "endpoint_difference_and_linear_slope_of_flux_magnitude_"
+                "without_direction_reversal"
+            ),
+            "criterion_source": "CMM (not Choi et al. 2010)",
         },
     )
 
@@ -559,21 +916,26 @@ def fvseof(
     product: str,
     biomass: str | None = None,
     *,
-    n_steps: int = 8,
+    n_steps: int = 10,
     fraction_min: float = 0.1,
     fraction_max: float = 0.9,
     biomass_fraction: float = 0.95,
-    aerobic: bool = True,
+    condition: Condition | None = None,
     reactions: Iterable[str] | None = None,
-    group_constraints: Iterable[Mapping[str, float]] | None = None,
+    linear_flux_couplings: Iterable[Mapping[str, float]] | None = None,
     tol: float = 1e-3,
 ) -> FvseofResult:
-    """Flux Variability Scanning based on Enforced Objective Flux (FSEOF + FVA per step).
+    """Flux Variability Scanning based on Enforced Objective Flux (Park et al. 2012).
 
-    At each enforced product level the product flux is fixed and biomass is held at
-    ``biomass_fraction`` of its maximum; FVA then gives every reaction's flux range. Reactions
-    whose mean flux magnitude rises are amplification targets; those whose forced minimum also
-    rises are *robust* targets (the reaction is compelled to carry more flux).
+    At each enforced product level the product flux is fixed and biomass is held by equality
+    at ``biomass_fraction`` of its maximum, recomputed per step; FVA then gives every
+    reaction's flux range, from which V_avg and l_sol follow. Reactions are classified into
+    Park's nine types on the joint sign of the change in V_avg and the change in l_sol, and
+    types 1-3 are the amplification candidates, ordered by ascending l_sol as Park prioritise
+    them. ``n_steps`` defaults to 10, Park's stated minimum.
+
+    ``linear_flux_couplings`` are **not** Park's STRING-derived grouping-reaction constraints
+    — see :func:`_add_linear_flux_couplings` — and the ``robust`` flag is CMM's, not Park's.
     """
 
     provenance = run_provenance(
@@ -585,7 +947,7 @@ def fvseof(
         fraction_min=fraction_min,
         fraction_max=fraction_max,
         biomass_fraction=biomass_fraction,
-        aerobic=aerobic,
+        condition=condition.name if condition is not None else None,
         tol=tol,
     )
     _validate_scan_parameters(
@@ -596,9 +958,11 @@ def fvseof(
         biomass_fraction=biomass_fraction,
     )
     biomass = biomass or _objective_reaction(model)
-    yield_result = theoretical_yield(model, product, aerobic=aerobic)
+    yield_result = theoretical_yield(model, product, condition=condition)
     max_product = yield_result.product_flux
-    initial_product = _initial_product_flux(model, product, biomass, aerobic=aerobic)
+    initial_product = _initial_product_flux(
+        model, product, biomass, condition=condition
+    )
     levels = _scan_levels(
         initial_product,
         max_product,
@@ -615,12 +979,12 @@ def fvseof(
     forced_cols: dict[float, dict[str, float]] = {}
     capacity_cols: dict[float, dict[str, float]] = {}
     with model:
-        if not aerobic:
-            _set_anaerobic(model)
+        _apply_condition(model, condition=condition)
+        _record_condition(provenance, _condition_provenance(model, condition))
         product_rxn = model.reactions.get_by_id(product)
         model.objective = model.reactions.get_by_id(biomass)
         model.objective_direction = "max"
-        n_group_constraints = _add_group_constraints(model, group_constraints)
+        n_couplings = _add_linear_flux_couplings(model, linear_flux_couplings)
         for level in levels:
             level = float(level)
             with model:
@@ -668,10 +1032,19 @@ def fvseof(
     capacity = pd.DataFrame(capacity_cols, index=rxn_ids)
     levels_key = list(mean_cols.keys())
     level_array = np.asarray(levels_key, dtype=float)
-    classification = pd.Series(
-        [_classify_trend(mean.loc[rid, levels_key].to_numpy(), tol) for rid in rxn_ids],
+    park_type = pd.Series(
+        [
+            _park_flux_type(
+                mean.loc[rid, levels_key].to_numpy(dtype=float),
+                capacity.loc[rid, levels_key].to_numpy(dtype=float),
+                tol,
+            )
+            for rid in rxn_ids
+        ],
         index=rxn_ids,
+        dtype=int,
     )
+    classification = park_type.map(_PARK_TYPE_CLASSIFICATION)
     robust = pd.Series(
         [
             _rises_monotonically(forced.loc[rid, levels_key].to_numpy(), tol)
@@ -709,6 +1082,7 @@ def fvseof(
         forced=forced,
         capacity=capacity,
         classification=classification,
+        park_type=park_type,
         robust=robust,
         slope=slope,
         capacity_slope=capacity_slope,
@@ -718,12 +1092,21 @@ def fvseof(
             "initial_product": initial_product,
             "max_product": max_product,
             "biomass_fraction": biomass_fraction,
-            "n_group_constraints": n_group_constraints,
+            "n_linear_flux_couplings": n_couplings,
             "n_failed_levels": sum(
                 not np.isfinite(mean[level].to_numpy(dtype=float)).all()
                 for level in levels_key
             ),
-            "criterion": "Vavg_slope_capacity_and_forced_minimum",
+            "criterion": (
+                "park_nine_type_joint_sign_of_delta_Vavg_and_delta_lsol_"
+                "types_1_3_amplification_ranked_by_ascending_lsol"
+            ),
+            "criterion_source": "Park et al. 2012",
+            "robust_flag_source": "CMM (not in Park et al. 2012)",
+            "coupling_constraint_source": (
+                "CMM caller-supplied linear equalities (not Park et al.'s "
+                "STRING-derived grouping-reaction constraints)"
+            ),
         },
     )
 
@@ -734,23 +1117,88 @@ def _rises_monotonically(values: np.ndarray, tol: float) -> bool:
     return bool(values[-1] - values[0] > tol and np.all(np.diff(values) >= -tol))
 
 
+def _trend_sign(values: np.ndarray, tol: float) -> int:
+    """+1 if the series rises across the scan, -1 if it falls, 0 if it does neither.
+
+    A rise requires *both* an endpoint gain and a positive linear-regression slope, so a
+    series that ends higher only because of a single noisy step is reported flat.
+    """
+
+    if len(values) < 2 or not np.isfinite(values).all():
+        return 0
+    start, end = float(values[0]), float(values[-1])
+    slope = float(np.polyfit(np.arange(len(values), dtype=float), values, 1)[0])
+    if end - start > tol and slope > tol:
+        return 1
+    if start - end > tol and slope < -tol:
+        return -1
+    return 0
+
+
+def _reverses_direction(values: np.ndarray, tol: float) -> bool:
+    """Whether the signed series changes sign anywhere it is non-negligible."""
+
+    nonzero = values[np.abs(values) > tol]
+    return bool(len(nonzero) > 1 and np.any(np.sign(nonzero) != np.sign(nonzero[0])))
+
+
 def _classify_trend(values: np.ndarray, tol: float) -> str:
-    """Classify a direction-preserving flux-magnitude slope across a scan."""
+    """Classify a direction-preserving flux-magnitude trend across a scan."""
 
     if len(values) < 2 or not np.isfinite(values).all():
         return "none"
-    finite = np.abs(values)
-    nonzero = values[np.abs(values) > tol]
     # A direction reversal is not an amplification/knockdown target in FSEOF/FVSEOF.
-    if len(nonzero) > 1 and np.any(np.sign(nonzero) != np.sign(nonzero[0])):
+    if _reverses_direction(values, tol):
         return "none"
-    start, end = finite[0], finite[-1]
-    slope = float(np.polyfit(np.arange(len(finite), dtype=float), finite, 1)[0])
-    if end - start > tol and slope > tol:
+    sign = _trend_sign(np.abs(values), tol)
+    if sign > 0:
         return "amplify"
-    if start - end > tol and slope < -tol:
+    if sign < 0:
         return "knockdown"
     return "none"
+
+
+#: Park et al. (2012) classify reaction responses into "nine types based on combinations of
+#: positive and negative changes in V_avg and l_sol", with types 1-3 positively correlated
+#: with production (the amplification candidates), 4-6 negatively correlated, and 7-9
+#: showing no clear correlation. The **band** (1-3 / 4-6 / 7-9) is therefore Park's and is
+#: fixed by the sign of the change in V_avg. The **order within a band** is CMM's
+#: convention: the paper's own type table lives in a figure that could not be resolved from
+#: the text, so rather than invent their numbering CMM orders each band by the sign of the
+#: change in l_sol, narrowing range first, because Park give "reactions with smaller values
+#: of l_sol received higher priorities" as the tie-break among amplification candidates.
+_PARK_TYPE_BY_SIGNS: dict[tuple[int, int], int] = {
+    (1, -1): 1,
+    (1, 0): 2,
+    (1, 1): 3,
+    (-1, -1): 4,
+    (-1, 0): 5,
+    (-1, 1): 6,
+    (0, -1): 7,
+    (0, 0): 8,
+    (0, 1): 9,
+}
+
+_PARK_TYPE_CLASSIFICATION: dict[int, str] = {
+    **{t: "amplify" for t in (1, 2, 3)},
+    **{t: "knockdown" for t in (4, 5, 6)},
+    **{t: "none" for t in (7, 8, 9)},
+}
+
+
+def _park_flux_type(vavg: np.ndarray, lsol: np.ndarray, tol: float) -> int:
+    """Park's nine-type index from the joint sign of delta V_avg and delta l_sol.
+
+    V_avg is read as a magnitude, consistent with CMM's convention everywhere else in the
+    scan methods: a reaction running in reverse whose flux grows more negative is carrying
+    *more* flux, not less. A reaction that reverses direction mid-scan has no clear
+    correlation by construction and falls in the 7-9 band.
+    """
+
+    if len(vavg) < 2 or not np.isfinite(vavg).all() or not np.isfinite(lsol).all():
+        return 8  # no trend measurable in either statistic
+    vavg_sign = 0 if _reverses_direction(vavg, tol) else _trend_sign(np.abs(vavg), tol)
+    return _PARK_TYPE_BY_SIGNS[(vavg_sign, _trend_sign(lsol, tol))]
 
 
 def _objective_reaction(model: Model) -> str:

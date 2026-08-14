@@ -105,7 +105,22 @@ rows = batch_comparison(
 table = pd.DataFrame([vars(r) for r in rows])
 ```
 
-**Outputs.** `target_id | kind | status | distance | objective | n_reactions | product_flux`.
+**Outputs.** `target_id | kind | status | objective_value | distance | distance_kind |
+n_changed_reactions | objective | n_reactions | product_flux` — ten columns as of 0.4.0, which
+split the one overloaded `distance` field.
+
+**Name each column for the quantity it holds.** `objective_value` is the raw solver objective
+and means something different per method: `Σd²` for `moma_l2`, `Σ|d|` for `moma_l1`, a **count
+of switched reactions** for `room`. `distance` is a distance and only a distance — Segrè et al.
+Eq. (4)'s Euclidean `√(Σd²)` for `moma_l2`, the L1 sum for `moma_l1`, and `None` for `room`,
+whose count lives on `n_changed_reactions`. `distance_kind` records which per row. A screen
+exported before 0.4.0 wrote the objective in a column called a distance; the two differ by a
+factor of about 36 for `moma_l2`, so never compare one against the other.
+
+**`method="room"` selects a tolerance pair.** `batch_comparison` defaults to
+`room_use_case="lethality"` (δ=0.1, ε=0.01), which is Shlomi et al.'s pair for exactly this
+question; `room_use_case="flux_prediction"` (δ=0.03, ε=0.001) is the other published pair and
+gives about 24% more switches. State which one the screen used.
 
 **Artifacts.** `03_screen/batch_<reference>_<method>.csv` — **the complete table, lethal rows
 included**.
@@ -172,6 +187,7 @@ With a product → the `beneficial` class is the input to step 4 and to `SC-01`.
 
 ```python
 from cmm.features import flux_response, random_flux_sampling
+from cmm.features._perturbation import blocked_reactions_for_genes
 
 for target in beneficial_targets:
     blocked = blocked_reactions_for_genes(model, [target])

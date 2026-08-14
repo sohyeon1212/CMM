@@ -121,11 +121,12 @@ def gene_directions(
     return out
 
 
-def _eval_gpr_direction(node: ast.AST | None, gene_dirs: Mapping[str, int]) -> int:
-    """Evaluate a reaction's expression direction over its GPR AST.
+def _eval_gpr_indicator(node: ast.AST | None, indicator: Mapping[str, int]) -> int:
+    """Evaluate one **binary** 0/1 gene indicator over a GPR AST: AND -> min, OR -> max.
 
-    OR (isozymes) takes the max direction (any branch can carry flux); AND (complex) takes
-    the min (the limiting subunit). Genes absent from ``gene_dirs`` contribute 0.
+    On a 0/1 vector, ``min`` at AND is "all of the genes fire" and ``max`` at OR is "at
+    least one of them fires" — the two set-membership tests Yizhak et al. (2013) state.
+    Genes absent from ``indicator`` contribute 0.
     """
 
     if node is None:
@@ -136,15 +137,46 @@ def _eval_gpr_direction(node: ast.AST | None, gene_dirs: Mapping[str, int]) -> i
         body = getattr(node, "body", None)
         if isinstance(body, list):
             body = body[0] if body else None
-        return _eval_gpr_direction(body, gene_dirs)
+        return _eval_gpr_indicator(body, indicator)
     if isinstance(node, ast.Expression):
-        return _eval_gpr_direction(node.body, gene_dirs)
+        return _eval_gpr_indicator(node.body, indicator)
     if isinstance(node, ast.Name):
-        return int(gene_dirs.get(node.id, 0))
+        return 1 if indicator.get(node.id, 0) else 0
     if isinstance(node, ast.BoolOp):
-        values = [_eval_gpr_direction(v, gene_dirs) for v in node.values]
+        values = [_eval_gpr_indicator(v, indicator) for v in node.values]
+        if not values:
+            return 0
         return min(values) if isinstance(node.op, ast.And) else max(values)
     return 0
+
+
+def _eval_gpr_direction(node: ast.AST | None, gene_dirs: Mapping[str, int]) -> int:
+    """Evaluate a reaction's expression direction over its GPR AST (Yizhak et al. 2013).
+
+    The paper's rule, verbatim: a reaction is elevated/reduced *"(a) if it is catalysed by a
+    complex of enzymes (an 'and' logical relation) and **all** of the genes encoding them
+    were categorized as elevated or reduced, respectively … and (b) if it is catalysed by
+    isoenzymes (an 'or' logical relation) and **at least one** of them was categorized as
+    elevated or reduced, respectively. If a subset is categorized as elevated and another
+    subset as reduced, the reaction is considered unchanged. In addition, in any other cases
+    not specifically described here, the reaction is considered unchanged."*
+
+    That is implemented, as in the rMTA reference code (COBRA Toolbox
+    ``diffexprs2rxnFBS.m``), by evaluating min-at-AND / max-at-OR **twice over binary
+    indicators** and subtracting: ``plus`` fires iff the elevated set satisfies the rule,
+    ``minus`` iff the reduced set does, and ``plus - minus`` sends the mixed case to 0.
+
+    A signed ``min``/``max`` over ``{-1, 0, +1}`` is *not* equivalent: it diverges in 4 of
+    the 7 two-gene label cases with a directional bias (``AND(+1, -1)`` returns ``-1`` where
+    the paper says 0; ``OR(-1, 0)`` returns 0 where the paper says ``-1``). CMM used the
+    signed form before 0.4.0.
+    """
+
+    plus = _eval_gpr_indicator(node, {g: 1 for g, d in gene_dirs.items() if int(d) > 0})
+    minus = _eval_gpr_indicator(
+        node, {g: 1 for g, d in gene_dirs.items() if int(d) < 0}
+    )
+    return plus - minus
 
 
 def reaction_directions(
@@ -157,11 +189,18 @@ def reaction_directions(
 ) -> DirectionMap:
     """Map gene directions to per-reaction desired flux-value directions.
 
+    The GPR is resolved by Yizhak et al.'s (2013) rule — AND requires *all* associated genes
+    to share a direction, OR requires *at least one*, and conflicting evidence yields
+    *unchanged* — via the two-pass binary decomposition in ``_eval_gpr_direction``. Reactions
+    with no GPR are 0, matching the reference code's ``rxnFBS(grRules == '') = 0``.
+
     When a ``reference`` (source) flux state is given, the expression direction is combined
     with the sign of the reference flux so the label is in flux-*value* space: a reaction
     operating in reverse with an up-regulated enzyme should carry *more negative* flux, i.e.
-    decrease. Reactions inactive in the source (|v_ref| <= tol) are assumed to operate
-    forward, so an up-regulated enzyme means "turn on" (increase).
+    decrease. That step is Yizhak's, and the reference code's ``rxnFBS(Vref < 0) = -rxnFBS``.
+    Reactions inactive in the source (|v_ref| <= tol) are assumed to operate forward, so an
+    up-regulated enzyme means "turn on" (increase) — **that convention is CMM's own**; neither
+    Yizhak et al. (2013) nor Valcárcel et al. (2019) specify it.
     """
 
     rxn_ids = (
@@ -181,7 +220,10 @@ def reaction_directions(
         directions[rid] = int(expr_dir)
     return DirectionMap(
         directions=directions,
-        metadata={"has_reference": reference is not None},
+        metadata={
+            "has_reference": reference is not None,
+            "gpr_rule": "yizhak2013_two_pass_binary",
+        },
     )
 
 

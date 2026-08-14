@@ -15,6 +15,8 @@ from cmm.omics.differential import (
     reaction_directions,
 )
 from cmm.omics.expression import (
+    EFLUX2_DEVIATIONS,
+    LAD_DEVIATIONS,
     OmicsFluxResult,
     eflux2,
     gene_to_reaction_weights,
@@ -23,6 +25,8 @@ from cmm.omics.expression import (
 )
 
 __all__ = [
+    "EFLUX2_DEVIATIONS",
+    "LAD_DEVIATIONS",
     "ConditionFluxes",
     "DirectionMap",
     "OmicsFluxResult",

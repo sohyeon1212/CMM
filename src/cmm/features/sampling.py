@@ -17,6 +17,22 @@ Two services are provided:
 Both are seeded and single-process by default so a result can be reproduced exactly, and
 both return samples that satisfy the steady-state and bound constraints. Note that adding
 noise to sampled fluxes afterwards would break both, so this module never does it.
+
+**Two deviations from optGpSampler as published (Megchelenbrink W, Huynen M & Marchiori E
+(2014), *PLoS ONE* 9(2):e86587), disclosed rather than changed.**
+
+1. ``processes=1`` runs a single chain. optGpSampler's defining feature is many parallel
+   chains whose warm-up points come from one shared optimization; a single chain is a
+   correct but slower and less well-mixed sampler, not the published algorithm. It is the
+   default because parallel chains are seeded independently, so ``processes>1`` cannot be
+   reproduced bit-for-bit — and reproducibility is the property this module exists to
+   provide. Raise ``processes`` when throughput matters more than an exactly repeatable run,
+   and say in the report that you did.
+2. ``thinning=100`` is COBRApy's default and is below the thinning the paper needed at
+   genome scale, where mixing required on the order of k ≈ 500–2500 steps between retained
+   samples. On a genome-scale reconstruction, raise ``thinning`` (and ``n``) and check
+   convergence rather than trusting the default; on small models such as ``e_coli_core`` the
+   default is ample.
 """
 
 from __future__ import annotations
@@ -148,7 +164,11 @@ def random_flux_sampling(
 
     ``optgp`` needs a large ``n`` (roughly >1000) to mix well; ``achr`` converges better for
     small sample counts. ``processes`` defaults to 1 because parallel chains are seeded
-    independently, so raising it makes a run faster but no longer bit-for-bit reproducible.
+    independently, so raising it makes a run faster but no longer bit-for-bit reproducible —
+    which also means the published multi-chain optGpSampler design is switched off by
+    default. ``thinning`` defaults to COBRApy's 100, below the k ≈ 500–2500 optGpSampler
+    needed at genome scale; raise both on a genome-scale reconstruction. Both deviations are
+    set out in the module docstring.
 
     The sampled space is the model *as constrained*, so it is the caller's job to apply a
     medium or condition first — sampling an unconstrained model samples an unbounded space.
@@ -208,6 +228,9 @@ def reference_constrained_sampling(
     Because ``min_fraction <= 1 <= max_fraction``, every window contains its reference flux,
     so an empty window can only mean the reference violates the model's own bounds — which
     raises rather than silently sampling a different space.
+
+    ``processes`` and ``thinning`` carry the same defaults, and the same two disclosed
+    deviations from published optGpSampler, as :func:`random_flux_sampling`.
     """
 
     _validate_sampling_arguments(

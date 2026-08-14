@@ -4,11 +4,21 @@ from __future__ import annotations
 
 import pytest
 
+from cmm.core.condition import Condition, ReactionBound
 from cmm.core.flux_state import FluxState
 from cmm.features.production import fseof
 from cmm.features.revert import revert_targets
 from cmm.omics.differential import DirectionMap
 from cmm.omics.expression import eflux2
+
+#: 0.4.0 removed ``aerobic=``; anaerobiosis is a Condition like any other constraint set.
+ANAEROBIC = Condition(
+    name="anaerobic (O2 and CO2 uptake closed)",
+    bounds=(
+        ReactionBound("EX_o2_e", lower_bound=0.0),
+        ReactionBound("EX_co2_e", lower_bound=0.0),
+    ),
+)
 
 
 def _official_mta_inputs():
@@ -49,7 +59,7 @@ def test_fseof_headline_targets_are_stable_across_scan_resolution(ecoli_core, n_
         "EX_succ_e",
         "Biomass_Ecoli_core",
         n_steps=n_steps,
-        aerobic=False,
+        condition=ANAEROBIC,
     )
     targets = set(result.amplification_targets())
     assert {"FRD7", "FUM", "PPC"} <= targets

@@ -19,19 +19,24 @@ Tagged releases and their test data will remain available for at least two years
 publication, with issue reporting through the repository's
 [GitHub Issues](https://github.com/jyryu3161/CMM/issues).
 
-Before journal submission, the exact `v0.3.0` release must additionally be archived in
+Before journal submission, the exact `v0.4.0` release must additionally be archived in
 Zenodo or an equivalent long-term repository and its DOI added to this section,
 `CITATION.cff`, and the manuscript's Availability and Implementation statement.
 
 ## Implemented methods
 
 - Simulation: FBA, pFBA, FVA, editable conditions, and growth-media presets.
-- Perturbations: reaction/gene/multiple knockouts, L1/L2 MOMA, ROOM, and batch screens.
+- Perturbations: reaction/gene/multiple knockouts, L1/L2 MOMA, ROOM with both published
+  tolerance pairs, and batch screens. The reported distance is a distance — Segrè et al.
+  Eq. (4)'s Euclidean value for L2 MOMA — kept separate from the raw solver objective.
 - Omics: LAD, strict two-stage E-Flux2, multi-condition flux prediction, and log2 changes.
-- Production: theoretical yield with carbon/CO₂ disclosure, production envelopes, FSEOF,
-  and FVA-based FVSEOF with optional grouping-reaction constraints.
-- Response and sampling: flux-response scans with bottleneck detection, and seeded random
-  flux sampling both uniform and constrained around a reference flux state.
+- Production: theoretical yield with carbon/CO₂ disclosure (media presets close CO₂ *uptake*
+  by default; secretion stays free, and the fraction of product carbon supplied by any residual
+  CO₂ uptake is reported and warned on), production envelopes, FSEOF, and FVA-based FVSEOF
+  classifying on Park et al.'s nine types, with optional caller-supplied linear flux couplings.
+- Response and sampling: flux-response scans reporting the exact LP shadow price and its phase
+  boundaries, and seeded random flux sampling both uniform and constrained around a reference
+  flux state.
 - Strain design: distinct OptKnock and three-level RobustKnock modules through StrainDesign,
   followed by independent maximum/guaranteed-product evaluation.
 - Normalization: published MTA MIQP, published rMTA best/MOMA/worst scoring, and an explicitly
@@ -69,7 +74,7 @@ Gurobi extras by default:
 
 Tagged wheels and source archives are published on the
 [GitHub Releases page](https://github.com/jyryu3161/CMM/releases). The current source version
-is 0.3.0.
+is 0.4.0, a **breaking** release — see `CHANGELOG.md`.
 
 ## Solver requirements
 
@@ -83,9 +88,18 @@ Solver capability is checked before a solve; a method never silently changes for
 | MIQP | published MTA and rMTA |
 
 GLPK supports LP/MILP. Gurobi and CPLEX support the full table, subject to their licenses and
-model-size limits. The free restricted Gurobi license is suitable for CMM's small QP/MIQP
-validation models; genome-scale mixed-integer studies generally require an appropriate
-full solver license.
+model-size limits. The restricted Gurobi license bundled with `pip install gurobipy` is limited
+to 2000 variables and 2000 constraints, dropping to **200 variables for any model containing
+quadratic terms** — the cap counts variables, not quadratic terms. Because a COBRA LP uses
+about two variables per reaction, that restricted license covers CMM's QP/MIQP *validation*
+models (all ≤190 variables) but only permits QP/MIQP on networks of roughly **100 reactions or
+fewer** — and fewer still for L2 MOMA, which adds one variable per reaction: **L2 MOMA on
+`e_coli_core` is 286 variables and already fails** under the restricted license, though it is
+neither genome-scale nor mixed-integer. Genome-scale work of any kind, including plain FBA on
+iJO1366 (5166 variables), requires a full academic or commercial license.
+
+The `rmta_continuous` QP row above is **unverified**: the test suite has no test that solves its
+QP, only a GLPK capability-gate test. See [Known limits](docs/VALIDATION.md).
 
 ## Python quick start
 
@@ -95,12 +109,12 @@ from cmm.core import apply_medium, fba, pfba
 from cmm.features import fseof, theoretical_yield
 
 model = load_model("textbook")
-apply_medium(model, "glucose_aerobic")
+apply_medium(model, "glucose_anaerobic")     # the condition, set once
 
 growth = fba(model)
 minimal = pfba(model)
 yield_result = theoretical_yield(model, "EX_succ_e")
-scan = fseof(model, "EX_succ_e", n_steps=8, aerobic=False)
+scan = fseof(model, "EX_succ_e", n_steps=10)
 
 print(growth.objective_value, minimal.status)
 print(yield_result.molar_yield, yield_result.metadata["model_sha256"])
@@ -114,7 +128,7 @@ prediction forced or just one of many optima?
 from cmm.features import flux_response, random_flux_sampling
 
 response = flux_response(model, "PGI", "EX_succ_e", biomass_fraction=0.3)
-print(response.optimum(), response.bottleneck.found, response.feasible_range())
+print(response.optimum(), response.limit.found, response.feasible_range())
 
 ensemble = random_flux_sampling(model, n=1000, seed=0)
 print(ensemble.statistics().loc["EX_succ_e"])
@@ -178,6 +192,17 @@ in [CITATION.cff](CITATION.cff); replace the contributor placeholder with the fi
 authors and add the archived release DOI before submission. A manuscript should also cite the
 original papers for every method it uses, listed in `docs/VALIDATION.md`.
 
+Three points that are easy to get wrong, all detailed there:
+
+- **OptKnock and RobustKnock need three citations, not two** — Burgard et al. (2003) and
+  Tepper & Shlomi (2010) for the formulations, *and* Schneider et al. (2022) for the
+  `straindesign` package that actually solves them, which carries no citation of its own.
+- **`transformation_targets` is not a CMM invention**; both of its paths map to published
+  Yizhak et al. (2013) methods and should be cited to that paper.
+- **`flux_log_change` has no published source.** It is a CMM utility and must not be cited to
+  any paper. CMM's FSEOF selection rule and FVSEOF's `robust_targets()` flag are likewise
+  CMM's own and must not be attributed to Choi et al. or Park et al.
+
 ## Release process
 
 Every push and pull request installs the frozen lockfile and runs the cross-platform quality
@@ -186,6 +211,6 @@ builds the wheel and sdist, validates them, installs the wheel in a clean enviro
 then attaches the artifacts to a GitHub Release.
 
 ```bash
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```

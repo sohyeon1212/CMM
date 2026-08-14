@@ -2,12 +2,15 @@
 
 from cmm.features._perturbation import (
     Perturbation,
+    PerturbationList,
     blocked_reactions_for_genes,
     gene_perturbations,
     grouped_gene_perturbations,
+    perturbation_provenance,
     reaction_perturbations,
 )
 from cmm.features.comparison import (
+    ROOM_TOLERANCES,
     BatchComparisonRow,
     ComparisonResult,
     batch_comparison,
@@ -17,6 +20,11 @@ from cmm.features.comparison import (
     room,
 )
 from cmm.features.production import (
+    CarbonUptake,
+    FseofResult,
+    FvseofResult,
+    ProductionEnvelope,
+    ProductionYield,
     fseof,
     fvseof,
     production_envelope,
@@ -24,11 +32,12 @@ from cmm.features.production import (
 )
 from cmm.features.response import (
     FluxResponseResult,
-    ResponseBottleneck,
+    ResponseLimit,
+    ResponsePhase,
     ResponsePoint,
     flux_response,
 )
-from cmm.features.revert import revert_targets
+from cmm.features.revert import revert_targets, tie_structure
 from cmm.features.sampling import (
     SamplingResult,
     random_flux_sampling,
@@ -86,11 +95,19 @@ __all__ = [
     "INCLUDED_FEATURES",
     "PLANNED_FEATURES",
     "EXCLUDED_FEATURES",
+    "ROOM_TOLERANCES",
     "BatchComparisonRow",
+    "CarbonUptake",
     "ComparisonResult",
     "FluxResponseResult",
+    "FseofResult",
+    "FvseofResult",
     "Perturbation",
-    "ResponseBottleneck",
+    "PerturbationList",
+    "ProductionEnvelope",
+    "ProductionYield",
+    "ResponseLimit",
+    "ResponsePhase",
     "ResponsePoint",
     "SamplingResult",
     "StrainDesign",
@@ -105,6 +122,7 @@ __all__ = [
     "grouped_gene_perturbations",
     "knockout_comparison",
     "moma",
+    "perturbation_provenance",
     "production_envelope",
     "random_flux_sampling",
     "reaction_perturbations",
@@ -115,5 +133,6 @@ __all__ = [
     "room",
     "revert_targets",
     "theoretical_yield",
+    "tie_structure",
     "transformation_targets",
 ]

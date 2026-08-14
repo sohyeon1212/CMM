@@ -69,7 +69,22 @@ def predict_condition_fluxes(
     conditions: Iterable[str] | None = None,
     **kwargs,
 ) -> ConditionFluxes:
-    """Predict a flux distribution for each condition column with E-Flux2 or LAD."""
+    """Predict a flux distribution for each condition column with E-Flux2 or LAD.
+
+    Conditions are solved independently — one ``integrate_expression`` call per column, each
+    inside its own ``with model:`` block — so no bound or objective mutation leaks between
+    them and adding or removing a column cannot change another column's fluxes. No
+    cross-condition normalisation is applied either, by ``read_expression_table`` or here.
+
+    **Consequence to keep in mind when interpreting the result.** E-Flux2's normalisation
+    denominator is computed *within* each condition, so a condition in which every gene is
+    uniformly k-fold higher produces identical bounds and therefore an identical flux
+    distribution: **a uniform global expression shift produces zero predicted flux change**,
+    and only within-condition relative expression influences the prediction. (Kim et al. 2016
+    are not blind to it — their bound is the absolute expression value.) Normalise the
+    expression table for library size before integration, and do not draw conclusions from a
+    global shift in expression level.
+    """
 
     if expression.empty:
         raise ValueError("expression table is empty")
@@ -101,8 +116,22 @@ def flux_log_change(
 ) -> dict[str, float]:
     """log2 fold-change of flux *magnitude* between two conditions (target vs source).
 
+    **A CMM utility, not an implementation of a published method.** A pseudocounted log2
+    ratio is generic practice; there is no source paper for this function and it must not be
+    cited to one, nor described as a differential-flux *method*.
+
     Uses ``log2((|v_target| + pseudo) / (|v_source| + pseudo))`` so zero/near-zero fluxes are
     handled gracefully; the pseudocount bounds the change for reactions that switch on/off.
+
+    Two artefacts of that definition, both to report alongside the numbers:
+
+    - **A direction reversal reads as "no change".** The ratio is taken on magnitudes, so a
+      reaction going ``+5 -> -5`` returns ``0.0``. Use ``sign_flips`` to detect reversals;
+      this function alone will not show them.
+    - **The on/off magnitude is set by the pseudocount, not by the data.** For ``0 -> v`` the
+      result is ``log2(1 + v / pseudo)``, so at the default ``pseudo = 1e-3`` a reaction
+      switching on at ``v = 10`` reports about 13.3. Changing the pseudocount changes every
+      on/off value while leaving the ranking intact, so the pseudocount must be reported.
     """
 
     if pseudocount < 0 or not math.isfinite(pseudocount):

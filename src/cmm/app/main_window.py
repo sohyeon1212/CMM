@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import math
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -63,6 +64,7 @@ from cmm.features._perturbation import (
     reaction_perturbations,
 )
 from cmm.features.comparison import (
+    ROOM_TOLERANCES,
     batch_comparison,
     knockout_comparison,
     reference_flux,
@@ -1010,6 +1012,17 @@ class CmmMainWindow(QMainWindow):
             "designs that guarantee product at max growth (worst case)."
         )
         pick_row.addWidget(self.sd_method_combo)
+        # Aeration is a property of the design search, not of whichever tab was last used.
+        # optknock/robustknock accepted no condition before 0.4.0, so a run intended to be
+        # anaerobic silently returned an aerobic design — the defect that put an aerobic
+        # succinate design into the documentation as the anaerobic answer.
+        self.sd_anaerobic_combo = QComboBox()
+        self.sd_anaerobic_combo.addItems(["aerobic", "anaerobic"])
+        self.sd_anaerobic_combo.setToolTip(
+            "Aeration the design is searched under, passed as a Condition to "
+            "optknock/robustknock and recorded in the result's provenance."
+        )
+        pick_row.addWidget(self.sd_anaerobic_combo)
         form.addLayout(pick_row)
 
         # Row 2: search limits + run.
@@ -1063,8 +1076,10 @@ class CmmMainWindow(QMainWindow):
         method = self.sd_method_combo.currentText()
         max_ko = self.sd_max_ko_spin.value()
         max_sol = self.sd_max_sol_spin.value()
+        condition = self._strain_design_condition()
+        aeration = self.sd_anaerobic_combo.currentText()
         self.sd_summary.setText(
-            f"Searching {method} designs for {html.escape(product)}…"
+            f"Searching {method} designs for {html.escape(product)} ({aeration})…"
         )
         self.status_label.setText(f"Running {method} (this can take a while)…")
         self.sd_run_btn.setEnabled(False)
@@ -1072,7 +1087,11 @@ class CmmMainWindow(QMainWindow):
             search = optknock if method == "optknock" else robustknock
             result = self._run_in_background(
                 lambda: search(
-                    self.model, product, max_knockouts=max_ko, max_solutions=max_sol
+                    self.model,
+                    product,
+                    max_knockouts=max_ko,
+                    max_solutions=max_sol,
+                    condition=condition,
                 ),
                 label=f"Running {method}…",
             )
@@ -1103,18 +1122,21 @@ class CmmMainWindow(QMainWindow):
         if designs:
             best = result.best()
             self.sd_summary.setText(
-                f"<b>{method}</b> for {html.escape(product)}: {len(designs)} design(s). "
+                f"<b>{method}</b> for {html.escape(product)} ({aeration}): "
+                f"{len(designs)} design(s). "
                 f"Best knocks out <b>{html.escape(', '.join(best.knockouts) or '—')}</b> "
                 f"(growth {best.growth:.3g} h⁻¹, guaranteed product {best.guaranteed_product:.3g}, "
-                f"max product {best.max_product:.3g})."
+                f"max product {best.max_product:.3g}). Candidates are restricted to "
+                "gene-associated internal reactions; exchange knockouts are not realisable "
+                "as gene deletions."
             )
         else:
             self.sd_summary.setText(
                 f"<b>{method}</b> found no growth-coupled design for "
-                f"{html.escape(product)} — try a different product, more knockouts, or check "
-                "the product can carry flux in the current medium."
+                f"{html.escape(product)} ({aeration}) — try a different product, more "
+                "knockouts, or check the product can carry flux in the current medium."
             )
-        self.status_label.setText(f"Strain design complete ({method}).")
+        self.status_label.setText(f"Strain design complete ({method}, {aeration}).")
 
     def _build_flux_response_tab(self) -> QWidget:
         """Scan one reaction's enforced flux and watch a response reaction follow it."""
@@ -1230,6 +1252,26 @@ class CmmMainWindow(QMainWindow):
         self.fr_table.verticalHeader().setVisible(False)
         self.fr_table.setAlternatingRowColors(True)
         right_layout.addWidget(self.fr_table)
+
+        # The phase table is the replacement for the old "bottleneck" line: the response
+        # curve is concave piecewise linear in the enforced flux, so the exact answer is the
+        # list of intervals of constant shadow price and the boundary where it turns
+        # negative — not an argmin over finite differences of whatever grid was scanned.
+        phase_label = QLabel("Response phases (intervals of constant shadow price):")
+        phase_label.setToolTip(
+            "Each phase is one linear piece of the response curve. The shadow price is the "
+            "exact d(response)/d(target) on that piece, read from the LP dual, so it does "
+            "not move with the number of scan steps."
+        )
+        right_layout.addWidget(phase_label)
+        self.fr_phase_table = QTableWidget(0, 4)
+        self.fr_phase_table.setHorizontalHeaderLabels(
+            ["Target from", "to", "Response at end", "Shadow price"]
+        )
+        self.fr_phase_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.fr_phase_table.verticalHeader().setVisible(False)
+        self.fr_phase_table.setAlternatingRowColors(True)
+        right_layout.addWidget(self.fr_phase_table)
         results.addWidget(right_box)
         results.setStretchFactor(0, 1)
         results.setStretchFactor(1, 1)
@@ -1489,16 +1531,65 @@ class CmmMainWindow(QMainWindow):
                 f"{optimum.target_flux:.4g} (growth {optimum.biomass_flux:.4g})."
             )
         if window is not None:
-            parts.append(f"Feasible from {window[0]:.4g} to {window[1]:.4g}.")
-        if result.bottleneck.found:
             parts.append(
-                f"Steepest decline {result.bottleneck.steepest_decline:.4g} per unit "
-                f"around {result.bottleneck.target_flux:.4g}."
+                f"Feasible from {window[0]:.4g} to {window[1]:.4g} (FVA on the scanned "
+                "reaction, not the grid)."
+            )
+        # The response curve is the optimal-value function of an LP in one right-hand side,
+        # so it is concave piecewise linear: each phase is an interval of constant shadow
+        # price, and the limit is the exact boundary where the price crosses the threshold.
+        limit = result.limit
+        if limit.found and limit.target_flux is not None:
+            parts.append(
+                f"Response falls beyond <b>{limit.target_flux:.4g}</b> — shadow price "
+                f"{limit.shadow_price_before:.4g} → {limit.shadow_price_after:.4g} per unit "
+                f"of {html.escape(result.target)}."
             )
         else:
-            parts.append(f"No bottleneck: {result.bottleneck.message}.")
+            parts.append(f"No response limit: {html.escape(limit.message)}.")
+        if result.phases:
+            parts.append(
+                f"{len(result.phases)} phase(s) of constant shadow price; at the wild-type "
+                f"flux the price is {self._wild_type_shadow_price(result)}."
+            )
         self.fr_summary.setText(" ".join(parts))
+        self._fill_flux_response_phase_table(result)
         self.status_label.setText("Flux response scan complete.")
+
+    @staticmethod
+    def _wild_type_shadow_price(result) -> str:
+        """The exact d(response)/d(target) at the wild-type target flux, or why not."""
+
+        wild_type = result.wild_type.get("target_flux")
+        if wild_type is None:
+            return "—"
+        try:
+            return f"{result.shadow_price_at(float(wild_type)):.4g}"
+        except ValueError:
+            # The wild-type flux can sit outside the scanned window; say so rather than
+            # printing a number from a phase that does not contain it.
+            return "— (wild type is outside the scanned window)"
+
+    def _fill_flux_response_phase_table(self, result) -> None:
+        """List the response phases: one row per interval of constant shadow price."""
+
+        frame = result.phases_frame()
+        self.fr_phase_table.setRowCount(len(frame))
+        for row, (_, record) in enumerate(frame.iterrows()):
+            values = [
+                f"{record['target_low']:.4g}",
+                f"{record['target_high']:.4g}",
+                f"{record['response_high']:.4g}",
+                f"{record['shadow_price']:.4g}",
+            ]
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                # A negative shadow price means the response is paying for the enforced
+                # flux; flag it the same way an infeasible scan point is flagged.
+                if col == 3 and record["shadow_price"] < 0:
+                    item.setForeground(QColor("#B00020"))
+                self.fr_phase_table.setItem(row, col, item)
 
     def _fill_flux_response_table(self, result) -> None:
         frame = result.to_frame()
@@ -1689,13 +1780,32 @@ class CmmMainWindow(QMainWindow):
         row.addWidget(QLabel("Method:"))
         self.comparison_method_combo = QComboBox()
         self.comparison_method_combo.addItems(["MOMA (L2)", "MOMA (L1)", "ROOM"])
+        self.comparison_method_combo.currentTextChanged.connect(
+            self._on_comparison_method_changed
+        )
         row.addWidget(self.comparison_method_combo)
+        # Shlomi et al. publish two tolerance pairs for two different questions, and the
+        # choice is not cosmetic: 531 vs 401 switches over the same 35 knockouts.
+        self.room_use_case_combo = QComboBox()
+        self.room_use_case_combo.addItems(sorted(ROOM_TOLERANCES))
+        self.room_use_case_combo.setCurrentText("flux_prediction")
+        self.room_use_case_combo.setToolTip(
+            "ROOM tolerance pair (Shlomi et al. 2005): flux_prediction δ=0.03 ε=1e-3, "
+            "lethality δ=0.1 ε=1e-2. Ignored by MOMA."
+        )
+        row.addWidget(self.room_use_case_combo)
         row.addWidget(QLabel("Reference template:"))
         self.template_combo = QComboBox()
-        self.template_combo.addItems(["fba", "pfba", "lad", "eflux2"])
+        # pFBA first, and therefore the default: `reference_flux` defaults to "pfba" too, so
+        # the GUI and the Python API no longer disagree about the reference state. FBA is
+        # Segre et al.'s own protocol and stays available; it is non-unique (8 identical
+        # calls on iJO1366 returned 3 distinct vectors), which is why pFBA is the default.
+        self.template_combo.addItems(["pfba", "fba", "lad", "eflux2"])
         self.template_combo.setToolTip(
-            "Wild-type flux template the perturbed state is compared to. LAD/E-Flux2 reuse the "
-            "expression computed on the Omics tab, and stay disabled until that is available."
+            "Wild-type flux template the perturbed state is compared to. pFBA is the default "
+            "in both the GUI and the Python API; FBA is Segrè et al.'s protocol but has "
+            "alternate optima. LAD/E-Flux2 reuse the expression computed on the Omics tab, "
+            "and stay disabled until that is available."
         )
         # LAD/E-Flux2 need an omics result; grey them out (delegate + not-allowed cursor) until
         # one exists so they cannot be picked.
@@ -1986,16 +2096,24 @@ class CmmMainWindow(QMainWindow):
                 else f"Compute {method.upper()} on the Omics tab to use it as a "
                 "reference template."
             )
-        # If the current pick just became unavailable, fall back to a template that always runs.
+        # If the current pick just became unavailable, fall back to a template that always
+        # runs. pFBA, not FBA: it is the library default and is deterministic.
         current = combo.currentText()
         if current in ("lad", "eflux2") and current not in self._omics_computed_methods:
-            combo.setCurrentText("fba")
+            combo.setCurrentText("pfba")
 
     def _comparison_method_key(self) -> str:
         label = self.comparison_method_combo.currentText()
         if label == "ROOM":
             return "room"
         return "moma_l1" if label == "MOMA (L1)" else "moma_l2"
+
+    def _on_comparison_method_changed(self, _label: str) -> None:
+        """The ROOM tolerance pair only means anything when ROOM is the method."""
+
+        combo = getattr(self, "room_use_case_combo", None)
+        if combo is not None:
+            combo.setEnabled(self._comparison_method_key() == "room")
 
     def _comparison_expression(self):
         """Expression for a LAD/E-Flux2 template: real if loaded, else synthetic (flagged)."""
@@ -2028,6 +2146,7 @@ class CmmMainWindow(QMainWindow):
             )
             return
         method_key = self._comparison_method_key()
+        room_use_case = self.room_use_case_combo.currentText()
         expression, synthetic_expression = self._comparison_expression()
         ko_label = self._ko_label(targets)
 
@@ -2044,7 +2163,11 @@ class CmmMainWindow(QMainWindow):
             else:
                 reaction_ids = tuple(targets)
             result = knockout_comparison(
-                self.model, reference, reaction_ids, method=method_key
+                self.model,
+                reference,
+                reaction_ids,
+                method=method_key,
+                room_use_case=room_use_case,
             )
             return reference, result, reaction_ids
 
@@ -2094,10 +2217,47 @@ class CmmMainWindow(QMainWindow):
             "ko_label": ko_label,
             "blocked_note": blocked_note,
             "status": result.status,
-            "distance": result.distance,
+            "quantity": self._comparison_quantity(result),
             "synthetic_note": synthetic_note,
         }
         self._render_comparison_table()
+
+    @staticmethod
+    def _comparison_quantity(result) -> str:
+        """The one number this method actually reports, named for what it is.
+
+        0.4.0 split ``ComparisonResult.distance`` from the raw solver objective, because the
+        three methods optimise three different quantities: MOMA-L2's objective is Sum d^2
+        while Segre et al.'s Eq. (4) distance is its square root, and ROOM's objective is a
+        *count of switched reactions*, not a distance at all — so ``distance`` is ``None``
+        there. Formatting that ``None`` with ``:.4g`` is what used to raise a ``TypeError``
+        on the GUI's own ROOM path.
+        """
+
+        if result.distance_kind == "none" or result.distance is None:
+            switches = result.n_changed_reactions
+            if switches is None:
+                return f"objective {result.objective_value:.4g}"
+            tolerances = (
+                f" at δ={result.metadata.get('delta')} ε={result.metadata.get('epsilon')}, "
+                f"the {result.metadata.get('room_use_case')} pair"
+                if "delta" in result.metadata
+                else ""
+            )
+            return (
+                f"{switches:.0f} reactions switched (ROOM's objective — a count, not a "
+                f"distance){tolerances}"
+            )
+        label = {
+            "euclidean_l2": "Euclidean (L2) distance",
+            "l1": "L1 distance",
+        }.get(result.distance_kind, result.distance_kind)
+        if result.distance_kind == "euclidean_l2":
+            return (
+                f"{label} {result.distance:.4g} (QP objective Σd² "
+                f"{result.objective_value:.4g})"
+            )
+        return f"{label} {result.distance:.4g}"
 
     def _render_comparison_table(self) -> None:
         """Fill the single-run table with reactions whose change exceeds the threshold."""
@@ -2131,8 +2291,8 @@ class CmmMainWindow(QMainWindow):
         self.comparison_summary.setText(
             f"<b>{cache['method_label']}</b> vs <b>{cache['template']}</b> template after "
             f"knocking out {cache['level']} {html.escape(cache['ko_label'])}"
-            f"{cache['blocked_note']}: status {cache['status']}, distance "
-            f"{cache['distance']:.4g}, {len(changed)} reactions changed "
+            f"{cache['blocked_note']}: status {cache['status']}, "
+            f"{cache['quantity']}, {len(changed)} reactions changed "
             f"(≥ {self.comparison_threshold_spin.value():g}% of reference)."
             + cache["synthetic_note"]
         )
@@ -2154,6 +2314,9 @@ class CmmMainWindow(QMainWindow):
         level = self.ko_level_combo.currentText()
         selected = self._selected_ko_targets()  # empty -> all targets of this level
         method_key = self._comparison_method_key()
+        # A screen asks which deletions are lethal, so the library defaults this path to the
+        # lethality pair; the GUI honours whatever the selector says and reports it.
+        room_use_case = self.room_use_case_combo.currentText()
         expression, synthetic_expression = self._comparison_expression()
         product = self.batch_product_combo.currentText()
         product = None if product in ("", "(none)") else product
@@ -2172,6 +2335,7 @@ class CmmMainWindow(QMainWindow):
                 reference,
                 perts,
                 method=method_key,
+                room_use_case=room_use_case,
                 product_reaction=product,
             )
             return reference, rows
@@ -2261,6 +2425,13 @@ class CmmMainWindow(QMainWindow):
         self.medium_combo.setToolTip(
             "Preset growth medium (sets exchange uptake bounds)"
         )
+        # The preset keys are stable, but the display names changed in 0.4.0 — they now state
+        # the mineral set's provenance (iJO1366/BiGG, not M9) and that CO2 uptake is closed.
+        # Show each one on its own item rather than letting the key imply a standard medium.
+        for _index, _key in enumerate(sorted(PRESET_MEDIA)):
+            self.medium_combo.setItemData(
+                _index, PRESET_MEDIA[_key].name, Qt.ToolTipRole
+            )
         media_row.addWidget(self.medium_combo)
         apply_medium_btn = QPushButton("Apply medium")
         apply_medium_btn.clicked.connect(self.apply_selected_medium)
@@ -2591,8 +2762,22 @@ class CmmMainWindow(QMainWindow):
             return
         # Reflect the new exchange bounds in the reaction table and mark fluxes stale.
         self.load_model(self.model)
+        # `apply_to` returns a MediumApplication as of 0.4.0: it still behaves as the mapping
+        # of applied uptakes, but it also names the components this model has no exchange for.
+        # A preset that silently drops 18 of 24 components is not the medium it claims to be.
+        dropped = (
+            f" {len(applied.dropped)} declared component(s) have no exchange in this model "
+            f"and were dropped: {', '.join(sorted(applied.dropped))}."
+            if applied.dropped
+            else ""
+        )
         self.status_label.setText(
-            f"Applied medium '{name}' ({len(applied)} open exchanges). Re-run FBA."
+            f"Applied '{applied.medium}' ({len(applied)} open exchanges).{dropped} "
+            "Re-run FBA."
+        )
+        self.medium_combo.setToolTip(
+            "Preset growth medium (sets exchange uptake bounds). Currently applied: "
+            f"{applied.medium}"
         )
 
     def run_fva(self) -> None:
@@ -2672,6 +2857,52 @@ class CmmMainWindow(QMainWindow):
 
     def _is_aerobic(self) -> bool:
         return self.anaerobic_combo.currentText() == "aerobic"
+
+    def _aeration_condition(self, aerobic: bool) -> Condition:
+        """The selected aeration as a :class:`Condition` — 0.4.0's only way to state it.
+
+        ``aerobic=True|False`` was removed from ``cmm.features.production`` in 0.4.0, so the
+        GUI now says what every other caller says. The anaerobic condition closes CO2 uptake
+        alongside oxygen, which is what the removed flag did internally and what the
+        ``glucose_anaerobic`` preset does through the media layer; without it an anaerobic
+        succinate yield reads 1.3906 mol/mol instead of 1.2000, inflated by CO2 a closed
+        fermentation cannot supply. Bounds name only exchanges this model actually has.
+        """
+
+        if aerobic:
+            # Aerobic is the model as conditioned by the medium: no bound overrides, but a
+            # named condition so the run records what it was asked for.
+            return Condition(
+                name="aerobic (model medium as applied)",
+                notes="oxygen and CO2 exchanges left as the medium set them",
+            )
+        bounds = tuple(
+            ReactionBound(reaction_id=rid, lower_bound=0.0)
+            for rid in ("EX_o2_e", "EX_co2_e")
+            if rid in self.model.reactions
+        )
+        return Condition(
+            name="anaerobic (O2 and CO2 uptake closed)",
+            bounds=bounds,
+            notes="oxygen uptake closed; CO2 uptake closed so the yield is not CO2-inflated",
+        )
+
+    def _production_condition(self) -> Condition:
+        """The Production tab's aeration selector as a Condition."""
+
+        return self._aeration_condition(self._is_aerobic())
+
+    def _strain_design_condition(self) -> Condition:
+        """The Strain Design tab's own aeration selector as a Condition.
+
+        Strain design used to accept no condition at all, so a caller working anaerobically
+        received an aerobic design in silence — the defect that put an aerobic succinate
+        design into the scenario documentation as the anaerobic answer.
+        """
+
+        return self._aeration_condition(
+            self.sd_anaerobic_combo.currentText() == "aerobic"
+        )
 
     def render_flux_map(self) -> None:
         """Render the Escher-layout flux map coloured by the current FBA flux."""
@@ -2802,7 +3033,7 @@ class CmmMainWindow(QMainWindow):
             self.fseof_table.setItem(i, 3, QTableWidgetItem(cls))
 
     def _fill_fvseof_table(self, result) -> None:
-        """Show FVSEOF targets (robust flagged); all reactions when 'show all' is on."""
+        """Show FVSEOF targets with Park's type; all reactions when 'show all' is on."""
 
         self._production_result = ("fvseof", result)
         show_all = self.production_show_all_check.isChecked()
@@ -2818,26 +3049,30 @@ class CmmMainWindow(QMainWindow):
             mhi = float(result.mean.loc[rid, hi])
             is_robust = rid in robust_ids
             tag = f"{cls} · robust" if is_robust else cls
-            rows.append((rid, mlo, mhi, tag, is_robust, abs(abs(mhi) - abs(mlo))))
-        rows.sort(key=lambda r: (-int(r[4]), -r[5]))
+            park = f"{int(result.park_type.loc[rid])}"
+            rows.append((rid, mlo, mhi, park, tag, is_robust, abs(abs(mhi) - abs(mlo))))
+        rows.sort(key=lambda r: (-int(r[5]), -r[6]))
         self._set_production_table_headers(
-            ["Reaction", "Mean flux @ low", "Mean flux @ high", "Trend"],
+            ["Reaction", "Mean flux @ low", "Mean flux @ high", "Park type", "Trend"],
             [
                 "Reaction ID",
-                f"Midpoint of the reaction's FVA flux range at the lowest enforced product "
-                f"level ({lo:.3g})",
-                f"Midpoint of the reaction's FVA flux range at the highest enforced product "
-                f"level ({hi:.3g})",
-                "amplify/knockdown from the |mean-flux| trend; 'robust' = the FVA minimum "
-                "|flux| also rises, so the reaction cannot avoid carrying more flux",
+                f"V_avg — midpoint of the reaction's FVA flux range at the lowest enforced "
+                f"product level ({lo:.3g})",
+                f"V_avg — midpoint of the reaction's FVA flux range at the highest enforced "
+                f"product level ({hi:.3g})",
+                "Park et al. (2012) nine-type index from the joint sign of ΔV_avg and "
+                "Δl_sol: 1–3 amplification, 4–6 knockdown, 7–9 neither",
+                "amplify (types 1–3) / knockdown (types 4–6); 'robust' is CMM's own flag "
+                "(the FVA minimum |flux| also rises monotonically), not Park's criterion",
             ],
         )
         self.fseof_table.setRowCount(len(rows))
-        for i, (rid, mlo, mhi, tag, _robust, _delta) in enumerate(rows):
+        for i, (rid, mlo, mhi, park, tag, _robust, _delta) in enumerate(rows):
             self.fseof_table.setItem(i, 0, QTableWidgetItem(rid))
             self.fseof_table.setItem(i, 1, QTableWidgetItem(f"{mlo:.4g}"))
             self.fseof_table.setItem(i, 2, QTableWidgetItem(f"{mhi:.4g}"))
-            self.fseof_table.setItem(i, 3, QTableWidgetItem(tag))
+            self.fseof_table.setItem(i, 3, QTableWidgetItem(park))
+            self.fseof_table.setItem(i, 4, QTableWidgetItem(tag))
 
     def _fill_envelope_table(self, envelope) -> None:
         """List the production-envelope points: growth range attainable at each product flux."""
@@ -2885,22 +3120,35 @@ class CmmMainWindow(QMainWindow):
                 None  # nothing for the show-all toggle to re-render
             )
             product = self._current_product()
-            result = theoretical_yield(
-                self.model,
-                product,
-                substrate=self._current_substrate(),
-                aerobic=self._is_aerobic(),
-            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = theoretical_yield(
+                    self.model,
+                    product,
+                    substrate=self._current_substrate(),
+                    condition=self._production_condition(),
+                )
             ceiling = (
                 f", carbon ceiling {result.carbon_ceiling:.2f}"
                 if result.carbon_ceiling is not None
                 else ""
             )
+            # 0.4.0 reports how much of the product carbon CO2 uptake supplies, because
+            # `co2_fixed` on its own let a 15.9%-inflated yield pass every guard by sitting
+            # below the ceiling. Surface the fraction, and the imbalance if one is left over.
             co2 = (
-                f"; needs net CO₂ fixation ({result.co2_exchange:.1f})"
-                if result.co2_fixed and result.exceeds_carbon_ceiling
+                f"; {result.co2_carbon_fraction:.1%} of the product carbon comes from net "
+                f"CO₂ uptake ({result.co2_uptake:.2f})"
+                if result.co2_carbon_fraction > 0.0
                 else ""
             )
+            if result.carbon_imbalance:
+                co2 += (
+                    "; <span style='color:#b45309'>⚠ carbon imbalance: the excess is not "
+                    "explained by CO₂ uptake</span>"
+                )
+            for warning in caught:
+                self.status_label.setText(str(warning.message))
             self.yield_label.setText(
                 f"Theoretical yield of {html.escape(product)}: "
                 f"<b>{result.molar_yield:.3f}</b> mol/mol {html.escape(result.substrate)} "
@@ -2914,30 +3162,34 @@ class CmmMainWindow(QMainWindow):
     def run_production_envelope_plot(self) -> None:
         def _do():
             product = self._current_product()
-            aerobic = self._is_aerobic()
-            condition = "aerobic" if aerobic else "anaerobic"
+            condition = self._production_condition()
+            label = self.anaerobic_combo.currentText()
             substrate = self._current_substrate()
             envelope = self._run_in_background(
                 lambda: production_envelope(
-                    self.model, product, substrate=substrate, aerobic=aerobic, points=20
+                    self.model,
+                    product,
+                    substrate=substrate,
+                    condition=condition,
+                    points=20,
                 ),
                 label="Computing production envelope…",
             )
             fig = production_envelope_figure(
-                envelope, title=f"Production envelope — {product} ({condition})"
+                envelope, title=f"Production envelope — {product} ({label})"
             )
             self._set_production_figure(fig)
             self._fill_envelope_table(envelope)
-            self.status_label.setText(f"Production envelope computed ({condition}).")
+            self.status_label.setText(f"Production envelope computed ({label}).")
 
         self._run_production(_do)
 
     def run_fseof_plot(self) -> None:
         def _do():
             product = self._current_product()
-            aerobic = self._is_aerobic()
+            condition = self._production_condition()
             result = self._run_in_background(
-                lambda: fseof(self.model, product, n_steps=10, aerobic=aerobic),
+                lambda: fseof(self.model, product, n_steps=10, condition=condition),
                 label="Running FSEOF…",
             )
             if result.metadata.get("max_product", 0.0) <= 1e-9:
@@ -2970,9 +3222,11 @@ class CmmMainWindow(QMainWindow):
     def run_fvseof_plot(self) -> None:
         def _do():
             product = self._current_product()
-            aerobic = self._is_aerobic()
+            condition = self._production_condition()
+            # n_steps is left at the library default (10), which is Park et al.'s stated
+            # minimum; the GUI used to force 8, undercutting it.
             result = self._run_in_background(
-                lambda: fvseof(self.model, product, n_steps=8, aerobic=aerobic),
+                lambda: fvseof(self.model, product, condition=condition),
                 label="Running FVSEOF…",
             )
             if result.metadata.get("max_product", 0.0) <= 1e-9:
@@ -2982,13 +3236,19 @@ class CmmMainWindow(QMainWindow):
                 self.status_label.setText("FVSEOF: zero theoretical yield.")
                 return
             fig = fvseof_figure(
-                result, top_n=5, title=f"FVSEOF robust targets — {product}"
+                result, top_n=5, title=f"FVSEOF amplification targets — {product}"
             )
             self._set_production_figure(fig)
             self._fill_fvseof_table(result)
+            # Park's types 1-3, in his priority order (ascending l_sol), are the published
+            # selection; `robust` is CMM's own construct and is labelled as such.
+            amplify = result.amplification_targets()[:8]
             robust = result.robust_targets()[:8]
             self.yield_label.setText(
-                "FVSEOF robust amplification targets (forced up): "
+                "FVSEOF amplification targets (Park types 1–3, by ascending l_sol): "
+                + html.escape(", ".join(amplify) if amplify else "none")
+                + "<br>Also rising monotonically under enforced flux "
+                "(CMM's own “robust” flag, not Park et al.'s criterion): "
                 + html.escape(", ".join(robust) if robust else "none")
             )
             self.status_label.setText("FVSEOF complete.")

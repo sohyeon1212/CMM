@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from cmm.core.condition import Condition, ReactionBound
 from cmm.features.production import (
     fseof,
     fvseof,
@@ -26,6 +27,15 @@ from cmm.visualization import (
 SUCC = "EX_succ_e"
 BIOMASS = "Biomass_Ecoli_core"
 
+#: 0.4.0 removed ``aerobic=``; anaerobiosis is a Condition like any other constraint set.
+ANAEROBIC = Condition(
+    name="anaerobic (O2 and CO2 uptake closed)",
+    bounds=(
+        ReactionBound("EX_o2_e", lower_bound=0.0),
+        ReactionBound("EX_co2_e", lower_bound=0.0),
+    ),
+)
+
 
 def _nonblank(path):
     # A 300-DPI multi-element figure is well over 5 KB; a blank canvas is tiny.
@@ -44,7 +54,7 @@ def test_production_envelope_figure(ecoli_core, tmp_path):
 
 
 def test_fseof_figure(ecoli_core, tmp_path):
-    result = fseof(ecoli_core, SUCC, BIOMASS, n_steps=8, aerobic=False)
+    result = fseof(ecoli_core, SUCC, BIOMASS, n_steps=8, condition=ANAEROBIC)
     fig = fseof_figure(result, top_n=5)
     ax = fig.axes[0]
     assert 1 <= len(ax.lines) <= 5
@@ -61,7 +71,7 @@ def test_fvseof_figure(ecoli_core, tmp_path):
         SUCC,
         BIOMASS,
         n_steps=4,
-        aerobic=False,
+        condition=ANAEROBIC,
         reactions=["FRD7", "PPC", "MDH", "FUM", "SUCCt3", "EX_succ_e"],
     )
     fig = fvseof_figure(result, top_n=4)
@@ -83,8 +93,8 @@ def test_flux_comparison_figure(tmp_path):
 
 def test_yield_figure(ecoli_core, tmp_path):
     yields = [
-        theoretical_yield(ecoli_core, SUCC, aerobic=True),
-        theoretical_yield(ecoli_core, SUCC, aerobic=False),
+        theoretical_yield(ecoli_core, SUCC),
+        theoretical_yield(ecoli_core, SUCC, condition=ANAEROBIC),
     ]
     fig = yield_figure(yields)
     ax = fig.axes[0]
@@ -122,8 +132,16 @@ def test_flux_response_figure_adds_a_biomass_axis_for_a_product(ecoli_core, tmp_
 
 
 def test_flux_response_figure_shades_infeasible_range(ecoli_core):
+    # An explicit window reaching past the feasible domain; the automatic range is now the
+    # exact domain, so it never leaves an infeasible point to shade.
     result = flux_response(
-        ecoli_core, "PGI", response=SUCC, biomass_fraction=0.3, n_steps=12
+        ecoli_core,
+        "PGI",
+        response=SUCC,
+        biomass_fraction=0.3,
+        target_min=-60.0,
+        target_max=20.0,
+        n_steps=12,
     )
     frame = result.to_frame()
     assert (frame["status"] != "optimal").any()

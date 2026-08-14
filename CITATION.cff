@@ -2,7 +2,12 @@ cff-version: 1.2.0
 message: "If you use CMM in published work, cite this software and the method papers listed in docs/VALIDATION.md."
 title: "CMM: Cellular Metabolic Modeling Platform"
 type: software
-version: 0.3.0
+version: 0.4.0
+# TODO(authors): replace the organization-only entry below with the manuscript's final
+# authors, each with family-names, given-names, ORCID and affiliation, before submission.
+# An organization-only author entry is not acceptable in the published record, and no names
+# have been invented here. Also add the archived release DOI (Zenodo or equivalent) as
+# `doi:` and `identifiers:` once minted, and bump `version:` to match the release tag.
 authors:
   - name: "CMM Contributors"
 repository-code: "https://github.com/jyryu3161/CMM"

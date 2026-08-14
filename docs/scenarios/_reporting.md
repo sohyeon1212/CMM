@@ -57,16 +57,25 @@ run_dir.mkdir(parents=True, exist_ok=True)
 provenance = run_provenance(
     model,
     scenario="SC-01",
-    medium="glucose_aerobic",
+    medium="glucose_anaerobic",
     product="EX_succ_e",
-    aerobic=True,
+    oxygen_bounds=(0.0, 0.0),          # the aeration, stated as bounds, not a boolean
+    substrate="EX_glc__D_e",
+    substrate_uptake=10.0,
 )
 (run_dir / "00_provenance.json").write_text(json.dumps(provenance, indent=2))
 ```
 
 This records the model SHA-256, model id, active solver, Python/CMM/COBRApy/NumPy/pandas/SciPy
-versions, and the parameters you pass. Each individual result additionally carries its own
-`result.metadata` — keep those too when a step's parameters differ from the run's.
+versions, the run timestamp, the seed, the solver version and the platform, and the parameters
+you pass. Each individual result additionally carries its own `result.metadata` — keep those
+too when a step's parameters differ from the run's.
+
+**Record the applied condition in full**, as above: the medium preset name, the oxygen exchange
+bounds, the substrate and its uptake rate, plus the medium components actually `applied` and any
+`dropped`. A result file must state its own conditions without the reader reconstructing them
+from a fingerprint. The `aerobic=True|False` shorthand was removed in 0.4.0 and must not appear
+in new provenance records.
 
 Also record, in the report if not in JSON: any method substitution forced by the solver, and
 the exact CMM version or git commit.
@@ -87,7 +96,15 @@ result.to_frame().to_csv(run_dir / "05_amplification" / "fseof_trends.csv")
 - `FseofResult.trends` and the three `FvseofResult` frames are DataFrames already.
 - Flux dicts (`FluxSolution.fluxes`, `FluxState.fluxes`) → `pd.Series(fluxes).to_csv(...)`.
 - `batch_comparison` returns a list of dataclass rows →
-  `pd.DataFrame([vars(r) for r in rows]).to_csv(...)`.
+  `pd.DataFrame([vars(r) for r in rows]).to_csv(...)`. As of 0.4.0 that is **ten** columns, not
+  seven: `objective_value` (the raw solver objective — `Σd²` for `moma_l2`, `Σ|d|` for
+  `moma_l1`, a *switch count* for `room`), `distance` (a distance only — Segrè et al. Eq. (4)'s
+  Euclidean `√(Σd²)`, `None` for ROOM), `distance_kind`, and `n_changed_reactions` replace the
+  single overloaded `distance`. **Never label a column "distance" if it holds the objective**;
+  runs before 0.4.0 did exactly that, and for `moma_l2` the two differ by a factor of about 36.
+  `FvseofResult` likewise exports `park_type` and `capacity_slope` alongside the flux frames,
+  and `FluxResponseResult.phases_frame()` exports the phase structure that replaced the
+  removed `bottleneck` field.
 
 Units, stated once in the report and never converted: flux **mmol gDW⁻¹ h⁻¹**, growth
 **h⁻¹**, molar yield **mol/mol**.

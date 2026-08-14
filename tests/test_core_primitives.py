@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+import platform
+
 import pytest
 from cmm.core import solvers
 from cmm.core.flux_state import (
@@ -123,6 +126,33 @@ def test_run_provenance_records_reproducibility_fields(branched_model):
     assert len(provenance["model_sha256"]) == 64
     assert provenance["solver"]
     assert provenance["parameters"] == {"alpha": 0.66}
+
+
+def test_run_provenance_records_time_solver_version_and_platform(branched_model):
+    provenance = run_provenance(branched_model)
+
+    stamp = datetime.fromisoformat(
+        str(provenance["timestamp_utc"]).replace("Z", "+00:00")
+    )
+    assert stamp.tzinfo is not None
+    assert stamp.utcoffset() == timedelta(0)  # UTC, not local time
+    assert provenance["solver_version"] not in ("", None)
+    assert provenance["platform"]
+    assert provenance["machine"]
+    assert provenance["python"] == platform.python_version()
+
+
+def test_run_provenance_records_the_callers_seed_and_null_when_there_is_none(
+    branched_model,
+):
+    seeded = run_provenance(branched_model, method="sampling", seed=7)
+    assert seeded["seed"] == 7
+    # Kept in parameters too, so records written before the field existed keep their shape.
+    assert seeded["parameters"]["seed"] == 7
+
+    unseeded = run_provenance(branched_model, method="fba")
+    assert unseeded["seed"] is None  # no seed invented where the method has none
+    assert "seed" not in unseeded["parameters"]
 
 
 # --- target ranking --------------------------------------------------------

@@ -48,17 +48,36 @@ the methods your scenario needs.
 **Goal.** Constrain the model to the environment the user actually means.
 
 ```python
-from cmm.core import PRESET_MEDIA, apply_medium
+from cmm.core import Condition, PRESET_MEDIA, ReactionBound, apply_medium
 
 print(sorted(PRESET_MEDIA))
-apply_medium(model, "glucose_aerobic")
+
+MEDIUM = "glucose_anaerobic"              # a scientific choice; state it in the report
+apply_medium(model, MEDIUM)
+
+CONDITION = Condition(                    # carried into every later call
+    name=MEDIUM,
+    bounds=(ReactionBound(reaction_id="EX_o2_e", lower_bound=0.0, upper_bound=0.0),),
+    notes="anaerobic: oxygen uptake closed",
+)
 ```
 
-For anaerobic work either use an anaerobic preset, pass `aerobic=False` to the
-`cmm.features.production` functions, or build a `Condition` (see `agent-reference.md` §1).
+**Set the medium and the aeration once, here, before the first solve, and pass `CONDITION` to
+every later call that accepts it.** The `aerobic=True|False` parameter was removed in 0.4.0:
+it duplicated what the medium already says, and because `optknock`/`robustknock` never accepted
+it, an `aerobic=False` argument alongside an aerobic medium silently produced an aerobic
+design inside an anaerobic run. For an aerobic run use the aerobic preset and drop the
+`bounds=` entry rather than leaving a contradicting oxygen bound behind.
 
 **Decision rule.** The medium is a scientific choice, not a default. If the user did not
-specify one, state which you applied and that results are conditional on it.
+specify one, state which you applied and that results are conditional on it. Re-take the model
+fingerprint *after* `apply_medium` — it changes with the medium, so it is evidence of which
+condition the run used.
+
+**Missing components are not silent.** A medium component with no matching exchange in the
+loaded model is recorded in provenance under `dropped`; a growth-limiting one raises rather
+than producing a quietly different experiment. Record both `applied` and `dropped`, not just
+the preset key.
 
 **Failure → action.** `apply_medium` raising on an unknown key means the preset does not
 exist; print `PRESET_MEDIA` and ask rather than inventing bounds.
@@ -97,7 +116,7 @@ target product (`SC-03` run as an essentiality study, `SC-02` run as a condition
 from cmm.features import theoretical_yield
 
 print(len(model.exchanges))
-result = theoretical_yield(model, "EX_succ_e", aerobic=True)
+result = theoretical_yield(model, "EX_succ_e", condition=CONDITION)
 print(result.status, result.molar_yield, result.exceeds_carbon_ceiling, result.co2_fixed)
 ```
 

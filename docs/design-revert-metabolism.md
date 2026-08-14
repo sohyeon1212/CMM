@@ -50,9 +50,23 @@ TS = (successful directional movement - unsuccessful directional movement)
      / steady-reaction L1 disturbance
 ```
 
-If the denominator is zero, CMM returns `0` for `0/0`, `+∞` for a beneficial nonzero
-numerator, and `-∞` for an adverse one. These cases remain sortable and are not converted to
-arbitrary finite constants.
+**The denominator is floored at the run's own `epsilon` (0.4.0).** A steady-set deviation
+smaller than the change the method itself calls significant cannot be resolved from zero, and
+dividing by it produced `±∞`. That was not a harmless edge case: on `e_coli_core` with the
+SC-02 condition pair the steady deviation is *exactly* zero for 38 of 69 solvable gene
+knockouts, so 38 candidates shared the single score `+∞` and `TargetRanking.sorted` broke the
+tie on `target_id` — the reported "top 38" was an alphabetical slice, not a ranking. The floor
+leaves the published ratio unchanged wherever the denominator is meaningful (the smallest
+non-zero steady deviation on that run is 3.93, four thousand times the floor) and orders the
+degenerate block by the amount of correct movement instead of by gene name. `0/0` is still
+exactly `0`. The cost is that a "perfect transformation" scores large rather than infinite
+(≈2.2×10⁵–4.6×10⁵ at the default `epsilon = 1e-3`); the scale is a documented function of a
+documented parameter.
+
+**Check the tie structure before quoting a top-k.** The ranking's metadata carries
+`n_distinct_scores`, `largest_tie_block` and `score_resolution` (also available from
+`cmm.features.tie_structure`) precisely so a reader can tell an ordered top-k from a slice of
+a tie block. Ties that remain are real ties in the MIQP optimum.
 
 Robust rMTA performs three candidate solves:
 
@@ -78,7 +92,13 @@ Non-optimal candidates receive `-∞`; the ranking metadata records the count. E
 The original MTA/rMTA studies construct the source model with expression contextualization
 and flux sampling. CMM's desktop workflow instead creates a deterministic source state by
 running E-Flux2 on the source expression at full objective (`objective_fraction=1.0`) and
-derives source→target directions from differential expression plus GPR logic. This is a
+derives source→target directions from differential expression plus GPR logic. The GPR rule
+there is Yizhak et al.'s own ternary rule — all genes elevated or all reduced under `AND`, at
+least one under `OR`, and **mixed ⇒ unchanged** — implemented as a two-pass binary
+decomposition and recorded as `gpr_rule = "yizhak2013_two_pass_binary"`. (Before 0.4.0 CMM used
+a signed `min`/`max` over `{−1, 0, +1}`, which disagrees with the paper's prose in 44 of 72
+label combinations and biases `AND` toward "reduced" and `OR` toward "elevated"; every MTA/rMTA
+ranking produced before 0.4.0 is affected.) Deriving the directions from expression at all is a
 documented CMM preprocessing variant; the optimization and score stages described above are
 the published formulations.
 

@@ -17,12 +17,19 @@ import io
 from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field
-from typing import Literal
+from typing import Literal, cast
 
 from cobra import Model
 
 from cmm.core import solvers
+from cmm.core.condition import Condition
 from cmm.core.provenance import run_provenance
+from cmm.features.production import (
+    _actionable_reaction,
+    _apply_condition,
+    _condition_provenance,
+    _record_condition,
+)
 
 
 @dataclass(frozen=True)
@@ -72,9 +79,12 @@ def _evaluate_design(
         ):  # NaN/infeasible/no growth
             return None
         biomass_rxn = model.reactions.get_by_id(biomass)
-        # Evaluate the product range on the *growth-optimal face*.  Allowing even 0.1% less
-        # growth can open flux states that are not growth-maximal and overstate the guaranteed
-        # product, which is precisely the quantity RobustKnock is meant to protect.
+        # Evaluate the product range on the *growth-optimal face*: exactly Tepper & Shlomi's
+        # Omega', the set of growth-maximal flux states, over which RobustKnock minimises.
+        # Relaxing the pin to a 99.9% face does not overstate the guarantee - measured, it
+        # *lowers* the reported minimum every time, because a slightly sub-optimal face
+        # contains extra flux states with less product. Pinning by equality is therefore the
+        # faithful reading and the less conservative-looking one; both are reasons to keep it.
         biomass_rxn.bounds = (growth, growth)
         product_rxn = model.reactions.get_by_id(product)
         model.objective = product_rxn
@@ -99,7 +109,8 @@ def _search_designs(
     max_knockouts: int,
     max_solutions: int,
     min_growth: float,
-) -> list[tuple[str, ...]]:
+    actionable_only: bool,
+) -> tuple[list[tuple[str, ...]], int]:
     try:
         import straindesign as sd
     except (
@@ -113,7 +124,7 @@ def _search_designs(
         model.objective = model.reactions.get_by_id(product)
         model.objective_direction = "max"
         if (model.slim_optimize() or 0.0) < 1e-6:
-            return []
+            return [], 0
 
     module_type = sd.OPTKNOCK if method == "optknock" else sd.ROBUSTKNOCK
     module = sd.SDModule(
@@ -123,6 +134,20 @@ def _search_designs(
         outer_objective=product,
         constraints=[f"{biomass} >= {min_growth}"],
     )
+    search_kwargs: dict[str, object] = {}
+    n_candidates = len(model.reactions)
+    if actionable_only:
+        # Burgard et al. restrict the candidate set to central metabolism. Without any
+        # restriction the search returns designs that delete boundary reactions with no GPR
+        # (EX_co2_e, EX_ac_e, EX_for_e, EX_etoh_e, EX_lac__D_e) — not realisable as gene
+        # deletions. straindesign's ko_cost restricts candidates to the listed reactions.
+        candidates = {
+            rxn.id: 1.0
+            for rxn in model.reactions
+            if _actionable_reaction(model, rxn.id, product, biomass)
+        }
+        n_candidates = len(candidates)
+        search_kwargs["ko_cost"] = candidates
     # straindesign is chatty; silence its solver logs.
     with (
         contextlib.redirect_stdout(io.StringIO()),
@@ -133,6 +158,7 @@ def _search_designs(
             sd_modules=[module],
             max_cost=max_knockouts,
             max_solutions=max_solutions,
+            **search_kwargs,
         )
     reaction_sd = getattr(solutions, "reaction_sd", None) or []
     designs: list[tuple[str, ...]] = []
@@ -140,7 +166,7 @@ def _search_designs(
         kos = tuple(sorted(rid for rid, coeff in design.items() if coeff <= 0))
         if kos and kos not in designs:
             designs.append(kos)
-    return designs
+    return designs, n_candidates
 
 
 def _strain_design(
@@ -152,6 +178,8 @@ def _strain_design(
     max_knockouts: int,
     max_solutions: int,
     min_growth: float,
+    condition: Condition | None,
+    actionable_only: bool,
 ) -> StrainDesignResult:
     if max_knockouts < 1:
         raise ValueError("max_knockouts must be at least 1")
@@ -169,32 +197,65 @@ def _strain_design(
         max_knockouts=max_knockouts,
         max_solutions=max_solutions,
         min_growth=min_growth,
+        condition=condition.name if condition is not None else None,
+        actionable_only=actionable_only,
     )
-    ko_sets = _search_designs(
-        model,
-        product,
-        biomass,
-        method=method,
-        max_knockouts=max_knockouts,
-        max_solutions=max_solutions,
-        min_growth=min_growth,
-    )
-    evaluated = [
-        d
-        for d in (_evaluate_design(model, kos, product, biomass) for kos in ko_sets)
-        if d is not None
-    ]
+    with model:
+        _apply_condition(model, condition=condition)
+        _record_condition(provenance, _condition_provenance(model, condition))
+        ko_sets, n_candidates = _search_designs(
+            model,
+            product,
+            biomass,
+            method=method,
+            max_knockouts=max_knockouts,
+            max_solutions=max_solutions,
+            min_growth=min_growth,
+            actionable_only=actionable_only,
+        )
+        evaluated = [
+            d
+            for d in (_evaluate_design(model, kos, product, biomass) for kos in ko_sets)
+            if d is not None
+        ]
     if method == "robustknock":
         evaluated = [d for d in evaluated if d.growth_coupled]
         evaluated.sort(key=lambda d: (-d.guaranteed_product, -d.growth))
     else:
         evaluated.sort(key=lambda d: (-d.max_product, -d.growth))
+    deduplicated = _deduplicate_designs(evaluated)
+    provenance["parameters"] = {
+        **cast(dict[str, object], provenance["parameters"]),
+        "n_knockout_candidates": n_candidates,
+        "n_milp_designs": len(evaluated),
+        "n_designs_after_deduplication": len(deduplicated),
+    }
     return StrainDesignResult(
         method=method,
         product=product,
-        designs=tuple(evaluated),
+        designs=tuple(deduplicated),
         metadata=provenance,
     )
+
+
+def _deduplicate_designs(designs: Iterable[StrainDesign]) -> list[StrainDesign]:
+    """Keep the first design for each distinct knockout *set*, preserving rank order.
+
+    ``max_solutions`` caps MILP solutions, not designs: straindesign decompresses one MILP
+    solution into every member of the compressed reaction's coupled set, so the same
+    intervention comes back repeatedly under different member ids. Collapsing on the
+    knockout set as a set (order-insensitive) leaves one row per genuinely distinct design.
+    """
+
+    seen: set[frozenset[str]] = set()
+    unique: list[StrainDesign] = []
+    for design in designs:
+        key = frozenset(design.knockouts)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(design)
+    return unique
 
 
 def optknock(
@@ -205,8 +266,27 @@ def optknock(
     max_knockouts: int = 3,
     max_solutions: int = 5,
     min_growth: float = 0.05,
+    condition: Condition | None = None,
+    actionable_only: bool = True,
 ) -> StrainDesignResult:
-    """OptKnock: knockout sets that maximize the product at maximum growth (optimistic)."""
+    """OptKnock: knockout sets that maximize the product at maximum growth (optimistic).
+
+    ``condition`` states the medium and aeration the search runs under, and is recorded in
+    full in the provenance. Passing it is strongly preferred to conditioning the model
+    beforehand: these two functions previously took no condition at all and depended
+    silently on the caller's model state, which is how an aerobic design came to be
+    published as the anaerobic answer.
+
+    ``max_solutions`` caps **MILP solutions, not designs.** straindesign decompresses each
+    MILP solution into every member of the compressed reaction's coupled set, so the number
+    of designs returned is normally larger — ``max_solutions=5`` has returned 23. Designs
+    are de-duplicated by knockout set before being returned; the raw and de-duplicated
+    counts are both in the provenance.
+
+    ``actionable_only`` restricts knockout candidates to reactions that have a GPR and are
+    not boundary reactions, following Burgard et al.'s restriction to central metabolism.
+    Set it to False to allow exchange knockouts, which are not realisable as gene deletions.
+    """
 
     return _strain_design(
         model,
@@ -216,6 +296,8 @@ def optknock(
         max_knockouts=max_knockouts,
         max_solutions=max_solutions,
         min_growth=min_growth,
+        condition=condition,
+        actionable_only=actionable_only,
     )
 
 
@@ -227,8 +309,14 @@ def robustknock(
     max_knockouts: int = 3,
     max_solutions: int = 8,
     min_growth: float = 0.05,
+    condition: Condition | None = None,
+    actionable_only: bool = True,
 ) -> StrainDesignResult:
-    """RobustKnock: maximize guaranteed product over all growth-maximal flux states."""
+    """RobustKnock: maximize guaranteed product over all growth-maximal flux states.
+
+    ``condition``, ``max_solutions`` and ``actionable_only`` behave exactly as in
+    :func:`optknock`; in particular ``max_solutions`` caps MILP solutions, not designs.
+    """
 
     return _strain_design(
         model,
@@ -238,4 +326,6 @@ def robustknock(
         max_knockouts=max_knockouts,
         max_solutions=max_solutions,
         min_growth=min_growth,
+        condition=condition,
+        actionable_only=actionable_only,
     )

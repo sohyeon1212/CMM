@@ -7,6 +7,7 @@ import pytest
 # platform without it stays green instead of erroring at call time.
 pytest.importorskip("straindesign")
 
+from cmm.core.condition import Condition, ReactionBound  # noqa: E402
 from cmm.core.solvers import SolverCapabilityError  # noqa: E402
 from cmm.features.strain_design import optknock, robustknock  # noqa: E402
 
@@ -97,3 +98,76 @@ def test_strain_design_requires_milp(anaerobic_ecoli):
     with pytest.raises(SolverCapabilityError) as exc:
         optknock(anaerobic_ecoli, SUCC, max_knockouts=2)
     assert exc.value.capability == "MILP"
+
+
+def test_optknock_candidate_filter_excludes_unrealisable_knockouts(anaerobic_ecoli):
+    """Burgard restrict candidates to central metabolism; CMM did not.
+
+    Without the filter the search returns designs deleting boundary reactions with no GPR
+    (``EX_co2_e``, ``EX_ac_e``, ``EX_for_e``, ``EX_lac__D_e``), which cannot be realised as
+    gene deletions. ``_actionable_reaction`` already existed in ``production.py`` and was
+    simply not applied here.
+    """
+
+    result = optknock(anaerobic_ecoli, SUCC, max_knockouts=3, max_solutions=5)
+    assert result.designs
+    for design in result.designs:
+        for rid in design.knockouts:
+            reaction = anaerobic_ecoli.reactions.get_by_id(rid)
+            assert not reaction.boundary, f"{rid} is an exchange reaction"
+            assert reaction.genes, f"{rid} has no GPR"
+    assert result.metadata["parameters"]["actionable_only"] is True
+    assert result.metadata["parameters"]["n_knockout_candidates"] < len(
+        anaerobic_ecoli.reactions
+    )
+
+
+def test_optknock_candidate_filter_can_be_opted_out(anaerobic_ecoli):
+    unfiltered = optknock(
+        anaerobic_ecoli,
+        SUCC,
+        max_knockouts=3,
+        max_solutions=5,
+        actionable_only=False,
+    )
+    filtered = optknock(anaerobic_ecoli, SUCC, max_knockouts=3, max_solutions=5)
+    assert unfiltered.metadata["parameters"]["n_knockout_candidates"] == len(
+        anaerobic_ecoli.reactions
+    )
+    # The opt-out is what restores the exchange knockouts, so it must return strictly more.
+    assert len(unfiltered.designs) > len(filtered.designs)
+    assert any(
+        anaerobic_ecoli.reactions.get_by_id(rid).boundary
+        for design in unfiltered.designs
+        for rid in design.knockouts
+    )
+
+
+def test_optknock_designs_are_deduplicated_by_knockout_set(anaerobic_ecoli):
+    """``max_solutions`` caps MILP solutions, not designs - so designs must be collapsed."""
+
+    result = optknock(anaerobic_ecoli, SUCC, max_knockouts=3, max_solutions=5)
+    knockout_sets = [frozenset(d.knockouts) for d in result.designs]
+    assert len(knockout_sets) == len(set(knockout_sets))
+    parameters = result.metadata["parameters"]
+    assert parameters["n_designs_after_deduplication"] == len(result.designs)
+    assert parameters["n_milp_designs"] >= parameters["n_designs_after_deduplication"]
+
+
+def test_strain_design_accepts_and_records_a_condition(ecoli_core):
+    """optknock/robustknock took no condition and depended on the caller's model state."""
+
+    condition = Condition(
+        name="anaerobic",
+        bounds=(ReactionBound("EX_o2_e", lower_bound=0.0),),
+    )
+    before = ecoli_core.reactions.EX_o2_e.lower_bound
+    result = optknock(
+        ecoli_core, SUCC, max_knockouts=3, max_solutions=3, condition=condition
+    )
+    applied = result.metadata["parameters"]["applied_condition"]
+    assert applied["condition"] == "anaerobic"
+    assert applied["aerobic"] is False
+    assert applied["oxygen_exchange"]["lower_bound"] == pytest.approx(0.0)
+    assert ecoli_core.reactions.EX_o2_e.lower_bound == before  # model left untouched
+    assert result.designs

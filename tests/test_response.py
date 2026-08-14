@@ -72,9 +72,16 @@ def test_biomass_fraction_holds_growth_across_the_scan(ecoli_core):
 
 
 def test_infeasible_points_are_reported_not_raised(ecoli_core):
-    # A 30% growth floor is unreachable at the extremes of the PGI range.
+    # An explicit window wider than the network can reach: the levels the model cannot
+    # satisfy are kept as rows, not raised.
     result = flux_response(
-        ecoli_core, "PGI", response=SUCC, biomass_fraction=0.3, n_steps=12
+        ecoli_core,
+        "PGI",
+        response=SUCC,
+        biomass_fraction=0.3,
+        target_min=-60.0,
+        target_max=20.0,
+        n_steps=12,
     )
     frame = result.to_frame()
     infeasible = frame[frame["status"] != "optimal"]
@@ -87,39 +94,141 @@ def test_infeasible_points_are_reported_not_raised(ecoli_core):
     assert window[0] > frame["target_flux"].min()
 
 
-def test_bottleneck_found_on_a_declining_curve(ecoli_core):
+def test_auto_range_spends_no_point_on_an_infeasible_solve(ecoli_core):
+    # The growth floor is applied before the scan range is chosen, so the automatic grid
+    # lies entirely inside the feasible domain instead of overhanging it.
+    result = flux_response(
+        ecoli_core, O2, response=SUCC, biomass_fraction=0.3, n_steps=20
+    )
+    assert all(point.feasible for point in result.points)
+
+
+def test_feasible_range_matches_fva_and_ignores_n_steps(ecoli_core):
+    from cobra.flux_analysis import flux_variability_analysis
+
+    floor = 0.3 * ecoli_core.slim_optimize()
+    with ecoli_core as model:
+        biomass = model.reactions.get_by_id(BIOMASS)
+        biomass.bounds = (max(biomass.lower_bound, floor), biomass.upper_bound)
+        table = flux_variability_analysis(
+            model,
+            reaction_list=[model.reactions.get_by_id("PGI")],
+            fraction_of_optimum=0.0,
+            processes=1,
+        )
+    expected = (float(table.loc["PGI", "minimum"]), float(table.loc["PGI", "maximum"]))
+
+    for n_steps in (6, 20, 160):
+        result = flux_response(
+            ecoli_core, "PGI", response=SUCC, biomass_fraction=0.3, n_steps=n_steps
+        )
+        window = result.feasible_range()
+        assert window is not None
+        assert window[0] == pytest.approx(expected[0], abs=1e-6)
+        assert window[1] == pytest.approx(expected[1], abs=1e-6)
+
+
+def test_response_limit_found_on_a_declining_curve(ecoli_core):
     result = flux_response(ecoli_core, O2, n_steps=30)
-    bottleneck = result.bottleneck
-    # Growth collapses as oxygen uptake is forced beyond the optimum.
-    assert bottleneck.found is True
-    assert bottleneck.steepest_decline is not None and bottleneck.steepest_decline < 0
-    assert bottleneck.sensitivity == pytest.approx(abs(bottleneck.steepest_decline))
-    low, high = bottleneck.decline_interval
-    assert low < bottleneck.target_flux < high
+    limit = result.limit
+    # Growth falls away once oxygen uptake is forced above the optimum (~ -21.8).
+    assert limit.found is True
+    assert limit.target_flux == pytest.approx(-21.8, abs=0.1)
+    assert limit.shadow_price_after is not None and limit.shadow_price_after < 0
+    assert limit.shadow_price_before is not None
+    # Concavity: the shadow price only ever falls.
+    assert limit.shadow_price_before > limit.shadow_price_after
+    # The reported location is a phase boundary, and the phases tile the feasible domain.
+    assert any(
+        phase.target_low == pytest.approx(limit.target_flux) for phase in result.phases
+    )
+    domain = result.feasible_range()
+    assert domain is not None
+    assert result.phases[0].target_low == pytest.approx(domain[0])
+    assert result.phases[-1].target_high == pytest.approx(domain[1])
 
 
-def test_bottleneck_absent_when_the_response_never_declines(ecoli_core):
-    result = flux_response(ecoli_core, "PGI", response=SUCC, n_steps=10)
-    assert result.bottleneck.found is False
-    assert "never declines" in result.bottleneck.message
+@pytest.mark.parametrize("target", ["PGI", "PPC", "CS", "EX_o2_e"])
+def test_response_limit_does_not_move_with_n_steps(ecoli_core, target):
+    """The regression the old finite-difference detector could not pass.
+
+    Its reported location moved by up to 29.5 flux units over this range of ``n_steps``
+    and its ``found`` flag inverted; a shadow-price phase boundary is a property of the
+    network, so it must not move at all beyond solver tolerance.
+    """
+
+    located = []
+    for n_steps in (6, 20, 160):
+        result = flux_response(
+            ecoli_core, target, response=SUCC, biomass_fraction=0.3, n_steps=n_steps
+        )
+        assert result.limit.found is True
+        located.append(result.limit.target_flux)
+    assert max(located) - min(located) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_shadow_price_at_reads_the_phase_structure(ecoli_core):
+    result = flux_response(ecoli_core, O2, n_steps=6)
+    limit = result.limit
+    assert limit.found is True and limit.target_flux is not None
+    # Just past the limit the response is falling at the reported rate.
+    inside = 0.5 * (result.phases[-1].target_low + result.phases[-1].target_high)
+    assert result.shadow_price_at(inside) == pytest.approx(
+        result.phases[-1].shadow_price
+    )
+    with pytest.raises(ValueError, match="outside the feasible domain"):
+        result.shadow_price_at(1e6)
+
+
+def test_phases_frame_exports_the_phase_table(ecoli_core):
+    result = flux_response(ecoli_core, O2, n_steps=6)
+    frame = result.phases_frame()
+    assert list(frame.columns) == [
+        "target_low",
+        "target_high",
+        "response_low",
+        "response_high",
+        "shadow_price",
+    ]
+    assert len(frame) == len(result.phases)
+    # Concavity of an LP optimal-value function: the shadow price is non-increasing.
+    prices = frame["shadow_price"].tolist()
+    assert prices == sorted(prices, reverse=True)
 
 
 def test_flat_response_is_reported_as_insensitive(branched_model):
     # R3 and R2 are parallel routes to the same product, so forcing flux through R3
     # changes nothing about achievable biomass: a genuinely insensitive reaction.
     result = flux_response(branched_model, "R3", n_steps=6)
-    assert result.bottleneck.found is False
-    assert "insensitive" in result.bottleneck.message
+    assert result.limit.found is False
+    assert "insensitive" in result.limit.message
     responses = [p.response_flux for p in result.feasible_points()]
     assert max(responses) == pytest.approx(min(responses), abs=1e-9)
 
 
 def test_competing_reaction_declines_the_response(toy_model):
     # PRODUCT and BIOMASS draw on the same metabolite, so every unit forced through
-    # PRODUCT costs a unit of biomass — a constant, detectable decline.
+    # PRODUCT costs a unit of biomass — a constant, exact slope of -1.
     result = flux_response(toy_model, "PRODUCT", response="BIOMASS", n_steps=6)
-    assert result.bottleneck.found is True
-    assert result.bottleneck.steepest_decline == pytest.approx(-1.0, abs=1e-6)
+    assert result.limit.found is True
+    assert result.limit.shadow_price_after == pytest.approx(-1.0, abs=1e-9)
+    # A single linear piece over the whole domain: the limit is its lower end.
+    assert len(result.phases) == 1
+    assert result.limit.target_flux == pytest.approx(result.phases[0].target_low)
+
+
+def test_bottleneck_is_gone_from_the_shipped_surface(toy_model):
+    """0.4.0 removes ``ResponseBottleneck`` and the deprecated ``.bottleneck`` shim."""
+
+    import cmm.features as features
+
+    result = flux_response(toy_model, "PRODUCT", response="BIOMASS", n_steps=6)
+    with pytest.raises(AttributeError):
+        result.bottleneck
+    assert not hasattr(features, "ResponseBottleneck")
+    # The scalar it used to convey is served exactly by the shadow-price structure.
+    assert result.limit.found is True
+    assert result.limit.shadow_price_after == pytest.approx(-1.0, abs=1e-9)
 
 
 def test_condition_is_applied_and_restored(ecoli_core):

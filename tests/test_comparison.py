@@ -110,6 +110,61 @@ def test_l1_moma_runs_as_lp(branched_model):
     assert branched_model.slim_optimize() == pytest.approx(10, abs=1e-6)
 
 
+def test_moma_l2_distance_is_the_root_of_the_qp_objective(branched_model):
+    """Segrè et al. Eq. (4) is D = sqrt(Sum d^2); the QP objective is the sum itself."""
+
+    import math
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    pert = reaction_perturbations(branched_model, ["R2"])[0]
+    with apply_perturbation(branched_model, pert):
+        result = moma(branched_model, reference, linear=False)
+    assert result.distance_kind == "euclidean_l2"
+    assert result.n_changed_reactions is None
+    assert result.objective_value > result.distance  # the sum is the square of the root
+    assert result.distance == pytest.approx(math.sqrt(result.objective_value))
+    # And the root is the Euclidean distance recomputed from the returned flux vector.
+    recomputed = math.sqrt(
+        sum(
+            (result.fluxes[r.id] - reference.get(r.id)) ** 2
+            for r in branched_model.reactions
+        )
+    )
+    assert result.distance == pytest.approx(recomputed, abs=1e-6)
+
+
+def test_moma_l1_distance_is_the_lp_objective(branched_model):
+    reference = reference_state_pfba(branched_model, name="wt")
+    pert = reaction_perturbations(branched_model, ["R2"])[0]
+    with apply_perturbation(branched_model, pert):
+        result = moma(branched_model, reference, linear=True)
+    assert result.distance_kind == "l1"
+    assert result.n_changed_reactions is None
+    assert result.distance == pytest.approx(result.objective_value)
+    recomputed = sum(
+        abs(result.fluxes[r.id] - reference.get(r.id)) for r in branched_model.reactions
+    )
+    assert result.distance == pytest.approx(recomputed, abs=1e-6)
+
+
+def test_comparison_records_its_reference(branched_model):
+    reference = reference_state_pfba(branched_model, name="wt")
+    result = moma(branched_model, reference, linear=False)
+    assert result.metadata["reference"] == "wt"
+    assert result.metadata["reference_provenance"] == "pfba"
+
+
+def test_infeasible_moma_keeps_the_distance_labelling(branched_model):
+    reference = reference_state_pfba(branched_model, name="wt")
+    with branched_model:
+        branched_model.reactions.SUP_A.bounds = (5.0, 5.0)
+        branched_model.reactions.R1.bounds = (0.0, 0.0)
+        result = moma(branched_model, reference, linear=False)
+    assert result.status == "infeasible"
+    assert result.distance_kind == "euclidean_l2"
+    assert result.distance != result.distance  # NaN: no solution, not "zero distance"
+
+
 def test_moma_zero_distance_without_perturbation(branched_model):
     reference = reference_state_pfba(branched_model, name="wt")
     result = moma(branched_model, reference, linear=False)
@@ -126,9 +181,54 @@ def test_room_counts_changed_reactions(branched_model):
         result = room(branched_model, reference)
     assert result.status == "optimal"
     assert result.method == "room"
+    # ROOM's objective is a switch count, not a distance, so it is not reported as one.
+    assert result.distance is None
+    assert result.distance_kind == "none"
     # Rerouting changes R2 (off), R3 (on), R5 (on): a small, positive switch count.
-    assert result.distance >= 2
+    assert result.n_changed_reactions >= 2
+    assert result.n_changed_reactions == pytest.approx(result.objective_value)
     assert result.fluxes["R3"] > 1.0
+
+
+def test_room_tolerance_presets_are_shlomis_two_pairs(branched_model):
+    from cmm.features.comparison import ROOM_TOLERANCES
+
+    assert ROOM_TOLERANCES["flux_prediction"] == (0.03, 1e-3)
+    assert ROOM_TOLERANCES["lethality"] == (0.1, 1e-2)
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    pert = reaction_perturbations(branched_model, ["R2"])[0]
+    with apply_perturbation(branched_model, pert):
+        default = room(branched_model, reference)
+        lethality = room(branched_model, reference, use_case="lethality")
+        override = room(branched_model, reference, use_case="lethality", delta=0.5)
+    assert (default.metadata["delta"], default.metadata["epsilon"]) == (0.03, 1e-3)
+    assert (lethality.metadata["delta"], lethality.metadata["epsilon"]) == (0.1, 1e-2)
+    # An explicit value wins over the preset, and only the one that was given.
+    assert (override.metadata["delta"], override.metadata["epsilon"]) == (0.5, 1e-2)
+
+    with pytest.raises(ValueError, match="unknown ROOM use case"):
+        room(branched_model, reference, use_case="lethal")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="non-negative"):
+        room(branched_model, reference, delta=-1.0)
+
+
+def test_batch_screen_defaults_to_the_lethality_tolerances(branched_model):
+    from cmm.features.comparison import batch_comparison, knockout_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    single = knockout_comparison(branched_model, reference, ["R2"], method="room")
+    rows = batch_comparison(
+        branched_model,
+        reference,
+        reaction_perturbations(branched_model, ["R2"]),
+        method="room",
+    )
+    # A named single knockout is a flux prediction; a screen asks about lethality.
+    assert single.metadata["room_use_case"] == "flux_prediction"
+    assert rows[0].distance is None
+    assert rows[0].distance_kind == "none"
+    assert rows[0].n_changed_reactions >= 1
 
 
 # --- gene / multi / batch knockouts ----------------------------------------
@@ -204,3 +304,33 @@ def test_batch_comparison_ranks_targets(branched_model):
     assert rows["g2"].objective == pytest.approx(6.0, abs=1e-6)
     assert rows["g2"].kind == "gene"
     assert rows["g2"].n_reactions == 1
+
+
+def test_gene_perturbations_report_what_they_dropped(branched_model):
+    from cmm.features._perturbation import (
+        PerturbationList,
+        gene_perturbations,
+        perturbation_provenance,
+        reaction_perturbations,
+    )
+
+    # Give the fixture a gene that controls nothing, so there is something to drop.
+    branched_model.reactions.SUP_A.gene_reaction_rule = "g1 or g_inert"
+    perts = gene_perturbations(branched_model)
+    assert isinstance(perts, PerturbationList)
+    assert "g_inert" in perts.inert_dropped
+    assert perts.n_inert_dropped == 1
+    assert {p.target_id for p in perts}.isdisjoint(perts.inert_dropped)
+    provenance = perts.provenance()
+    assert provenance["n_perturbations"] == len(perts)
+    assert provenance["n_inert_dropped"] == 1
+    assert provenance["n_candidates_considered"] == len(branched_model.genes)
+
+    # include_inert keeps them, and then nothing is reported as dropped.
+    kept = gene_perturbations(branched_model, include_inert=True)
+    assert "g_inert" in {p.target_id for p in kept}
+    assert kept.n_inert_dropped == 0
+
+    # Reaction knockouts are never inert, and a plain sequence reports None rather than 0.
+    assert reaction_perturbations(branched_model).n_inert_dropped == 0
+    assert perturbation_provenance(list(perts))["n_inert_dropped"] is None

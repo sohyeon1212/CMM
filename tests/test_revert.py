@@ -195,3 +195,87 @@ def test_rmta_matches_official_cobra_toolbox_positive_targets(published_mta_mode
     )
     reaction_scores = {target.target_id: target.score for target in reaction_ranking}
     assert reaction_scores["r3"] > 0
+
+
+# --- score, provenance and labelling (round 2) ------------------------------
+
+
+def test_transformation_score_is_finite_when_nothing_steady_moves(branched_model):
+    """The published ratio divides by the steady-set deviation, which is often exactly 0."""
+
+    reference, direction = _setup(branched_model)
+    target_rxns = [r.id for r in branched_model.reactions]
+    # A flux vector that moves only reactions with a direction, and moves them the right way.
+    fluxes = {rid: reference.get(rid) for rid in target_rxns}
+    moved = next(rid for rid in target_rxns if direction.get(rid, 0) != 0)
+    fluxes[moved] = reference.get(moved) + direction.get(moved) * 2.0
+
+    score = revert_module._transformation_score(
+        fluxes, reference, direction, target_rxns, steady_floor=1e-3
+    )
+    assert score == pytest.approx(2.0 / 1e-3)  # finite, and ordered by how far it moved
+    # Twice the movement scores twice as high, which +inf could not express.
+    fluxes[moved] = reference.get(moved) + direction.get(moved) * 4.0
+    assert revert_module._transformation_score(
+        fluxes, reference, direction, target_rxns, steady_floor=1e-3
+    ) == pytest.approx(4.0 / 1e-3)
+    # No movement at all is still exactly zero, not 0/0.
+    assert (
+        revert_module._transformation_score(
+            {rid: reference.get(rid) for rid in target_rxns},
+            reference,
+            direction,
+            target_rxns,
+        )
+        == 0.0
+    )
+
+
+def test_prepared_direction_carries_the_direction_provenance(branched_model):
+    reference, direction = _setup(branched_model)
+    target_rxns = [r.id for r in branched_model.reactions]
+    prepared = revert_module._prepared_direction(
+        branched_model, reference, direction, target_rxns, reverse=True
+    )
+    # The GPR rule that produced the direction set must survive the worst-case F/B swap.
+    assert prepared.metadata["gpr_rule"] == direction.metadata["gpr_rule"]
+    assert prepared.metadata["reversed"] is True
+    assert "n_impossible_masked" in prepared.metadata
+
+
+def test_revert_provenance_reports_what_was_skipped_and_how_tied(branched_model):
+    reference, direction = _setup(branched_model)
+    ranking = revert_targets(
+        branched_model, None, reference, direction, method="rmta", perturbation="gene"
+    )
+    metadata = ranking.metadata
+    assert metadata["direction_provenance"]["gpr_rule"] == "yizhak2013_two_pass_binary"
+    assert metadata["n_perturbations"] == len(ranking)
+    assert (
+        metadata["n_inert_dropped"] == 0
+    )  # every gene in this fixture blocks a reaction
+    assert metadata["n_candidates_considered"] == len(branched_model.genes)
+    assert 1 <= metadata["n_distinct_scores"] <= len(ranking)
+    assert metadata["largest_tie_block"] >= 1
+    assert metadata["score_resolution"] == pytest.approx(
+        metadata["n_distinct_scores"] / len(ranking)
+    )
+
+
+def test_continuous_heuristic_marks_its_own_csv(branched_model):
+    reference, direction = _setup(branched_model)
+    continuous = revert_targets(
+        branched_model,
+        None,
+        reference,
+        direction,
+        method="rmta_continuous",
+        perturbation="gene",
+    )
+    published = revert_targets(
+        branched_model, None, reference, direction, method="rmta", perturbation="gene"
+    )
+    # A bare to_frame().to_csv() of the heuristic must not read as an rMTA result.
+    assert "continuous_heuristic_not_rmta" in continuous.to_frame().columns
+    assert (continuous.to_frame()["continuous_heuristic_not_rmta"] == 1.0).all()
+    assert "continuous_heuristic_not_rmta" not in published.to_frame().columns

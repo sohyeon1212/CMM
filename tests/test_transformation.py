@@ -67,3 +67,44 @@ def test_unknown_perturbation_raises(branched_model):
         transformation_targets(
             branched_model, source, target, method="moma", perturbation="bogus"
         )
+
+
+# --- provenance and labelling (round 2) ------------------------------------
+
+
+def test_both_paths_record_the_two_states_they_ran_between(branched_model):
+    source, target = _states(branched_model)
+    for method, formulation in (
+        ("moma", "yizhak_2013_moma_baseline"),
+        ("mta", "yizhak_2013_mta_with_flux_state_directions"),
+    ):
+        ranking = transformation_targets(branched_model, source, target, method=method)
+        metadata = ranking.metadata
+        # Without the target-state identity an `mta` run is indistinguishable from a
+        # revert_targets run, and the `moma` path used to carry no provenance at all.
+        assert metadata["source"] == "A"
+        assert metadata["target"] == "B"
+        assert metadata["transformation_method"] == method
+        # The optimisation is Yizhak's; the direction set is not derived the published way,
+        # so the tag inherited from revert_targets would overstate the correspondence.
+        assert metadata["formulation"] == formulation
+
+
+def test_moma_path_carries_run_provenance_and_tie_structure(branched_model):
+    source, target = _states(branched_model)
+    ranking = transformation_targets(branched_model, source, target, method="moma")
+    metadata = ranking.metadata
+    assert len(metadata["model_sha256"]) == 64
+    assert metadata["parameters"]["method"] == "transformation_targets"
+    assert metadata["n_perturbations"] == len(ranking)
+    assert metadata["n_inert_dropped"] == 0
+    assert metadata["n_distinct_scores"] >= 1
+    assert metadata["largest_tie_block"] >= 1
+
+
+def test_direction_from_states_labels_its_own_rule():
+    source = FluxState({"R1": 10.0}, name="A")
+    target = FluxState({"R1": 0.0}, name="B")
+    direction = direction_from_states(source, target)
+    assert direction.metadata["direction_rule"] == "flux_state_difference"
+    assert direction.metadata["from"] == "A" and direction.metadata["to"] == "B"
