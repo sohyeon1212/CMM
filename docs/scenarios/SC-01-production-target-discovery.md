@@ -388,12 +388,12 @@ Run a single-deletion screen instead. It finds candidates, not designs.
 ```python
 from cmm.features import batch_comparison, gene_perturbations
 
-rows = batch_comparison(
+result = batch_comparison(
     model, references["pfba"], gene_perturbations(model),
     method="moma_l1",                       # LP; moma_l2 needs QP, room needs MILP
     product_reaction=PRODUCT,
 )
-screen = pd.DataFrame([vars(r) for r in rows])
+screen = result.to_frame()                  # and save result.metadata beside the CSV
 ```
 
 **Decision rule.** A candidate must satisfy all three: `status == "optimal"` (not lethal),

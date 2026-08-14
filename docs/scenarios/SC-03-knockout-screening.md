@@ -93,17 +93,26 @@ if you need to compare — never mix references within one table.
 **Call.**
 
 ```python
-import pandas as pd
+import json
 from cmm.features import batch_comparison, gene_perturbations, reaction_perturbations
 
 perturbations = gene_perturbations(model)        # or reaction_perturbations(model)
-rows = batch_comparison(
+screen = batch_comparison(
     model, reference, perturbations,
     method="moma_l2",                            # moma_l1 (LP) / room (MILP)
     product_reaction=PRODUCT,                    # omit if no product
 )
-table = pd.DataFrame([vars(r) for r in rows])
+table = screen.to_frame()
+provenance = screen.metadata                     # the whole screen's run record
 ```
+
+**Save the provenance with the table.** `screen.metadata` is a `run_provenance` block — model
+fingerprint, UTC timestamp, solver and solver version, platform, package versions, every
+parameter, the reference state's identity, and (for `room`) the tolerance pair — plus what the
+enumeration covered: `n_perturbations`, `n_inert_dropped` and `n_candidates_considered`.
+`gene_perturbations` omits genes whose deletion blocks no reaction (**66 of 137 on
+`e_coli_core`**), so without those counts the screen silently understates its own coverage.
+Write it next to the CSV: `json.dumps(screen.metadata, indent=2, default=str)`.
 
 **Outputs.** `target_id | kind | status | objective_value | distance | distance_kind |
 n_changed_reactions | objective | n_reactions | product_flux` — ten columns as of 0.4.0, which

@@ -9,20 +9,30 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 from cobra import Model
 
+from cmm.core.provenance import run_provenance
 from cmm.omics.expression import OmicsFluxResult, integrate_expression
 
 
 @dataclass(frozen=True)
 class ConditionFluxes:
-    """Per-condition predicted flux distributions from one expression table."""
+    """Per-condition predicted flux distributions from one expression table.
+
+    ``metadata`` is the run provenance of the multi-condition job as a whole: one
+    :func:`~cmm.core.provenance.run_provenance` block for the model every condition was solved
+    on, plus the condition names and the integration method. Each condition's own solve keeps
+    its own block under ``results[condition].metadata``, so a single condition's numbers stay
+    traceable when they are lifted out of the container. Save ``metadata`` alongside any CSV
+    of the fluxes.
+    """
 
     method: str
     results: dict[str, OmicsFluxResult]
+    metadata: dict[str, object] = field(default_factory=dict)
 
     def conditions(self) -> tuple[str, ...]:
         return tuple(self.results.keys())
@@ -94,6 +104,16 @@ def predict_condition_fluxes(
     ]
     if missing:
         raise KeyError(f"unknown condition columns: {missing}")
+    # Fingerprint the model before the per-condition solves: each runs inside its own
+    # ``with model:`` block, so this is the one model state every condition was solved on.
+    provenance = run_provenance(
+        model,
+        method="predict_condition_fluxes",
+        integration_method=method,
+        conditions=tuple(str(condition) for condition in columns),
+        n_genes=int(expression.shape[0]),
+        **kwargs,
+    )
     results: dict[str, OmicsFluxResult] = {}
     for condition in columns:
         gene_expression = {
@@ -104,7 +124,19 @@ def predict_condition_fluxes(
         results[condition] = integrate_expression(
             model, gene_expression, method=method, **kwargs
         )
-    return ConditionFluxes(method=method, results=results)
+    return ConditionFluxes(
+        method=method,
+        results=results,
+        metadata={
+            **provenance,
+            "integration_method": method,
+            "conditions": tuple(str(condition) for condition in columns),
+            "n_conditions": len(columns),
+            "n_nonoptimal": sum(
+                1 for result in results.values() if result.status != "optimal"
+            ),
+        },
+    )
 
 
 def flux_log_change(

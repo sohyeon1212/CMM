@@ -95,8 +95,11 @@ result.to_frame().to_csv(run_dir / "05_amplification" / "fseof_trends.csv")
   directly.
 - `FseofResult.trends` and the three `FvseofResult` frames are DataFrames already.
 - Flux dicts (`FluxSolution.fluxes`, `FluxState.fluxes`) → `pd.Series(fluxes).to_csv(...)`.
-- `batch_comparison` returns a list of dataclass rows →
-  `pd.DataFrame([vars(r) for r in rows]).to_csv(...)`. As of 0.4.0 that is **ten** columns, not
+- `batch_comparison` returns a `BatchComparisonResult` — a list of dataclass rows that also
+  carries the screen's provenance → `screen.to_frame().to_csv(...)`, and write
+  `screen.metadata` beside it as JSON (it is the only copy: the rows carry numbers, the
+  container carries the run). `pd.DataFrame([vars(r) for r in screen])` still works and gives
+  the same frame. As of 0.4.0 that is **ten** columns, not
   seven: `objective_value` (the raw solver objective — `Σd²` for `moma_l2`, `Σ|d|` for
   `moma_l1`, a *switch count* for `room`), `distance` (a distance only — Segrè et al. Eq. (4)'s
   Euclidean `√(Σd²)`, `None` for ROOM), `distance_kind`, and `n_changed_reactions` replace the

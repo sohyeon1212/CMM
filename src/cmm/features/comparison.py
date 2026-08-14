@@ -41,8 +41,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass, field, fields
+from typing import Any, Literal
 
 import pandas as pd
 from cobra import Model
@@ -53,9 +53,10 @@ from cobra.flux_analysis import room as _cobra_room
 
 from cmm.core import solvers
 from cmm.core.flux_state import FluxState, Provenance
+from cmm.core.provenance import run_provenance
 from cmm.core.simulation import fba as _fba
 from cmm.core.simulation import pfba as _pfba
-from cmm.features._perturbation import Perturbation
+from cmm.features._perturbation import Perturbation, perturbation_provenance
 
 ComparisonMethod = Literal["moma_l1", "moma_l2", "room"]
 ReferenceMethod = Literal["fba", "pfba", "lad", "eflux2"]
@@ -211,6 +212,64 @@ def _reference_metadata(reference: FluxState) -> dict[str, object]:
     }
 
 
+def _solve_metadata(
+    model: Model,
+    reference: FluxState,
+    *,
+    method: ComparisonMethod,
+    knockouts: Sequence[str] = (),
+    **parameters: Any,
+) -> dict[str, object]:
+    """Full :func:`~cmm.core.provenance.run_provenance` block for one reference-distance solve.
+
+    The fingerprint is taken from ``model`` as it stands at call time, so a solve reached
+    through :func:`knockout_comparison` records the *perturbed* model — the model actually
+    handed to the solver — rather than the wild type it was derived from. ``knockouts`` names
+    the reactions that were forced to zero, so the perturbation is readable without
+    re-deriving it from the fingerprint.
+
+    MOMA and ROOM are deterministic given the model, the reference and the tolerances, so
+    ``seed`` is recorded as ``None`` (JSON ``null``) rather than invented; the reference's own
+    identity keys are preserved alongside the block.
+    """
+
+    return {
+        **run_provenance(
+            model, method=method, knockouts=tuple(knockouts), **parameters
+        ),
+        **_reference_metadata(reference),
+    }
+
+
+def _room_metadata(
+    model: Model,
+    reference: FluxState,
+    *,
+    linear: bool,
+    use_case: RoomUseCase,
+    delta: float,
+    epsilon: float,
+    knockouts: Sequence[str] = (),
+) -> dict[str, object]:
+    """ROOM's provenance: the shared block plus the tolerance pair that produced the count."""
+
+    return {
+        **_solve_metadata(
+            model,
+            reference,
+            method="room",
+            knockouts=knockouts,
+            linear=linear,
+            room_use_case=use_case,
+            delta=delta,
+            epsilon=epsilon,
+        ),
+        "room_use_case": use_case,
+        "delta": delta,
+        "epsilon": epsilon,
+    }
+
+
 def moma(
     model: Model, reference: FluxState, *, linear: bool = False
 ) -> ComparisonResult:
@@ -220,10 +279,26 @@ def moma(
     reports the Euclidean distance of Eq. (4). ``linear=True`` solves the linear variant as
     implemented in COBRApy (LP, runs on any solver) and reports the L1 distance; the 2002
     paper defines no such variant.
+
+    ``result.metadata`` carries the full run provenance of the model as handed to the solver,
+    plus the identity of the reference state.
     """
 
     method: ComparisonMethod = "moma_l1" if linear else "moma_l2"
-    metadata = _reference_metadata(reference)
+    metadata = _solve_metadata(model, reference, method=method, linear=linear)
+    return _moma(model, reference, linear=linear, metadata=metadata)
+
+
+def _moma(
+    model: Model,
+    reference: FluxState,
+    *,
+    linear: bool,
+    metadata: dict[str, object],
+) -> ComparisonResult:
+    """MOMA's solve, on a metadata block the caller has already built."""
+
+    method: ComparisonMethod = "moma_l1" if linear else "moma_l2"
     if not linear:
         solvers.require("QP", model.solver.interface, feature="L2 MOMA")
     # COBRApy/Gurobi may leak a backend ``GurobiError`` while reading primal values from an
@@ -261,7 +336,9 @@ def room(
 
     ``use_case`` selects Shlomi et al.'s published tolerance pair: ``"flux_prediction"``
     (delta 0.03, epsilon 1e-3) or ``"lethality"`` (delta 0.1, epsilon 1e-2). Passing ``delta``
-    or ``epsilon`` explicitly overrides the preset. See :data:`ROOM_TOLERANCES`.
+    or ``epsilon`` explicitly overrides the preset. See :data:`ROOM_TOLERANCES`. The resolved
+    pair and the preset it came from are recorded in ``result.metadata`` alongside the full
+    run provenance, because the pair changes the count.
 
     The solve is delegated to COBRApy, which additionally caps the perturbed objective at the
     reference objective — a constraint that is not in Shlomi et al. and is confirmed binding
@@ -269,12 +346,35 @@ def room(
     """
 
     resolved_delta, resolved_epsilon = _room_tolerances(use_case, delta, epsilon)
-    metadata: dict[str, object] = {
-        **_reference_metadata(reference),
-        "room_use_case": use_case,
-        "delta": resolved_delta,
-        "epsilon": resolved_epsilon,
-    }
+    metadata = _room_metadata(
+        model,
+        reference,
+        linear=linear,
+        use_case=use_case,
+        delta=resolved_delta,
+        epsilon=resolved_epsilon,
+    )
+    return _room(
+        model,
+        reference,
+        linear=linear,
+        delta=resolved_delta,
+        epsilon=resolved_epsilon,
+        metadata=metadata,
+    )
+
+
+def _room(
+    model: Model,
+    reference: FluxState,
+    *,
+    linear: bool,
+    delta: float,
+    epsilon: float,
+    metadata: dict[str, object],
+) -> ComparisonResult:
+    """ROOM's solve, on resolved tolerances and a metadata block the caller has built."""
+
     if not linear:
         solvers.require("MILP", model.solver.interface, feature="ROOM")
     # NaN error_value so a lethal knockout returns non-optimal instead of raising Infeasible
@@ -289,8 +389,8 @@ def room(
             model,
             solution=reference_solution,
             linear=linear,
-            delta=resolved_delta,
-            epsilon=resolved_epsilon,
+            delta=delta,
+            epsilon=epsilon,
         )
     except OptimizationError:  # infeasible perturbed model
         return _infeasible("room", metadata)
@@ -380,22 +480,91 @@ def knockout_comparison(
     ``room_use_case`` defaults to ``"flux_prediction"`` because this entry point predicts the
     flux state of one named perturbation; the batch screen in :func:`batch_comparison`
     defaults to ``"lethality"`` instead.
+
+    ``result.metadata`` carries the full run provenance of the *knocked-out* model — the model
+    the solver actually saw — with the knocked-out reaction ids under ``knockouts``.
     """
 
     if method not in {"moma_l1", "moma_l2", "room"}:
         raise ValueError("method must be 'moma_l1', 'moma_l2', or 'room'")
+    resolved_delta, resolved_epsilon = (
+        _room_tolerances(room_use_case, delta, epsilon)
+        if method == "room"
+        else (float("nan"), float("nan"))
+    )
+    return _knockout_solve(
+        model,
+        reference,
+        reaction_ids,
+        method=method,
+        room_use_case=room_use_case,
+        delta=resolved_delta,
+        epsilon=resolved_epsilon,
+        with_provenance=True,
+    )
+
+
+def _knockout_solve(
+    model: Model,
+    reference: FluxState,
+    reaction_ids: Iterable[str],
+    *,
+    method: ComparisonMethod,
+    room_use_case: RoomUseCase,
+    delta: float,
+    epsilon: float,
+    with_provenance: bool,
+) -> ComparisonResult:
+    """Solve one knockout against ``reference``, restoring the model on return.
+
+    ``with_provenance=False`` is the batch path: :func:`batch_comparison` carries one
+    provenance block for the whole screen on its result container, so building (and then
+    discarding) a per-row block would only pay for a model fingerprint per knockout —
+    measured at 1.5-2.1 ms on ``e_coli_core`` and 40 ms on *i*JO1366, i.e. about a minute of
+    pure waste on a 1,367-gene genome-scale screen. The reference identity and ROOM's tolerances
+    stay on every result either way.
+    """
+
+    knockouts = tuple(str(rid) for rid in reaction_ids)
     with model:
-        for rid in reaction_ids:
+        for rid in knockouts:
             model.reactions.get_by_id(rid).bounds = (0.0, 0.0)
         if method == "room":
-            return room(
+            metadata = (
+                _room_metadata(
+                    model,
+                    reference,
+                    linear=False,
+                    use_case=room_use_case,
+                    delta=delta,
+                    epsilon=epsilon,
+                    knockouts=knockouts,
+                )
+                if with_provenance
+                else {
+                    **_reference_metadata(reference),
+                    "room_use_case": room_use_case,
+                    "delta": delta,
+                    "epsilon": epsilon,
+                }
+            )
+            return _room(
                 model,
                 reference,
-                use_case=room_use_case,
+                linear=False,
                 delta=delta,
                 epsilon=epsilon,
+                metadata=metadata,
             )
-        return moma(model, reference, linear=method == "moma_l1")
+        linear = method == "moma_l1"
+        metadata = (
+            _solve_metadata(
+                model, reference, method=method, knockouts=knockouts, linear=linear
+            )
+            if with_provenance
+            else _reference_metadata(reference)
+        )
+        return _moma(model, reference, linear=linear, metadata=metadata)
 
 
 @dataclass(frozen=True)
@@ -420,6 +589,48 @@ class BatchComparisonRow:
     )  # target-product flux at the perturbed state (if any)
 
 
+class BatchComparisonResult(list[BatchComparisonRow]):
+    """A batch screen's rows, plus the one provenance block that covers all of them.
+
+    Behaves exactly like ``list[BatchComparisonRow]`` — iteration, ``len()``, indexing,
+    slicing and ``sorted()`` are unchanged — and adds :attr:`metadata` and :meth:`to_frame`.
+    (The same shape as :class:`~cmm.features._perturbation.PerturbationList`, which likewise
+    carries what a plain list cannot.)
+
+    **The provenance lives on the container, not on the row.** Every row of one screen shares
+    the same model, reference, method, tolerances, solver, machine and package versions; a
+    16-key block copied onto each row would be 1,367 identical copies of one fact on a
+    genome-scale gene screen, and 1,367 model fingerprints to compute. The row stays the
+    numbers; the container states the run that produced them. Save the two together::
+
+        screen = batch_comparison(model, reference, perturbations)
+        screen.to_frame().to_csv(run_dir / "batch.csv", index=False)
+        (run_dir / "batch_provenance.json").write_text(
+            json.dumps(screen.metadata, indent=2, default=str)
+        )
+
+    ``metadata["model_sha256"]`` fingerprints the screened model *before* any knockout, which
+    is the one model common to every row; each row's own solve is that model with the target's
+    reactions forced to zero. Re-run a single row through :func:`knockout_comparison` to get
+    the fingerprint of that perturbed model itself.
+    """
+
+    def __init__(
+        self,
+        rows: Iterable[BatchComparisonRow] = (),
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(rows)
+        self.metadata: dict[str, object] = dict(metadata or {})
+
+    def to_frame(self) -> pd.DataFrame:
+        """One row per scored knockout, in screen order, one column per row field."""
+
+        columns = [f.name for f in fields(BatchComparisonRow)]
+        return pd.DataFrame([vars(row) for row in self], columns=columns)
+
+
 def batch_comparison(
     model: Model,
     reference: FluxState,
@@ -431,7 +642,7 @@ def batch_comparison(
     epsilon: float | None = None,
     objective_reaction: str | None = None,
     product_reaction: str | None = None,
-) -> list[BatchComparisonRow]:
+) -> BatchComparisonResult:
     """Run MOMA/ROOM for each perturbation against one reference, returning a batch table.
 
     This is the batch perturbation-response job runner: enumerate gene or reaction knockouts
@@ -447,19 +658,56 @@ def batch_comparison(
 
     Lethal knockouts stay in the table as ``status="infeasible"`` rows with NaN fluxes — the
     essentiality result is the point of the screen, not an error to filter out.
+
+    The returned :class:`BatchComparisonResult` is a list of rows that also carries the run's
+    provenance and a ``to_frame()`` export. The provenance records what the enumeration
+    covered as well as what it ran: a :class:`~cmm.features._perturbation.PerturbationList`
+    built by ``gene_perturbations`` drops genes whose deletion blocks no reaction (66 of 137
+    on ``e_coli_core``), and ``n_inert_dropped`` / ``n_candidates_considered`` state how many,
+    so the screen's coverage is reported rather than silently understated. A plain sequence of
+    perturbations cannot know, and records ``None`` instead of a made-up zero.
     """
 
+    if method not in {"moma_l1", "moma_l2", "room"}:
+        raise ValueError("method must be 'moma_l1', 'moma_l2', or 'room'")
+    is_room = method == "room"
+    resolved_delta, resolved_epsilon = (
+        _room_tolerances(room_use_case, delta, epsilon)
+        if is_room
+        else (float("nan"), float("nan"))
+    )
     objective = objective_reaction or _objective_reaction_id(model)
+    metadata: dict[str, object] = {
+        **run_provenance(
+            model,
+            method="batch_comparison",
+            comparison_method=method,
+            room_use_case=room_use_case if is_room else None,
+            delta=resolved_delta if is_room else None,
+            epsilon=resolved_epsilon if is_room else None,
+            objective_reaction=objective,
+            product_reaction=product_reaction,
+        ),
+        **_reference_metadata(reference),
+        **perturbation_provenance(perturbations),
+        "comparison_method": method,
+        "room_use_case": room_use_case if is_room else None,
+        "delta": resolved_delta if is_room else None,
+        "epsilon": resolved_epsilon if is_room else None,
+        "objective_reaction": objective,
+        "product_reaction": product_reaction,
+    }
     rows: list[BatchComparisonRow] = []
     for pert in perturbations:
-        result = knockout_comparison(
+        result = _knockout_solve(
             model,
             reference,
             pert.reaction_ids,
             method=method,
             room_use_case=room_use_case,
-            delta=delta,
-            epsilon=epsilon,
+            delta=resolved_delta,
+            epsilon=resolved_epsilon,
+            with_provenance=False,
         )
         growth = (
             float(result.fluxes.get(objective, float("nan")))
@@ -485,4 +733,5 @@ def batch_comparison(
                 product_flux=product_flux,
             )
         )
-    return rows
+    metadata["n_rows"] = len(rows)
+    return BatchComparisonResult(rows, metadata=metadata)

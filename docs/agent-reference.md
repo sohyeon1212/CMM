@@ -271,7 +271,7 @@ knockout_comparison(model, reference, reaction_ids, *, method="moma_l2",
                     room_use_case="flux_prediction", delta=None, epsilon=None)
 batch_comparison(model, reference, perturbations, *, method="moma_l2",
                  room_use_case="lethality", delta=None, epsilon=None,
-                 objective_reaction=None, product_reaction=None)
+                 objective_reaction=None, product_reaction=None)  # -> BatchComparisonResult
 moma(model, reference, *, linear=False)
 room(model, reference, *, linear=False, use_case="flux_prediction",
      delta=None, epsilon=None)
@@ -297,6 +297,23 @@ room(model, reference, *, linear=False, use_case="flux_prediction",
   `.distance_kind`, `.n_changed_reactions`, `.objective` (growth), `.n_reactions`,
   `.product_flux` (NaN unless `product_reaction=` was given). Pass `product_reaction` whenever
   you are screening for production — without it you only learn which knockouts hurt growth.
+- **`batch_comparison` returns a `BatchComparisonResult`** — a `list` subclass, so iteration,
+  `len()`, indexing and `sorted()` are exactly as before — that adds `.to_frame()` and
+  `.metadata`. The provenance is on the container, not on the row: one screen shares one
+  model, reference, method, tolerance pair, solver and machine, so a 16-key block per row
+  would be one fact copied 1,367 times on a genome-scale gene screen. Save both:
+  `screen.to_frame().to_csv(...)` next to `json.dumps(screen.metadata, default=str)`.
+  `metadata["model_sha256"]` fingerprints the screened model *before* any knockout — the one
+  model common to every row — and `n_perturbations` / `n_inert_dropped` /
+  `n_candidates_considered` state what the enumeration covered.
+- **Every result in this family carries the full `run_provenance` block** (`timestamp_utc`,
+  `seed`, `solver`, `solver_version`, `platform`, `model_sha256`, package versions,
+  parameters) alongside `reference` / `reference_method` / `reference_provenance` and, for
+  ROOM, `room_use_case` / `delta` / `epsilon`. `seed` is `null`: MOMA and ROOM are
+  deterministic and no seed is invented. For `moma`, `room` and `knockout_comparison` the
+  fingerprint is of the model **as handed to the solver**, so a `knockout_comparison` record
+  fingerprints the knocked-out model and not the wild type, and `parameters["knockouts"]`
+  names the reactions that were forced to zero.
 - **`objective_value` and `distance` are different quantities and 0.4.0 separates them.**
   `objective_value` is the raw solver objective and means something different per method: `Σd²`
   for `moma_l2`, `Σ|d|` for `moma_l1`, and a *count of switched reactions* for `room`.

@@ -177,6 +177,7 @@ biological prediction.
 - [Scientific validation and reproducibility](docs/VALIDATION.md)
 - [MTA/rMTA design and equations](docs/design-revert-metabolism.md)
 - [Architecture and solver contracts](docs/architecture.md)
+- [Scenario figures](docs/scenario-figures.md) — what each GUI capture shows, and how to regenerate them
 - [Release changes](CHANGELOG.md)
 
 For driving CMM from an AI coding CLI (Claude Code, Codex, …):

@@ -402,6 +402,8 @@ print(knockout_comparison(model, ref, ["PFK", "TPI"], method="moma_l2").distance
 batch = batch_comparison(model, ref, gene_perturbations(model), method="moma_l2")
 for row in sorted(batch, key=lambda r: -r.distance)[:5]:            # most-disrupted first
     print(row.target_id, row.status, round(row.distance, 3), round(row.objective, 3))
+batch.to_frame().to_csv("batch_screen.csv", index=False)   # rows = the numbers
+print(batch.metadata["model_sha256"], batch.metadata["n_inert_dropped"])  # container = the run
 
 # Multi-condition omics comparison (log2 fold-change of flux magnitude)
 # preds = predict_condition_fluxes(model, expression_dataframe, method="eflux2")
@@ -442,6 +444,11 @@ QT_QPA_PLATFORM=offscreen CMM_OUTPUT_DIR=./temp_figures_new PYTHONPATH=src \
 QT_QPA_PLATFORM=offscreen CMM_OUTPUT_DIR=./temp_figures_new PYTHONPATH=src \
   .venv/bin/python -m cmm.app.genome_scale_scenario [model.xml]   # your genome-scale model
 ```
+
+The captures are not tracked in git — they are reproducible from the commands above, and a
+committed copy goes stale as soon as the code changes.
+[Scenario figures](scenario-figures.md) is the manifest: it names every figure the three
+harnesses write and what each one shows.
 
 Run the unit + scenario test suite:
 

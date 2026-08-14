@@ -206,6 +206,15 @@ flux prediction, `batch_comparison` to lethality, and every result records the p
 Explicit `delta`/`epsilon` override the preset. The choice is not cosmetic — 531 against 401
 total switches over the same 35 gene knockouts, a 24% shift in the ranking score.
 
+**Every result in this family carries the full `run_provenance` block**, alongside the
+reference identity and (for ROOM) the tolerance pair. `moma`, `room` and `knockout_comparison`
+fingerprint the model *as handed to the solver*, so a knockout's record is the fingerprint of
+the knocked-out model; `batch_comparison` carries one block for the screen on its
+`BatchComparisonResult` container, fingerprinting the model before any knockout — the one
+model every row derives from — together with what the enumeration dropped
+(`n_inert_dropped`). `seed` is recorded as `null`, because MOMA and ROOM are deterministic and
+CMM does not invent a seed where a method has none.
+
 **The reported quantity is separated from the solver objective.** `objective_value` is the raw
 objective and differs in kind per method: `Σd²` for `moma_l2`, `Σ|d|` for `moma_l1`, and a
 *count of significantly changed reactions* for ROOM. `distance` is a distance and only a

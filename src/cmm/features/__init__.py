@@ -11,6 +11,7 @@ from cmm.features._perturbation import (
 )
 from cmm.features.comparison import (
     ROOM_TOLERANCES,
+    BatchComparisonResult,
     BatchComparisonRow,
     ComparisonResult,
     batch_comparison,
@@ -96,6 +97,7 @@ __all__ = [
     "PLANNED_FEATURES",
     "EXCLUDED_FEATURES",
     "ROOM_TOLERANCES",
+    "BatchComparisonResult",
     "BatchComparisonRow",
     "CarbonUptake",
     "ComparisonResult",

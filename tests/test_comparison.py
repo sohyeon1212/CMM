@@ -334,3 +334,185 @@ def test_gene_perturbations_report_what_they_dropped(branched_model):
     # Reaction knockouts are never inert, and a plain sequence reports None rather than 0.
     assert reaction_perturbations(branched_model).n_inert_dropped == 0
     assert perturbation_provenance(list(perts))["n_inert_dropped"] is None
+
+
+# --- provenance of the perturbation-response family ------------------------
+
+
+def test_comparison_results_carry_the_full_provenance_block(branched_model):
+    """MOMA/ROOM report the same block as every other service, keeping the reference keys."""
+
+    from cmm.features.comparison import knockout_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    results = {
+        "moma_l2": moma(branched_model, reference, linear=False),
+        "moma_l1": moma(branched_model, reference, linear=True),
+        "room": room(branched_model, reference),
+        "ko_moma": knockout_comparison(
+            branched_model, reference, ["R2"], method="moma_l2"
+        ),
+        "ko_room": knockout_comparison(
+            branched_model, reference, ["R2"], method="room"
+        ),
+    }
+    for name, result in results.items():
+        metadata = result.metadata
+        for key in (
+            "timestamp_utc",
+            "seed",
+            "solver",
+            "solver_version",
+            "platform",
+            "model_sha256",
+        ):
+            assert key in metadata, f"{name} is missing {key}"
+        # Deterministic methods: the seed key is present and null, never an invented 0.
+        assert metadata["seed"] is None
+        # The reference identity is preserved, not replaced by the provenance block.
+        assert metadata["reference"] == "wt"
+        assert metadata["reference_provenance"] == "pfba"
+
+    # ROOM keeps its tolerance pair and the preset that produced it.
+    for name in ("room", "ko_room"):
+        metadata = results[name].metadata
+        assert metadata["room_use_case"] == "flux_prediction"
+        assert (metadata["delta"], metadata["epsilon"]) == (0.03, 1e-3)
+    assert results["ko_room"].metadata["parameters"]["knockouts"] == ("R2",)
+
+
+def test_knockout_comparison_fingerprints_the_model_it_actually_solved(branched_model):
+    """The recorded fingerprint is the knocked-out model's, not the wild type's."""
+
+    from cmm.core.provenance import model_fingerprint
+    from cmm.features.comparison import knockout_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    wild_type = model_fingerprint(branched_model)
+    with branched_model:
+        branched_model.reactions.R2.bounds = (0.0, 0.0)
+        perturbed = model_fingerprint(branched_model)
+
+    result = knockout_comparison(branched_model, reference, ["R2"], method="moma_l2")
+    assert result.metadata["model_sha256"] == perturbed
+    assert result.metadata["model_sha256"] != wild_type
+    # The un-knocked-out entry point still fingerprints the model it was handed.
+    assert moma(branched_model, reference).metadata["model_sha256"] == wild_type
+    # And the model is restored, so the fingerprint is stable across the call.
+    assert model_fingerprint(branched_model) == wild_type
+
+
+def test_batch_comparison_carries_one_provenance_block_for_the_screen(branched_model):
+    """The screen's provenance lives on the container; the rows stay the numbers."""
+
+    from cmm.features._perturbation import gene_perturbations
+    from cmm.features.comparison import BatchComparisonResult, batch_comparison
+
+    branched_model.reactions.SUP_A.gene_reaction_rule = "g1 or g_inert"
+    reference = reference_state_pfba(branched_model, name="wt")
+    perturbations = gene_perturbations(branched_model)
+    screen = batch_comparison(
+        branched_model, reference, perturbations, method="moma_l2"
+    )
+
+    # Still a list of rows: every caller written against the old return type keeps working.
+    assert isinstance(screen, BatchComparisonResult)
+    assert isinstance(screen, list)
+    assert len(screen) == len(perturbations)
+    assert sorted(screen, key=lambda row: row.target_id)[0].target_id == "g1"
+
+    metadata = screen.metadata
+    for key in (
+        "timestamp_utc",
+        "seed",
+        "solver",
+        "solver_version",
+        "platform",
+        "model_sha256",
+    ):
+        assert key in metadata
+    assert metadata["seed"] is None
+    assert metadata["reference"] == "wt"
+    assert metadata["comparison_method"] == "moma_l2"
+    # A MOMA screen has no ROOM tolerances; recorded as null rather than a fabricated pair.
+    assert metadata["room_use_case"] is None
+    assert metadata["delta"] is None and metadata["epsilon"] is None
+    # The screen fingerprints the model every row was derived from, before any knockout.
+    from cmm.core.provenance import model_fingerprint
+
+    assert metadata["model_sha256"] == model_fingerprint(branched_model)
+
+    # What the screen left out is recorded, not silently dropped.
+    assert metadata["n_inert_dropped"] == 1
+    assert metadata["n_perturbations"] == len(perturbations)
+    assert metadata["n_candidates_considered"] == len(branched_model.genes)
+    assert metadata["n_rows"] == len(screen)
+
+    frame = screen.to_frame()
+    assert len(frame) == len(screen)
+    assert list(frame.columns) == [
+        "target_id",
+        "kind",
+        "status",
+        "objective_value",
+        "distance",
+        "distance_kind",
+        "n_changed_reactions",
+        "objective",
+        "n_reactions",
+        "product_flux",
+    ]
+    assert set(frame["target_id"]) == {row.target_id for row in screen}
+
+
+def test_batch_comparison_records_the_room_pair_it_screened_with(branched_model):
+    from cmm.features._perturbation import reaction_perturbations
+    from cmm.features.comparison import batch_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    screen = batch_comparison(
+        branched_model,
+        reference,
+        reaction_perturbations(branched_model, ["R2"]),
+        method="room",
+    )
+    assert screen.metadata["room_use_case"] == "lethality"
+    assert (screen.metadata["delta"], screen.metadata["epsilon"]) == (0.1, 1e-2)
+
+    override = batch_comparison(
+        branched_model,
+        reference,
+        reaction_perturbations(branched_model, ["R2"]),
+        method="room",
+        room_use_case="flux_prediction",
+        delta=0.5,
+    )
+    assert override.metadata["room_use_case"] == "flux_prediction"
+    assert (override.metadata["delta"], override.metadata["epsilon"]) == (0.5, 1e-3)
+
+
+def test_batch_comparison_reports_an_unknown_method_before_solving(branched_model):
+    from cmm.features._perturbation import reaction_perturbations
+    from cmm.features.comparison import batch_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    with pytest.raises(ValueError, match="method must be"):
+        batch_comparison(
+            branched_model,
+            reference,
+            reaction_perturbations(branched_model, ["R2"]),
+            method="moma",  # type: ignore[arg-type]
+        )
+
+
+def test_an_empty_batch_still_exports_its_columns_and_provenance(branched_model):
+    from cmm.features.comparison import batch_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    screen = batch_comparison(branched_model, reference, [])
+    assert len(screen) == 0
+    assert screen.to_frame().empty
+    assert list(screen.to_frame().columns)[0] == "target_id"
+    assert screen.metadata["n_rows"] == 0
+    # A plain sequence cannot know what an enumeration dropped, and says so.
+    assert screen.metadata["n_inert_dropped"] is None

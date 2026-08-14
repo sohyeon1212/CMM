@@ -118,6 +118,35 @@ number quoted from a pre-0.4.0 run directory is stale.
   does not let anyone reproduce a sampling or MILP result. It also records the applied
   condition in full: medium name, oxygen exchange bounds, substrate and uptake rate, and the
   medium components applied and dropped.
+- **The whole MOMA/ROOM family now carries that block, and it did not before.** `moma`,
+  `room`, `knockout_comparison` and `batch_comparison` returned results whose only metadata
+  was `reference` / `reference_provenance` / `reference_method` (plus ROOM's tolerances) —
+  no `timestamp_utc`, no `seed`, no `solver`, no `solver_version`, no `platform` and **no
+  `model_sha256`** — so the perturbation-response engine, which is what a knockout screen is
+  made of, failed `AGENTS.md` rule 4. All four now carry the full `run_provenance` block
+  beside the reference keys they already had. `seed` is `null`: the methods are
+  deterministic and no seed is invented. For `moma`, `room` and `knockout_comparison` the
+  fingerprint is of the model **as handed to the solver**, so a `knockout_comparison` record
+  fingerprints the knocked-out model, not the wild type, and `parameters["knockouts"]` names
+  the reactions forced to zero.
+- **`batch_comparison` returns a `BatchComparisonResult`**, a `list` subclass with the same
+  iteration, `len()`, indexing and `sorted()` behaviour as the plain list of rows it replaces,
+  adding `.to_frame()` and `.metadata`. The screen's provenance lives on the container rather
+  than the row because every row of one screen shares one model, reference, method, tolerance
+  pair, solver and machine; per-row duplication would copy a 16-key block across the 1,367
+  gene knockouts of a genome-scale screen and compute 1,367 model fingerprints to do it.
+  `metadata["model_sha256"]` is the screened model before any knockout — the one model common
+  to every row. The container's provenance also records what the enumeration left out
+  (`n_perturbations`, `n_inert_dropped`, `n_candidates_considered`): `gene_perturbations`
+  drops genes whose deletion blocks no reaction, 66 of 137 on `e_coli_core`, and the screen no
+  longer understates its coverage silently.
+- `predict_condition_fluxes` returns a `ConditionFluxes` carrying a `metadata` block for the
+  multi-condition job — the model fingerprint every condition was solved on, the integration
+  method, the condition names and how many solves were non-optimal. Each condition's own
+  `OmicsFluxResult` keeps its own block for when its numbers are lifted out alone.
+- `tests/test_provenance_surface.py` parametrises over every public service that returns
+  numbers and fails if any of them drops the block, so the gap cannot be reintroduced
+  silently. 23 services, 23 carrying it.
 - `transformation_targets` records provenance on its `moma` path, which had none, and records
   the target-state identity on both paths so an `mta` run is distinguishable from
   `revert_targets`. Its default stays `method="moma"` and is now labelled as such, with the
@@ -270,7 +299,8 @@ number quoted from a pre-0.4.0 run directory is stale.
   the textbook model: zero differing exchange bounds and identical growth, 0.8739215069684303.
 - **Package surface.** `cmm` exports `FvaResult`, `MediumApplication`, `ResponsePhase` and
   `ResponseLimit` alongside `pfba` and `Medium`; `cmm.features` exports `ROOM_TOLERANCES`,
-  `PerturbationList`, `perturbation_provenance`, `tie_structure`, `CarbonUptake`,
+  `PerturbationList`, `perturbation_provenance`, `tie_structure`, `BatchComparisonResult`,
+  `CarbonUptake`,
   `ProductionYield`, `ProductionEnvelope`, `FseofResult` and `FvseofResult`; `cmm.omics`
   exports `EFLUX2_DEVIATIONS` and `LAD_DEVIATIONS`. `INCLUDED_FEATURES` and `PLANNED_FEATURES`
   are unchanged: nothing new ships in 0.4.0, and `flux_response_analysis` is still the name of
