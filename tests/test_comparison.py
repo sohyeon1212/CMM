@@ -448,9 +448,24 @@ def test_batch_comparison_carries_one_provenance_block_for_the_screen(branched_m
     assert metadata["n_candidates_considered"] == len(branched_model.genes)
     assert metadata["n_rows"] == len(screen)
 
+    # A MOMA screen has no switch count, so the column is dropped rather than written as a
+    # NaN column that reads like a failed run. The full schema stays available for a caller
+    # concatenating screens run under different methods.
     frame = screen.to_frame()
     assert len(frame) == len(screen)
     assert list(frame.columns) == [
+        "target_id",
+        "kind",
+        "status",
+        "objective_value",
+        "distance",
+        "distance_kind",
+        "objective",
+        "n_reactions",
+        "product_flux",
+    ]
+    assert "n_changed_reactions" not in frame.columns
+    assert list(screen.to_frame(drop_empty_method_columns=False).columns) == [
         "target_id",
         "kind",
         "status",
@@ -463,6 +478,40 @@ def test_batch_comparison_carries_one_provenance_block_for_the_screen(branched_m
         "product_flux",
     ]
     assert set(frame["target_id"]) == {row.target_id for row in screen}
+
+
+def test_batch_comparison_drops_the_column_the_method_cannot_fill(branched_model):
+    """The mirror of the MOMA case: ROOM reports a switch count, not a distance.
+
+    Carrying both columns for both families leaves one of them empty whichever method ran,
+    and an all-NaN column in an exported CSV is indistinguishable from a run that failed.
+    """
+
+    from cmm.features._perturbation import reaction_perturbations
+    from cmm.features.comparison import batch_comparison
+
+    reference = reference_state_pfba(branched_model, name="wt")
+    perturbations = reaction_perturbations(branched_model)
+
+    room = batch_comparison(
+        branched_model, reference, perturbations, method="room"
+    ).to_frame()
+    assert "distance" not in room.columns
+    assert "n_changed_reactions" in room.columns
+    # distance_kind survives: "none" is a statement about ROOM, not a missing value.
+    assert set(room["distance_kind"]) == {"none"}
+
+    moma = batch_comparison(
+        branched_model, reference, perturbations, method="moma_l2"
+    ).to_frame()
+    assert "n_changed_reactions" not in moma.columns
+    assert "distance" in moma.columns
+
+    # Nothing survives the drop as an all-NaN column of the dropped kind.
+    for frame in (room, moma):
+        for name in ("distance", "n_changed_reactions"):
+            if name in frame.columns:
+                assert not frame[name].isna().all()
 
 
 def test_batch_comparison_records_the_room_pair_it_screened_with(branched_model):

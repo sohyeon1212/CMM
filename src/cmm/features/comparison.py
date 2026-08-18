@@ -624,11 +624,36 @@ class BatchComparisonResult(list[BatchComparisonRow]):
         super().__init__(rows)
         self.metadata: dict[str, object] = dict(metadata or {})
 
-    def to_frame(self) -> pd.DataFrame:
-        """One row per scored knockout, in screen order, one column per row field."""
+    #: Columns only one method family can fill. MOMA has no switch count and ROOM has no
+    #: distance, so carrying both for every method leaves a column of NaN that reads like a
+    #: failed run. They are dropped when the screen's method cannot produce them.
+    _METHOD_ONLY_COLUMNS = {
+        "moma_l1": ("n_changed_reactions",),
+        "moma_l2": ("n_changed_reactions",),
+        "room": ("distance", "distance_kind"),
+    }
+
+    def to_frame(self, *, drop_empty_method_columns: bool = True) -> pd.DataFrame:
+        """One row per scored knockout, in screen order, one column per row field.
+
+        By default a column the screen's method cannot fill is omitted rather than written as
+        NaN: a ROOM screen has no ``distance`` (its objective is a count of switched
+        reactions, not a norm) and a MOMA screen has no ``n_changed_reactions``. Pass
+        ``drop_empty_method_columns=False`` to keep the full schema, which is what a caller
+        concatenating screens run under different methods wants.
+        """
 
         columns = [f.name for f in fields(BatchComparisonRow)]
-        return pd.DataFrame([vars(row) for row in self], columns=columns)
+        frame = pd.DataFrame([vars(row) for row in self], columns=columns)
+        if not drop_empty_method_columns:
+            return frame
+        method = str(self.metadata.get("comparison_method", ""))
+        drop = [
+            name
+            for name in self._METHOD_ONLY_COLUMNS.get(method, ())
+            if name in frame.columns and frame[name].isna().all()
+        ]
+        return frame.drop(columns=drop) if drop else frame
 
 
 def batch_comparison(
