@@ -11,6 +11,7 @@ import pytest  # noqa: E402
 pytest.importorskip("qtpy")
 
 from cmm.app.main_window import CmmMainWindow, _read_expression_vector  # noqa: E402
+from cmm.features.comparison import ROOM_TOLERANCES, reference_flux  # noqa: E402
 from cmm.app.screenshots import (  # noqa: E402
     SOURCE_EXPRESSION,
     TARGET_EXPRESSION,
@@ -771,3 +772,164 @@ def test_knockout_picker_is_independent_per_tab(app, ecoli_core):
     window._clear_ko_selected()
     assert window._selected_ko_targets() == []
     assert window._ko_targets("sample_ko") == ["ENO", "FBA"]
+
+
+def test_room_comparison_renders_a_switch_count_not_a_distance(app, ecoli_core):
+    """Regression: ROOM's ``distance`` is None, and formatting it with ``:.4g`` raised.
+
+    ``comparison.py`` split ``distance`` from the raw solver objective in 0.4.0, and ROOM's
+    objective is a *count of switched reactions*, not a distance — so ``distance`` is None
+    there. The GUI offers ROOM, and its summary formatted ``result.distance`` unconditionally,
+    which raised ``TypeError: unsupported format string passed to NoneType.__format__`` on
+    that path. The suite did not catch it because it only ever exercised MOMA.
+    """
+
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Comparison")
+    window.comparison_method_combo.setCurrentText("ROOM")
+    window.template_combo.setCurrentText("pfba")
+    window.ko_level_combo.setCurrentText("reaction")
+    _select_ko(window, ["PGI"])
+    window.run_comparison()  # must not raise
+
+    summary = window.comparison_summary.text()
+    assert "ROOM" in summary
+    assert "reactions switched" in summary
+    assert "not a distance" in summary
+    # The tolerance pair that produced the count is stated, because the two published pairs
+    # differ by 24% on the same screen.
+    assert "flux_prediction" in summary
+    assert window.comparison_table.rowCount() > 0
+
+
+def test_moma_comparison_names_the_quantity_it_reports(app, ecoli_core):
+    """MOMA-L2 reports Segrè Eq. (4)'s Euclidean distance, with the QP objective alongside."""
+
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Comparison")
+    window.comparison_method_combo.setCurrentText("MOMA (L2)")
+    window.template_combo.setCurrentText("pfba")
+    window.ko_level_combo.setCurrentText("reaction")
+    _select_ko(window, ["PGI"])
+    window.run_comparison()
+
+    summary = window.comparison_summary.text()
+    assert "Euclidean (L2) distance" in summary
+    assert "QP objective" in summary
+
+
+def test_room_tolerance_selector_is_only_live_for_room(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Comparison")
+    window.comparison_method_combo.setCurrentText("MOMA (L1)")
+    assert not window.room_use_case_combo.isEnabled()
+    window.comparison_method_combo.setCurrentText("ROOM")
+    assert window.room_use_case_combo.isEnabled()
+    assert set(
+        window.room_use_case_combo.itemText(i)
+        for i in range(window.room_use_case_combo.count())
+    ) == set(ROOM_TOLERANCES)
+
+
+def test_gui_reference_template_default_matches_the_library(app, ecoli_core):
+    """Plan item 2.12: the GUI defaulted to FBA while ``reference_flux`` defaults to pFBA."""
+
+    import inspect
+
+    window = CmmMainWindow(ecoli_core)
+    assert window.template_combo.currentText() == "pfba"
+    assert inspect.signature(reference_flux).parameters["method"].default == "pfba"
+
+
+def test_flux_response_tab_shows_phases_and_the_response_limit(app, ecoli_core):
+    """``ResponseBottleneck`` is deleted; the tab presents phases and the shadow-price limit."""
+
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Flux Response")
+    window.fr_target_combo.setCurrentText("PGI")
+    window.fr_response_combo.setCurrentText("EX_succ_e")
+    window.fr_growth_spin.setValue(30.0)
+    window.fr_steps_spin.setValue(10)
+    window.run_flux_response()
+
+    summary = window.fr_summary.text()
+    assert "bottleneck" not in summary.lower()
+    assert "shadow price" in summary
+    assert "phase" in summary
+    # One row per phase, and the shadow price shown is the exact one from the phase table.
+    assert window.fr_phase_table.rowCount() > 0
+
+
+def test_flux_response_limit_does_not_move_with_the_step_count(app, ecoli_core):
+    """The GUI must show a location that is a property of the network, not of the grid."""
+
+    rendered = set()
+    for steps in (6, 20, 60):
+        window = CmmMainWindow(ecoli_core)
+        window._goto_tab("Flux Response")
+        window.fr_target_combo.setCurrentText("PGI")
+        window.fr_response_combo.setCurrentText("EX_succ_e")
+        window.fr_growth_spin.setValue(30.0)
+        window.fr_steps_spin.setValue(steps)
+        window.run_flux_response()
+        # Everything from the limit sentence onwards, plus the whole phase table. The
+        # "best response at target X" clause before it is a property of the grid and is
+        # allowed to move; the limit and the phases are not.
+        summary = window.fr_summary.text()
+        limit_clause = summary[summary.index("Response falls beyond") :]
+        table = tuple(
+            window.fr_phase_table.item(row, col).text()
+            for row in range(window.fr_phase_table.rowCount())
+            for col in range(window.fr_phase_table.columnCount())
+        )
+        rendered.add((limit_clause, table))
+    # The old ``bottleneck`` field moved by up to 29.5 flux units over this same sweep and
+    # its ``found`` flag inverted; the shadow-price limit renders identically at every n.
+    assert len(rendered) == 1
+
+
+def test_production_tab_states_its_aeration_as_a_condition(app, ecoli_core):
+    """``aerobic=`` was removed in 0.4.0; the GUI passes a Condition like every other caller."""
+
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Production")
+    window.product_combo.setCurrentText("EX_succ_e")
+    window.anaerobic_combo.setCurrentText("anaerobic")
+    window.run_theoretical_yield()
+
+    text = window.yield_label.text()
+    assert "anaerobic" in text
+    # 1.200 exactly - the CO2-closed value. 1.391 would mean the GUI lost the CO2 closure
+    # the removed flag used to apply for it.
+    assert "1.200" in text
+
+    condition = window._production_condition()
+    assert {b.reaction_id for b in condition.bounds} == {"EX_o2_e", "EX_co2_e"}
+    assert all(b.lower_bound == 0.0 for b in condition.bounds)
+
+    window.anaerobic_combo.setCurrentText("aerobic")
+    assert window._production_condition().bounds == ()
+
+
+def test_strain_design_tab_passes_its_aeration_to_the_search(app, ecoli_core):
+    """optknock/robustknock accepted no condition before 0.4.0 — the SC-01 defect class."""
+
+    window = CmmMainWindow(ecoli_core)
+    window._goto_tab("Strain Design")
+    window.sd_anaerobic_combo.setCurrentText("anaerobic")
+    condition = window._strain_design_condition()
+    assert condition.name.startswith("anaerobic")
+    assert {b.reaction_id for b in condition.bounds} == {"EX_o2_e", "EX_co2_e"}
+
+
+def test_applying_a_medium_reports_what_was_dropped(app, ecoli_core):
+    """``apply_to`` returns a MediumApplication; a preset that drops 18 of 24 must say so."""
+
+    window = CmmMainWindow(ecoli_core)
+    window.medium_combo.setCurrentText("glucose_aerobic")
+    with pytest.warns(UserWarning, match="were not applied"):
+        window.apply_selected_medium()
+    status = window.status_label.text()
+    assert "Glucose minimal, aerobic" in status  # the 0.4.0 display name, not the key
+    assert "dropped" in status
+    assert "EX_fe2_e" in status

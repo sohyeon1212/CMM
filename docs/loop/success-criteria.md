@@ -89,9 +89,18 @@ not a model). Figures use matplotlib Agg at >=200 DPI.
 
 ## Round 4 — Solver status, condition omics, transformation targets, OptKnock
 
-Driven by user follow-up. Same invariants. Data: `test_data/JS66_exp.csv` (5618 genes ×
-conditions JS66_2/ALECO70_2/ALECO2_2) + `test_data/JS66_v15.xml` (1112/1122 genes overlap).
-`straindesign` is installed for OptKnock/RobustKnock.
+Driven by user follow-up. Same invariants. `straindesign` is installed for
+OptKnock/RobustKnock.
+
+> **Data unavailable — these stories cannot be re-run as written.** The round used
+> `test_data/JS66_exp.csv` (recorded at the time as 5618 genes × conditions
+> JS66_2/ALECO70_2/ALECO2_2) and `test_data/JS66_v15.xml` (recorded as 1112/1122 genes
+> overlap). **Neither file exists in the repository**, and neither is a public artifact —
+> JS66 is a private strain and was deliberately scrubbed from all published material in
+> R5-G5. No substitute has been introduced: the stories below record what was verified at the
+> time against data that is no longer present, and their done tests are not reproducible from
+> this repository. Current, reproducible acceptance criteria are in `docs/VALIDATION.md`, and
+> the published expression dataset used for the manuscript is documented separately.
 
 ### R4-G1 — Solver status check (is it gurobi/QP-capable?)
 - DONE: `cmm.core.solvers.solver_status()` reports active solver + capabilities + a
@@ -107,7 +116,8 @@ conditions JS66_2/ALECO70_2/ALECO2_2) + `test_data/JS66_v15.xml` (1112/1122 gene
 ### R4-G3 — Multi-condition omics flux prediction + log-change
 - DONE: load a multi-condition expression table, predict per-condition flux with E-Flux2 AND
   LAD on JS66, and compute/visualize log2 fold-change of flux between conditions; both methods
-  tested.
+  tested. **(Verified at the time against `test_data/JS66_exp.csv`, which no longer exists —
+  not reproducible from this repository.)**
 - FAIL: a method errors on JS66, or log-change is computed wrong (e.g. sign/zero handling).
 
 ### R4-G4 — Condition A→B transformation target finder (MTA + MOMA)
@@ -163,3 +173,8 @@ Heavy/independent roadmap items not required for the headline vertical slice:
 dynamic FBA, random sampling sampler service, FSEOF/FVSEOF, OptKnock/RobustKnock,
 enzyme-constrained (GECKO) layer, full multi-section desktop product. Each is recorded
 in the ledger as DEFERRED with rationale so scope is explicit, not silently dropped.
+
+> **Status since.** This list is the pre-0.3.0 position. The sampler service, FSEOF/FVSEOF,
+> OptKnock/RobustKnock and the multi-section desktop product have all shipped; only dynamic FBA
+> and the enzyme-constrained layer remain roadmap. See `docs/architecture.md` and
+> `docs/feature-roadmap.md` for the current split.

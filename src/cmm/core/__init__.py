@@ -6,10 +6,16 @@ from cmm.core.flux_state import (
     reference_state_from_samples,
     reference_state_pfba,
 )
-from cmm.core.media import PRESET_MEDIA, Medium, apply_medium, preset_medium
+from cmm.core.media import (
+    PRESET_MEDIA,
+    Medium,
+    MediumApplication,
+    apply_medium,
+    preset_medium,
+)
 from cmm.core.provenance import model_fingerprint, run_provenance
 from cmm.core.results import TargetRanking, TargetScore
-from cmm.core.simulation import FluxRange, FluxSolution, fba, fva, pfba
+from cmm.core.simulation import FluxRange, FluxSolution, FvaResult, fba, fva, pfba
 from cmm.core.solvers import (
     SolverCapabilityError,
     SolverStatus,
@@ -26,7 +32,9 @@ __all__ = [
     "FluxRange",
     "FluxSolution",
     "FluxState",
+    "FvaResult",
     "Medium",
+    "MediumApplication",
     "PRESET_MEDIA",
     "apply_medium",
     "preset_medium",

@@ -8,13 +8,39 @@ transform the source flux distribution in the direction implied by two-state exp
 ``rmta`` follows Valcárcel et al. (2019) and the COBRA Toolbox ``rMTA.m`` workflow: an MTA
 MIQP for the best direction, a MOMA QP, an MTA MIQP with the direction reversed for the worst
 case, the published L1 transformation score, and Equation 9 with ``parameterK=100``. ``mta``
-is the single published MTA MIQP. The previous all-continuous approximation remains available
-only under the explicit name ``rmta_continuous`` so its results cannot be mistaken for rMTA.
+is the single published MTA MIQP (Yizhak et al. 2013). The previous all-continuous
+approximation remains available only under the explicit name ``rmta_continuous`` so its
+results cannot be mistaken for rMTA.
+
+**Deviations from the published pipelines, disclosed rather than changed.**
+
+1. ``epsilon`` is a fixed scalar (default 1e-3). Yizhak et al. and Valcárcel et al. derive the
+   required change per reaction from a *sampled* reference distribution, or use a per-reaction
+   epsilon with 1e-3 only as a floor. Deriving it requires the flux sampling CMM deliberately
+   avoids for determinism, so the scalar is kept and stated.
+2. The impossible-change mask (:func:`_prepared_direction`) is applied per candidate, under
+   that candidate's knockout-modified bounds. A reaction can therefore be maskable for one
+   knockout and not for another, so the steady set — and with it the denominator of the
+   transformation score — varies across candidates. The published preprocessing masks once,
+   against the unperturbed model.
+3. The source state CMM's callers usually supply is a deterministic E-Flux2 solve at
+   ``objective_fraction=1.0``, i.e. contextualization is replaced by a single growth-maximal
+   flux vector rather than the contextualization-plus-sampling of the papers, and the
+   diseased/source state is forced to be growth-maximal — an assumption Yizhak et al.
+   explicitly argue against for non-proliferating cells. ``reference_state`` is a plain
+   :class:`~cmm.core.flux_state.FluxState` argument, so passing an externally sampled state
+   restores the published pipeline exactly; that escape hatch is the supported route.
+4. The published transformation score divides by the steady-set L1 deviation, which is zero
+   for a large fraction of candidates on small models (38 of 69 on ``e_coli_core``) and makes
+   the score ``±inf``. The denominator is floored at ``epsilon`` — the method's own threshold
+   for a change that counts — so the score stays finite and orderable. See
+   :func:`_transformation_score`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -30,11 +56,34 @@ from cmm.features._perturbation import (
     apply_perturbation,
     gene_perturbations,
     grouped_gene_perturbations,
+    perturbation_provenance,
     reaction_perturbations,
 )
 from cmm.omics.differential import DirectionMap
 
 RevertMethod = Literal["rmta", "mta", "mta_miqp", "rmta_continuous"]
+
+
+def tie_structure(scored: Sequence[TargetScore]) -> dict[str, object]:
+    """How much of a ranking is actually ordered, as opposed to alphabetical.
+
+    :meth:`TargetRanking.sorted` breaks equal scores on ``target_id``, so a top-k taken
+    inside a tie block is a slice of the alphabet. Reporting the block sizes is what lets a
+    reader tell the two apart; it is cheap and belongs in every ranking's provenance.
+    """
+
+    if not scored:
+        return {
+            "n_distinct_scores": 0,
+            "largest_tie_block": 0,
+            "score_resolution": 0.0,
+        }
+    counts = Counter(round(target.score, 9) for target in scored)
+    return {
+        "n_distinct_scores": len(counts),
+        "largest_tie_block": max(counts.values()),
+        "score_resolution": len(counts) / len(scored),
+    }
 
 
 @dataclass(frozen=True)
@@ -191,12 +240,26 @@ def _transformation_score(
     reference: FluxState,
     direction: DirectionMap,
     target_rxns: list[str],
+    *,
+    steady_floor: float = 1e-3,
 ) -> float:
-    """Published MTA transformation score (COBRA Toolbox ``MTA_TS.m``).
+    """Published MTA transformation score (COBRA Toolbox ``MTA_TS.m``), made finite.
 
-    ``TS = (successful_L1 - unsuccessful_L1) / steady_L1``.  If steady reactions do not
-    move, a beneficial/adverse transformation is represented by positive/negative infinity;
-    no movement at all is defined as zero rather than the undefined ``0/0``.
+    ``TS = (successful_L1 - unsuccessful_L1) / steady_L1``. The denominator is floored at
+    ``steady_floor``, which callers set to the run's own ``epsilon``: a steady-set deviation
+    smaller than the change the method itself calls significant cannot be resolved from zero,
+    and dividing by it produced ``±inf``.
+
+    That mattered. On ``e_coli_core`` with the SC-02 condition pair the steady deviation is
+    *exactly* zero for 38 of 69 solvable gene knockouts, so 38 candidates shared the single
+    score ``+inf`` and :meth:`TargetRanking.sorted` broke the tie on ``target_id`` — the
+    reported "top 38" was an alphabetical slice. The floor keeps the published ratio wherever
+    the denominator is meaningful (the smallest non-zero steady deviation measured on that
+    run is 3.93, four thousand times the floor) and orders the degenerate block by the amount
+    of correct movement instead of by gene name. Ties that remain are real ties in the
+    optimum, and the ranking's provenance reports how many there are.
+
+    No movement at all is still exactly zero rather than the undefined ``0/0``.
     """
 
     correct = 0.0
@@ -215,11 +278,9 @@ def _transformation_score(
             elif moved == -d:
                 wrong += abs(delta)
     numerator = correct - wrong
-    if steady_dev <= 1e-12:
-        if abs(numerator) <= 1e-12:
-            return 0.0
-        return float("inf") if numerator > 0 else float("-inf")
-    return numerator / steady_dev
+    if abs(numerator) <= 1e-12 and steady_dev <= 1e-12:
+        return 0.0
+    return numerator / max(steady_dev, steady_floor, 1e-12)
 
 
 def _continuous_transformation_score(
@@ -253,18 +314,33 @@ def _prepared_direction(
     *,
     reverse: bool = False,
 ) -> DirectionMap:
-    """Apply the published impossible-change preprocessing and optional F/B swap."""
+    """Apply the published impossible-change preprocessing and optional F/B swap.
+
+    The incoming ``direction`` carries its own provenance — notably ``gpr_rule``, which says
+    how the two-state expression was resolved through the GPR and therefore what the
+    direction sets mean. It is carried onto the derived map rather than dropped, so a
+    reversed (worst-case) run is still traceable to the rule that produced it.
+    """
 
     values: dict[str, int] = {}
     sign = -1 if reverse else 1
+    masked: list[str] = []
     for rid in target_rxns:
         d = sign * direction.get(rid, 0)
         rxn = model.reactions.get_by_id(rid)
         # COBRA rMTA removes a requested backward move for an inactive irreversible reaction.
         if d < 0 and abs(reference.get(rid)) < 1e-6 and rxn.lower_bound >= 0:
             d = 0
+            masked.append(rid)
         values[rid] = d
-    return DirectionMap(values, metadata={"reversed": reverse})
+    return DirectionMap(
+        values,
+        metadata={
+            **dict(direction.metadata),
+            "reversed": reverse,
+            "n_impossible_masked": len(masked),
+        },
+    )
 
 
 def _score_knockout(
@@ -291,7 +367,9 @@ def _score_knockout(
                 robust=float("-inf"),
                 status=status,
             )
-        ts = _transformation_score(flux, reference, best_direction, target_rxns)
+        ts = _transformation_score(
+            flux, reference, best_direction, target_rxns, steady_floor=epsilon
+        )
         return _Scores(moma=ts, best=ts, worst=ts, robust=ts, status="optimal")
 
     if method == "rmta":
@@ -318,14 +396,14 @@ def _score_knockout(
                 status=status,
             )
         best_ts = _transformation_score(
-            best_flux, reference, best_direction, target_rxns
+            best_flux, reference, best_direction, target_rxns, steady_floor=epsilon
         )
         moma_ts = _transformation_score(
-            moma_flux, reference, best_direction, target_rxns
+            moma_flux, reference, best_direction, target_rxns, steady_floor=epsilon
         )
         # Published wTS is scored against the swapped F/B direction.
         worst_ts = _transformation_score(
-            worst_flux, reference, worst_direction, target_rxns
+            worst_flux, reference, worst_direction, target_rxns, steady_floor=epsilon
         )
         robust = _robust_score(moma_ts, best_ts, worst_ts, parameter_k=parameter_k)
         return _Scores(
@@ -414,6 +492,16 @@ def revert_targets(
     Parameters mirror the design doc: ``reference_state`` is the source/disease reference
     flux distribution, ``direction`` is the per-reaction desired flux direction from
     two-state differential expression, and ``alpha`` is the transformation weight.
+
+    ``reference_state`` accepts any :class:`~cmm.core.flux_state.FluxState`, so the published
+    contextualization-plus-sampling source state can be supplied from outside CMM; the module
+    docstring lists that and the other disclosed deviations.
+
+    The returned ranking's metadata carries the direction map's own provenance (including
+    ``gpr_rule``), the enumeration counts — an inert gene that blocks no reaction is not
+    scored, and how many were skipped is recorded rather than left invisible — and the tie
+    structure of the scores, because ties are broken on ``target_id`` and a top-k slice taken
+    inside a tie block is alphabetical rather than meaningful.
     """
 
     if method not in {"rmta", "mta", "mta_miqp", "rmta_continuous"}:
@@ -461,13 +549,22 @@ def revert_targets(
         target_rxns = _target_reactions(model, reference_state)
 
         if perturbation == "gene":
-            perts: list[Perturbation] = (
+            perts: Sequence[Perturbation] = (
                 grouped_gene_perturbations(model, transcript_separator, targets)
                 if transcript_separator
                 else gene_perturbations(model, targets)
             )
         else:
             perts = reaction_perturbations(model, targets)
+
+        # A ``rmta_continuous`` run is not rMTA. The method string and the ``formulation``
+        # tag say so, but a bare ``to_frame().to_csv()`` carries neither — so the marker also
+        # rides on every row as its own column.
+        marker: dict[str, float] = (
+            {"continuous_heuristic_not_rmta": 1.0}
+            if method == "rmta_continuous"
+            else {}
+        )
 
         scored: list[TargetScore] = []
         nonoptimal = 0
@@ -493,6 +590,7 @@ def revert_targets(
                         "bTS": scores.best,
                         "mTS": scores.moma,
                         "wTS": scores.worst,
+                        **marker,
                     },
                 )
             )
@@ -518,5 +616,9 @@ def revert_targets(
                 if method in {"mta", "mta_miqp"}
                 else "continuous_heuristic"
             ),
+            "direction_provenance": dict(direction.metadata),
+            "n_directional_reactions": len(direction.nonsteady()),
+            **perturbation_provenance(perts),
+            **tie_structure(scored),
         },
     ).sorted()

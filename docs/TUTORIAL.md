@@ -169,8 +169,9 @@ reaction there, so you see a curve instead of a single operating point.
    reaction's own declared bounds as a what-if; the result records that under
    `range_outside_bounds`.
 5. Click **Run scan**. The curve shows the wild-type flux, the optimum, any shaded range that
-   has no solution at all, and the steepest-decline bottleneck if there is one. The table
-   beside it lists every scan point; infeasible points are shown in red rather than dropped.
+   has no solution at all, and the **response limit** — the phase boundary past which the
+   shadow price `d(response)/d(target)` turns against you — if there is one. The table beside
+   it lists every scan point; infeasible points are shown in red rather than dropped.
 
 A response that never declines means the target does not limit the response over that range.
 A flat response means the objective is simply insensitive to that reaction — both are
@@ -370,8 +371,10 @@ print(solver_status(model).summary())
 sol = fba(model);  print(sol.objective_value, sol.status)
 
 # Production design
-y = theoretical_yield(model, "EX_succ_e", aerobic=True)
-print(y.molar_yield, y.carbon_ceiling, y.co2_fixed)
+y = theoretical_yield(model, "EX_succ_e")     # condition comes from the applied medium
+# 1.6384 against a ceiling of 1.5; co2_carbon_fraction says how much of the product carbon
+# came from CO2 uptake (8.4% here), which is the number `co2_fixed` alone never gave.
+print(y.molar_yield, y.carbon_ceiling, y.co2_carbon_fraction, y.carbon_imbalance)
 
 # Growth-coupled strain design (needs a MILP solver)
 result = optknock(model, "EX_succ_e", max_knockouts=3, max_solutions=5)
@@ -382,19 +385,25 @@ for d in result.designs:
 expr = {g.id: 50.0 for g in model.genes}
 flux_state = integrate_expression(model, expr, method="eflux2").to_flux_state()
 
-# Perturbation response against a real reference
+# Perturbation response against a real reference. `distance` is Segre et al. Eq. (4)'s
+# Euclidean distance; `objective_value` is the raw QP objective (its square), and for ROOM
+# `distance` is None because a switch count is not a distance -- see `n_changed_reactions`.
 ref = reference_flux(model, "pfba")
 with model:
     model.reactions.PFK.knock_out()
-    print(moma(model, ref, linear=False).distance)
+    r = moma(model, ref, linear=False)
+    print(r.distance, r.distance_kind, r.objective_value)   # 51.321 euclidean_l2 2633.846
 
 # Gene / multi / batch knockouts
 gene_rxns = blocked_reactions_for_genes(model, ["b0726"])          # gene -> reactions (GPR)
-print(knockout_comparison(model, ref, gene_rxns, method="moma_l2").distance)   # ~129.9
+k = knockout_comparison(model, ref, gene_rxns, method="moma_l2")
+print(k.distance, k.objective_value)                       # 11.398 distance, 129.925 objective
 print(knockout_comparison(model, ref, ["PFK", "TPI"], method="moma_l2").distance)  # multi-KO
 batch = batch_comparison(model, ref, gene_perturbations(model), method="moma_l2")
 for row in sorted(batch, key=lambda r: -r.distance)[:5]:            # most-disrupted first
     print(row.target_id, row.status, round(row.distance, 3), round(row.objective, 3))
+batch.to_frame().to_csv("batch_screen.csv", index=False)   # rows = the numbers
+print(batch.metadata["model_sha256"], batch.metadata["n_inert_dropped"])  # container = the run
 
 # Multi-condition omics comparison (log2 fold-change of flux magnitude)
 # preds = predict_condition_fluxes(model, expression_dataframe, method="eflux2")
@@ -402,7 +411,7 @@ for row in sorted(batch, key=lambda r: -r.distance)[:5]:            # most-disru
 
 # Verifying a target: does forcing flux through it buy product, and where does it break?
 resp = flux_response(model, "PGI", "EX_succ_e", biomass_fraction=0.3, n_steps=20)
-print(resp.optimum(), resp.feasible_range(), resp.bottleneck.found)
+print(resp.optimum(), resp.feasible_range(), resp.limit.found)
 resp.to_frame().to_csv("flux_response.csv", index=False)
 
 # Is a predicted flux forced, or one of many alternate optima?
@@ -416,7 +425,7 @@ Export publication figures directly:
 
 ```python
 from cmm.visualization import production_envelope_figure, save_figure
-env = production_envelope(model, "EX_succ_e", aerobic=True, points=20)
+env = production_envelope(model, "EX_succ_e", points=20)
 save_figure(production_envelope_figure(env, title="Succinate envelope"), "envelope.png")  # 300 DPI
 ```
 
@@ -435,6 +444,11 @@ QT_QPA_PLATFORM=offscreen CMM_OUTPUT_DIR=./temp_figures_new PYTHONPATH=src \
 QT_QPA_PLATFORM=offscreen CMM_OUTPUT_DIR=./temp_figures_new PYTHONPATH=src \
   .venv/bin/python -m cmm.app.genome_scale_scenario [model.xml]   # your genome-scale model
 ```
+
+The captures are not tracked in git — they are reproducible from the commands above, and a
+committed copy goes stale as soon as the code changes.
+[Scenario figures](scenario-figures.md) is the manifest: it names every figure the three
+harnesses write and what each one shows.
 
 Run the unit + scenario test suite:
 
@@ -458,6 +472,6 @@ uv run ruff check src tests
 
 ---
 
-*Feature availability reflects CMM 0.3.0. See `docs/VALIDATION.md` for the publication
+*Feature availability reflects CMM 0.4.0. See `docs/VALIDATION.md` for the publication
 evidence and limitations, `docs/feature-roadmap.md` for planned additions, and
 `docs/architecture.md` for the layering contract.*

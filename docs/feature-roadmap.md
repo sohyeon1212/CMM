@@ -1,6 +1,6 @@
 # Feature roadmap
 
-This roadmap starts from the validated CMM 0.3.0 surface. Implemented features are also
+This roadmap starts from the validated CMM 0.4.0 surface. Implemented features are also
 enumerated by `cmm.features.INCLUDED_FEATURES`; this document does not advertise planned work
 as shipped functionality.
 
@@ -9,8 +9,9 @@ as shipped functionality.
 - Core: conditions, media, FBA, pFBA, FVA, `FluxState`, solver contracts, provenance.
 - Perturbation: gene/reaction/multiple knockout resolution, L1/L2 MOMA, ROOM, batch runs.
 - Production: yield, production envelope, FSEOF, FVSEOF, OptKnock, RobustKnock.
-- Validation: flux-response scans with bottleneck detection; seeded uniform and
-  reference-constrained random flux sampling with sampling-mean `FluxState` construction.
+- Validation: flux-response scans reporting the exact LP shadow price and its phase boundaries;
+  seeded uniform and reference-constrained random flux sampling with sampling-mean `FluxState`
+  construction.
 - Omics: GPR mapping, LAD, E-Flux2, multi-condition prediction, differential directions.
 - Transformation: MOMA A→B ranking, published MTA, published rMTA, explicit continuous
   heuristic.

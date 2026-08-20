@@ -21,7 +21,7 @@ requires:
 optional:
   expression: "gene expression table (enables LAD / E-Flux2 reference states)"
   substrate: "exchange reaction id; default: auto-detected from the medium"
-  aerobic: "true | false"
+  condition: "cmm.core.Condition — medium and aeration, set once in step 0 and passed to every step"
 solver:
   minimum: "LP — step 3 falls back to a single-deletion screen and proves no coupling"
   full: "MILP + straindesign + Java (step 3 design); QP (E-Flux2, L2 MOMA)"
@@ -58,6 +58,53 @@ product and growth for each, and evidence that every part survived independent v
 
 Steps 3 and 4 are independent and may run in either order. Step 5 needs both.
 
+## The condition is set once, in step 0, and every step inherits it
+
+**This is the single most important procedural rule in this scenario, and the one this
+document itself previously broke.** A run that applies an aerobic medium and then asks a later
+step for an anaerobic answer produces numbers that are individually valid and collectively
+meaningless. Only two things fix that: choose the medium and aeration *before* step 0's first
+solve, and make every subsequent call state which condition it is running under.
+
+```python
+from cmm.core import Condition, ReactionBound, apply_medium
+
+MEDIUM      = "glucose_anaerobic"        # or "glucose_aerobic"; keys in PRESET_MEDIA
+PRODUCT     = "EX_succ_e"
+OXYGEN      = "EX_o2_e"
+
+apply_medium(model, MEDIUM)              # constrains the model itself
+
+CONDITION = Condition(                   # restates the aeration explicitly, so every
+    name=MEDIUM,                         # call below carries it in its own provenance
+    bounds=(ReactionBound(reaction_id=OXYGEN, lower_bound=0.0, upper_bound=0.0),),
+    notes="anaerobic: oxygen uptake closed",
+)
+```
+
+For an aerobic run, use the aerobic preset and drop the `bounds=` entry — do not leave an
+oxygen bound behind that contradicts the medium.
+
+**From here on, `CONDITION` is passed to every call that accepts it**, and the calls below show
+it explicitly rather than leaving it to be inferred. As of 0.4.0 that covers
+`fba`/`pfba`/`fva`, `theoretical_yield`, `production_envelope`, `fseof`, `fvseof`, `optknock`,
+`robustknock`, `flux_response`, `random_flux_sampling` and `reference_constrained_sampling`.
+**The `aerobic=True|False` parameter no longer exists** — it was a second, redundant way of
+saying what the medium already says, and because `optknock`/`robustknock` never accepted it,
+passing `aerobic=False` alongside an aerobic medium silently produced an aerobic design inside
+an anaerobic report. That is exactly how the wrong answer recorded in earlier versions of this
+document was produced.
+
+The remaining calls in this scenario — `reference_flux`, `knockout_comparison`,
+`batch_comparison` — take no `condition=`. **They inherit the condition from the model state
+`apply_medium` established in step 0**, which is why the medium is applied to the model rather
+than only expressed as a `Condition`. Do not open a `with model:` block that changes the medium
+around any of them.
+
+Record `MEDIUM`, the oxygen bounds, the substrate and its uptake rate in `00_provenance.json`,
+and re-record the model fingerprint *after* `apply_medium` — the fingerprint changes with the
+medium, so it is itself evidence of which condition the run used.
+
 **Two method families, two jobs.** Step 3 is *inverse* — you give a goal, CMM searches for the
 intervention, and the bilevel MILP proves the cell cannot grow without producing. Step 5 is
 *forward* — you give the intervention, CMM predicts what follows. They assume different cell
@@ -72,10 +119,11 @@ and 5b exist to serve the amplification half of the answer.
 
 ## Step 0 — Preflight
 
-**Goal.** Establish that the model grows, the product is reachable, and the solver is capable.
+**Goal.** Establish that the model grows, the product is reachable, and the solver is capable —
+**under the condition fixed above, not under the model's shipped defaults.**
 
-**Call.** Follow `_preflight.md` (P1–P4; P5 only if you have expression data), then check what
-step 3 will be able to do:
+**Call.** Apply the medium and build `CONDITION` first (see above), then follow `_preflight.md`
+(P1–P4; P5 only if you have expression data), then check what step 3 will be able to do:
 
 ```python
 import importlib.util
@@ -91,6 +139,9 @@ print("step 3 mode:", "design (OptKnock)" if can_design else "screen (MOMA/ROOM 
 **Branch.**
 - Theoretical yield zero → stop and report; the product cannot be made in this medium.
   Everything below assumes a non-zero ceiling.
+- The preflight growth number is the wild-type growth **in this condition**. On anaerobic
+  `e_coli_core` that is 0.211663 h⁻¹, not the 0.873922 h⁻¹ of the aerobic model. Quoting the
+  aerobic figure inside an anaerobic run is the first symptom of a mixed-condition report.
 - `can_design` false → step 3 runs its LP fallback. Decide this now, not mid-run, and carry the
   fact into the report: the run will produce candidates rather than a coupled design.
   `straindesign` also needs Java, so a missing `java` on `PATH` has the same effect.
@@ -110,13 +161,11 @@ envelope shows what growth must be given up to approach it.
 from cmm.features import production_envelope, theoretical_yield
 from cmm.visualization import production_envelope_figure, save_figure, yield_figure
 
-PRODUCT, AEROBIC = "EX_succ_e", False
-
-result = theoretical_yield(model, PRODUCT, aerobic=AEROBIC)
+result = theoretical_yield(model, PRODUCT, condition=CONDITION)
 print(result.molar_yield, result.carbon_ceiling,
       result.exceeds_carbon_ceiling, result.co2_fixed)
 
-envelope = production_envelope(model, PRODUCT, aerobic=AEROBIC, points=20)
+envelope = production_envelope(model, PRODUCT, condition=CONDITION, points=20)
 frame = envelope.to_frame()
 ```
 
@@ -136,9 +185,19 @@ frame = envelope.to_frame()
   step 3 proceeds; this reading sets the expectation.
 - Record `exceeds_carbon_ceiling` and `co2_fixed` together. A yield above the substrate's
   carbon ceiling is only legitimate when CO₂ is being fixed; otherwise suspect the model.
+- **`co2_fixed=True` below the carbon ceiling is not a clean bill of health.** The ceiling check
+  is the only guard, so a CO₂-inflated yield that stays under the ceiling passes it silently.
+  Measured on anaerobic `e_coli_core`/`EX_succ_e`: molar yield **1.3906** with CO₂ uptake open
+  against **1.2000** with it closed, at a CO₂ exchange of −6.9529 and a ceiling of 1.5 — 15.9%
+  high, and `exceeds_carbon_ceiling` is `False` throughout. From 0.4.0 the media presets close
+  CO₂ *uptake* (secretion stays free), so this number changes; if you are reading an older run,
+  check whether its yield was obtained by taking up CO₂ that a closed anaerobic fermentation
+  does not supply.
 
-**Branch.** Comparing substrates or aeration? Loop `theoretical_yield` over each and pass all
-results to one `yield_figure`, then pick the condition for the rest of the run and say so.
+**Branch.** Comparing substrates or aeration? That is more than one condition, so it is more
+than one run: build one `Condition` per case, loop `theoretical_yield` over them, pass all
+results to one `yield_figure`, then **pick one condition, rebuild the model state for it, and
+run every remaining step under that one.** Do not carry a second condition forward implicitly.
 
 **Failure → action.** `ValueError: no uptake capacity` means the substrate exchange is closed —
 fix the medium in step 0. `no carbon uptake exchange found` means auto-detection failed; pass
@@ -173,6 +232,8 @@ the interpretation.
 from cmm.core import supports
 from cmm.features import reference_flux
 
+                                    # inherits the condition from the model state applied in
+                                    # step 0 — see the note under **Decision rule**
 references = {"pfba": reference_flux(model, "pfba")}
 
 if expression is not None:                      # gene -> value, ids matching model.genes
@@ -192,6 +253,12 @@ growth in the report.
 **Decision rule.** `pfba` is the reproducible default — a unique minimal-total-flux solution.
 Use an omics-derived state instead when the run is about a specific condition, and say which
 one the wild-type numbers came from, because the improvement figures are relative to it.
+
+`reference_flux` takes no `condition=`; it reads the model exactly as step 0 constrained it.
+That is the inheritance, and it only holds if nothing has changed the medium since. Record the
+reference state's own fingerprint alongside it so the report can prove which condition produced
+it — on anaerobic `e_coli_core` the wild-type reference gives growth 0.211663 and
+`EX_succ_e` = 0.0.
 
 **Branch.**
 - No expression data → `pfba` alone. That is the normal case and costs the run nothing.
@@ -224,8 +291,10 @@ and Java are available.
 import pandas as pd
 from cmm.features import optknock, robustknock
 
-optimistic = optknock(model, PRODUCT, max_knockouts=3, max_solutions=5, min_growth=0.05)
-guaranteed = robustknock(model, PRODUCT, max_knockouts=3, max_solutions=8, min_growth=0.05)
+optimistic = optknock(model, PRODUCT, condition=CONDITION,
+                      max_knockouts=3, max_solutions=5, min_growth=0.05)
+guaranteed = robustknock(model, PRODUCT, condition=CONDITION,
+                         max_knockouts=3, max_solutions=8, min_growth=0.05)
 
 designs = pd.DataFrame([
     {
@@ -253,18 +322,44 @@ directly, so prefer its output when both return results.
 **The number of designs is not a reproducible quantity — the top design is.** A MILP solution
 pool enumerates near-optimal alternatives in an order that depends on the solver's internal
 state, so running `fba`/`pfba` or `production_envelope` earlier in the same process can change
-how many designs come back. On anaerobic `e_coli_core` succinate the same run returns 32, 39 or
-57 designs depending on what preceded it, while the best design is `{CO2t, FORti, PGI}` at
-`guaranteed_product` 10.4063 every single time. Report the ranked top designs and their
-guaranteed products; **do not headline the count**, and if you mention it, say it is
-pool-dependent.
+how many designs come back. The reference anaerobic run returned **18 OptKnock and 41
+RobustKnock designs** (all 41 growth-coupled); another process may return a different count.
+Report the ranked top designs and their guaranteed products; **do not headline the count**, and
+if you mention it, say it is pool-dependent.
+
+**The design is a property of the condition, and the condition must be the one from step 0.**
+On `glucose_anaerobic` `e_coli_core`, both `optknock` and `robustknock` return the same top
+design:
+
+| Condition | Knockouts | Growth | Guaranteed product | Coupled |
+|---|---|---|---|---|
+| `glucose_anaerobic` | `ACALD, D_LACt2, THD2` | 0.090648 | **9.910758** | yes |
+| `glucose_aerobic` | `ACALD, D_LACt2, THD2` | 0.873922 | 0.000000 | no |
+| `glucose_anaerobic` | `CO2t, FORti, PGI` | 0.000000 | — | **does not grow** |
+| `glucose_aerobic` | `CO2t, FORti, PGI` | 0.143322 | 10.406319 | yes |
+
+Read the table as a warning, not as a menu. **Earlier versions of this document presented
+`{CO2t, FORti, PGI}` at `guaranteed_product` 10.4063 as the anaerobic answer. It is an aerobic
+result** — that deletion set does not grow anaerobically at all, so its guaranteed product is
+undefined under the condition the rest of that run used. The mistake was produced exactly as
+described above: an aerobic medium was applied while `aerobic=False` was passed to functions
+that had the parameter, and the design search, which never had it, ran with oxygen open. The
+same design ranked first under either condition and the numbers looked plausible under both,
+which is why nothing caught it. **Print the medium and the oxygen bounds next to every design
+table.**
+
+The anaerobic design's gene-level deletions, for reference:
+`ACALD` → `b0351 or b1241`; `D_LACt2` → `b2975 or b3603`; `THD2` → `b1602 and b1603`. An `or`
+rule requires deleting **all** listed genes; an `and` rule requires deleting **any one**.
 
 **Branch.**
 - **No MILP, no `straindesign`, or no Java → run the LP fallback below.** This is the only
   supported substitution for this step.
-- No design found → raise `max_knockouts` (cost grows fast), lower `min_growth`, or revisit the
-  medium and aeration. If still nothing, report that no coupled design exists under these
-  constraints. That is a legitimate negative result, not a failed run.
+- No design found → raise `max_knockouts` (cost grows fast) or lower `min_growth`. Changing the
+  medium or the aeration is **not** a parameter tweak: it is a different experiment, so go back
+  to step 0, reset the condition, and re-run every step under it. If still nothing, report that
+  no coupled design exists under these constraints. That is a legitimate negative result, not a
+  failed run.
 - Designs found but every `guaranteed_product == 0` → report them as *uncoupled candidates* and
   carry them into step 5 as hypotheses, not as strains.
 - **Map reaction knockouts back to genes** before anything experimental — a reaction is not
@@ -293,12 +388,12 @@ Run a single-deletion screen instead. It finds candidates, not designs.
 ```python
 from cmm.features import batch_comparison, gene_perturbations
 
-rows = batch_comparison(
+result = batch_comparison(
     model, references["pfba"], gene_perturbations(model),
     method="moma_l1",                       # LP; moma_l2 needs QP, room needs MILP
     product_reaction=PRODUCT,
 )
-screen = pd.DataFrame([vars(r) for r in rows])
+screen = result.to_frame()                  # and save result.metadata beside the CSV
 ```
 
 **Decision rule.** A candidate must satisfy all three: `status == "optimal"` (not lethal),
@@ -315,10 +410,20 @@ crossing:
 
 ```python
 from cmm.features._perturbation import blocked_reactions_for_genes
+
+screen_candidates = screen.loc[                 # the DataFrame built just above
+    (screen["status"] == "optimal")
+    & (screen["objective"] >= 0.1 * wild_type_growth)
+    & (screen["product_flux"] > wild_type_product),
+    "target_id",
+]
 ko_reactions = {
-    r for t in candidates["target_id"] for r in blocked_reactions_for_genes(model, [t])
+    r for t in screen_candidates for r in blocked_reactions_for_genes(model, [t])
 }
 ```
+
+(`screen_candidates` is named apart from step 5b's `candidates`, which is a list of *reaction*
+ids from step 4 — the whole point of this paragraph is that the two id spaces do not mix.)
 
 **What the report must say.** This substitution changes the scientific claim, so `AGENTS.md`
 §3.3 applies in full. State all three of these in **Setup** and again in **Limitations**:
@@ -346,11 +451,11 @@ over-expression candidates — and the reactions that must carry less.
 from cmm.features import fseof, fvseof
 from cmm.visualization import fseof_figure, fvseof_figure
 
-scan = fseof(model, PRODUCT, n_steps=10, aerobic=AEROBIC)
+scan = fseof(model, PRODUCT, condition=CONDITION, n_steps=10)
 amplify = scan.amplification_targets()          # actionable_only=True by default
 knockdown = scan.knockout_targets()
 
-robust_scan = fvseof(model, PRODUCT, n_steps=8, biomass_fraction=0.95, aerobic=AEROBIC)
+robust_scan = fvseof(model, PRODUCT, condition=CONDITION, n_steps=10, biomass_fraction=0.95)
 robust = robust_scan.robust_targets()
 ```
 
@@ -365,16 +470,35 @@ capacity}.csv`, `figures/fseof.png`, `figures/fvseof.png`.
 2. `amplify` alone — rising mean flux only; the network *may* route around it.
 3. `knockdown` — feed to step 3's candidate list if not already there.
 
+`robust_scan.amplification_targets()` is already in Park et al.'s own priority order — types
+1–3 by the joint sign of ΔV_avg and Δl_sol, ordered by ascending mean `l_sol` — and
+`robust_scan.park_type` gives the 1–9 index per reaction. Report that order as Park's; the
+`robust` intersection in rule 1 is CMM's own extra filter on top of it, not a re-ranking by
+them.
+
 Keep `actionable_only=True`: it drops boundary, objective, and no-GPR reactions, which are not
 things anyone can engineer.
 
+**Two of these are CMM's constructs, not the source papers', and the report must say so.**
+CMM's FSEOF selection rule (endpoint difference, positive linear slope, no sign reversal,
+baselined at the 10% scan level) is deliberately stricter than the criterion in Choi et al.
+(2010), which selects on `|v_j|max > |v_j^initial|` and `v_j^max · v_j^min ≥ 0`. On anaerobic
+`e_coli_core`/succinate Choi's rule additionally admits the acetate-secretion branch
+(`ACKr`, `ACt2r`, `EX_ac_e`, `PTAr`) — reactions the design search in step 3 *deletes* — so CMM
+keeps its own rule. Likewise FVSEOF's `robust_targets()` (forced FVA minimum rising
+monotonically) is CMM's addition; it is not the variability criterion of Park et al. (2012).
+Cite Choi et al. and Park et al. for the methods, and attribute these two selection rules to
+CMM.
+
 **Branch.** Empty `robust_targets()` → fall back to `amplify`, and say the targets lack the
 robustness check. Empty `amplify` too → the product does not respond to enforced flux under
-this medium; revisit aeration and substrate in step 1.
+this medium. That is a finding about this condition; report it as such, and if you then try a
+different aeration or substrate, restart from step 0 rather than swapping it in here.
 
 **Failure → action.** FSEOF on a zero-yield product returns nothing useful; step 1 gates this.
 Genome-scale scans are slow — narrow with `reactions=` to a pathway of interest rather than
-reducing `n_steps` below ~8, which coarsens the trend classification.
+reducing `n_steps` below 10, which coarsens the trend classification and, for FVSEOF, falls
+below the resolution Park et al. specify.
 
 **Solver.** LP (FVSEOF runs an FVA per step, so it costs more wall clock, not more capability).
 
@@ -405,10 +529,11 @@ from cmm.visualization import flux_comparison_figure, flux_response_figure
 best = guaranteed.best()
 immediate = knockout_comparison(model, references["pfba"], best.knockouts, method="moma_l2")
 
-with model:                                   # design applied, then restored
-    for rid in best.knockouts:
+with model:                                   # design applied, then restored;
+    for rid in best.knockouts:                # the medium from step 0 is untouched
         model.reactions.get_by_id(rid).knock_out()
-    designed_scan = flux_response(model, PRODUCT, biomass_fraction=0.0, n_steps=20)
+    designed_scan = flux_response(model, PRODUCT, condition=CONDITION,
+                                  biomass_fraction=0.0, n_steps=20)
 ```
 
 **Decision rule.** MOMA assumes a *minimal adjustment* from wild type, so it describes the
@@ -427,8 +552,11 @@ MOMA product is a schedule, not a refutation. Do not drop a coupled design on th
 The `designed_scan` shows the relationship the knockouts created, and its
 `feasible_range()` is the crispest evidence of coupling you will get from a forward method: a
 lower bound above zero means the strain **cannot** produce less than that, whatever it does. On
-anaerobic `e_coli_core` the `{CO2t, FORti, PGI}` design gives `(3.47, 15.0)` — zero succinate is
-simply not a solution any more.
+anaerobic `e_coli_core` the `{ACALD, D_LACt2, THD2}` design gives `(4.794286, 13.905778)` over
+20 of 20 feasible scan points — zero succinate is simply not a solution any more. Compare that
+lower bound against the design's own `guaranteed_product` of 9.910758: the scan bounds the
+worst case over *all* feasible states, the MILP bounds it over the growth-optimal ones, so the
+scan's floor is the looser of the two and both belong in the report.
 
 **Artifacts.** `06_validation/design_moma.csv`, `06_validation/design_flux_response.csv`,
 `figures/design_flux_comparison.png`, `figures/design_flux_response.png`.
@@ -446,6 +574,7 @@ responses = {}
 for target in candidates:                    # amplification candidates from step 4
     responses[target] = flux_response(
         model, target, response=PRODUCT,
+        condition=CONDITION,                 # the same condition as every step above
         biomass_fraction=0.3,                # keep the cell viable across the scan
         n_steps=20,
     )
@@ -471,14 +600,31 @@ a meaningless number becomes a recommendation:
    `wild_type["target_flux"]`: higher means over-express, lower means knock down, and the ratio
    is roughly how much. Equal means **no intervention** — the cell is already at the best value
    for this reaction, so it is not a target however it ranked in step 4.
-   **This routinely contradicts step 4.** On anaerobic `e_coli_core` succinate, FSEOF classifies
-   `ADK1` as `amplify`, but its response optimum sits exactly at the wild-type flux: nothing to
-   amplify. FSEOF observed a correlation across enforced product levels; the response scan
-   actually tested the intervention. Trust the forward method and report the disagreement
-   rather than quoting whichever is more flattering.
+   **This routinely contradicts step 4.** On anaerobic `e_coli_core` succinate, **7 of the 17
+   reactions FSEOF classifies as `amplify` — `FBA`, `FUM`, `GAPD`, `MDH`, `PGI`, `PGM`, `TPI` —
+   have a forward-scan optimum *below* their wild-type flux**: the forward method says knock
+   them down. `GLCpts`'s optimum sits exactly at its wild-type flux, so it is no intervention at
+   all. FSEOF observed a correlation across enforced product levels; the response scan actually
+   tested the intervention. Trust the forward method and report the disagreement rather than
+   quoting whichever is more flattering.
 4. `feasible_range()` bounds how far the intervention can go before the cell stops solving.
-5. `bottleneck.found` — a bottleneck *inside* the useful range means pushing past it costs
-   product, so the intervention has a ceiling worth reporting.
+   It is computed by FVA on the scanned reaction, so it is the reaction's true range under the
+   applied growth floor and not an artefact of where the grid points happened to land. (Before
+   0.4.0 it was read off the scan grid and was inward-biased whenever a growth floor was
+   applied — on `PGI` at the documented default `n_steps=20` it returned (−37.3684, 6.8421)
+   against a true FVA range of (−38.0997, 9.9463), understating the headroom by 31%. Do not
+   quote a pre-0.4.0 `feasible_range` as a bound.)
+5. **The shadow price of the response with respect to the target** — `d(response)/d(target)`,
+   returned exactly by the LP dual — says how much product one more unit of enforced flux buys,
+   and the phase boundaries say where that rate changes. A boundary *inside* the useful range
+   means pushing past it costs product, so the intervention has a ceiling worth reporting.
+   This replaces the `bottleneck` field removed in 0.4.0: that field located the steepest
+   finite-difference decline, which for a piecewise-linear LP response curve is an artefact of
+   the grid — its reported location moved by up to 29.53 flux units as `n_steps` went 6 → 160,
+   and its `found` flag inverted on `PGI`, `TPI` and `EX_o2_e`. **No published criterion defines
+   a bottleneck as the argmin of a finite-difference slope**; regions of constant shadow price
+   and the boundaries between them are the published objects (Edwards, Ramakrishna & Palsson
+   2002). Do not cite any paper for the removed field, and do not carry its numbers forward.
 
 **`biomass_fraction` is not optional here.** With no growth floor the scan reports what a
 non-growing cell could do, which is not a strain.
@@ -489,8 +635,8 @@ non-growing cell could do, which is not a strain.
 from cmm.features import random_flux_sampling
 from cmm.visualization import sampling_figure
 
-ensemble = random_flux_sampling(model, n=1000, seed=0)      # method="achr" for small n
-statistics = ensemble.statistics()
+ensemble = random_flux_sampling(model, n=1000, condition=CONDITION, seed=0)
+statistics = ensemble.statistics()                          # method="achr" for small n
 ```
 
 **Decision rule per target.** Compare the reference's predicted flux against the sampled
@@ -506,8 +652,9 @@ product exchange is mechanistically plausible.
 Use `reference_constrained_sampling(model, references["pfba"], ...)` instead when the question
 is "how much could this *prediction* vary", rather than "what can the network do at all".
 
-Sampling also supports 5a: `random_flux_sampling(model, condition=<knockouts>)` shows the flux
-space the design creates, and a knockout set that leaves no feasible space is lethal.
+Sampling also supports 5a: sample inside the same `with model:` block that applies the
+knockouts, still passing `condition=CONDITION`, to see the flux space the design creates. A
+knockout set that leaves no feasible space is lethal.
 
 ### 5c — Combining the two tracks into one strain proposal
 
@@ -562,6 +709,10 @@ Follow `_reporting.md`. Scenario-specific requirements:
 - **If step 3 used the LP fallback**, Setup and Limitations must both carry the three
   disclosures listed there: which capability was missing, that only single deletions were
   examined, and that coupling was not established.
+- **State the condition once, in Setup, and never restate it differently.** Give the medium
+  preset name, the oxygen exchange bounds, the substrate and its uptake rate, and the model
+  fingerprint taken after the medium was applied. Every number in the report comes from that
+  one condition.
 - **Limitations** must include: predictions are hypotheses requiring experimental validation;
   the medium, substrate, and aeration assumed; that coupling is a property of the model's
   growth-maximizing assumption while MOMA predicts the immediate post-deletion phenotype, so a
@@ -603,5 +754,11 @@ Before writing the report, confirm the pipeline is internally consistent:
   adaptation estimate, not a refutation.
 - Do not present reaction knockouts as if they were gene deletions.
 - Do not drop lethal knockouts or infeasible scan points from the exported tables.
-- Do not change `aerobic` or the substrate between steps. Every number in one report must come
-  from one condition, or the condition must be a reported variable.
+- **Do not change the medium, the aeration or the substrate between steps.** Set the condition
+  once in step 0 and pass it down. Every number in one report must come from one condition, or
+  the condition must be a reported variable with its own column.
+- **Do not describe a design without naming the condition it was found under.** A knockout set
+  that is growth-coupled aerobically can fail to grow at all anaerobically, and the same set
+  can rank first under both — see the table in step 3.
+- Do not quote a `bottleneck` location from a pre-0.4.0 run, and do not attribute the removed
+  bottleneck criterion to any publication.

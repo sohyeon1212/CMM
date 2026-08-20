@@ -73,7 +73,7 @@ def test_moma_matches_cobra(branched_model):
 
 
 def test_theoretical_yield_matches_manual_cobra(ecoli_core):
-    cmm_yield = theoretical_yield(ecoli_core, SUCC, aerobic=True)
+    cmm_yield = theoretical_yield(ecoli_core, SUCC)
     # Manual cobra: fix glucose at -10, maximize succinate, divide by 10.
     with ecoli_core:
         ecoli_core.reactions.get_by_id(GLC).bounds = (-10.0, -10.0)

@@ -94,6 +94,23 @@ optimally.
 by normalized expression then minimizes total squared flux; LAD (LP) fits fluxes to
 expression-derived targets. They answer slightly different questions — name which you used.
 
+**Two 0.4.0 changes make every pre-0.4.0 result here stale.** The GPR `OR` rule for continuous
+expression is now `"sum"` (Kim et al. 2016 and Lee et al. 2012 both specify it; CMM's previous
+`max` matches no source paper) — measured on `e_coli_core` + GSE41189 it moves 30 of 66 mapped
+reaction weights, by up to 2.67×, shifts the normalisation denominator, and changes predicted
+growth by 26%. And LAD now fits the **absolute** flux, so a reversible reaction is no longer
+penalised for running in reverse. `or_rule=` is a parameter on `integrate_expression` /
+`gene_to_reaction_weights`; the rule used is recorded as `gpr_or_rule` in provenance, and
+`metadata["cmm_deviations"]` lists where each method departs from its source. Quote both.
+
+**E-Flux2 cannot constrain a reaction with no GPR** — `EX_o2_e` among them — so expression
+alone does not switch off respiration. On the GSE41189 aerobic/anaerobic pair, expression
+alone gets the fermentation half right (formate 4.3×, acetate up 17%, oxidative
+phosphorylation down) and the TCA half wrong (up 13%), because the model still takes up 12.25
+mmol gDW⁻¹ h⁻¹ of O₂ in the "anaerobic" sample. Applying the oxygen condition as well —
+step 0's `CONDITION` — gives the expected physiology (TCA down 33×, fermentation up 3.3×).
+This is a property of the method, not a tuning knob: state which of the two you ran.
+
 **Branch.** No QP → LAD, recorded as a substitution (`AGENTS.md` §3.3). Never pass
 `allow_l1_fallback=True` and call the result E-Flux2.
 
@@ -193,9 +210,16 @@ exchange changes, the difference may be alternate-optima noise rather than biolo
 from cmm.core import Condition, ReactionBound
 from cmm.features import flux_response, fseof
 
-scan = fseof(model, PRODUCT, n_steps=10, aerobic=AEROBIC)
+# The condition is the one fixed in preflight, not a per-step choice. Build it once and
+# pass it to every call that accepts it; `aerobic=` was removed in 0.4.0.
+CONDITION = Condition(
+    name="glucose_anaerobic",
+    bounds=(ReactionBound(reaction_id="EX_o2_e", lower_bound=0.0, upper_bound=0.0),),
+)
+
+scan = fseof(model, PRODUCT, condition=CONDITION, n_steps=10)
 for candidate in scan.amplification_targets()[:10]:
-    verified = flux_response(model, candidate, response=PRODUCT,
+    verified = flux_response(model, candidate, response=PRODUCT, condition=CONDITION,
                              biomass_fraction=0.3, n_steps=20)
 ```
 

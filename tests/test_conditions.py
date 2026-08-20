@@ -101,3 +101,32 @@ def test_read_expression_table_detects_tsv(tmp_path):
 
     assert list(table.columns) == ["c1", "c2"]
     assert table.loc["g1", "c2"] == 20.0
+
+
+def test_predict_condition_fluxes_carries_run_provenance(ecoli_core):
+    """The multi-condition container states the run, not only the per-condition solves."""
+
+    from cmm.core.provenance import model_fingerprint
+
+    table = _two_condition_table(ecoli_core)
+    cf = predict_condition_fluxes(ecoli_core, table, method="eflux2")
+
+    for key in (
+        "timestamp_utc",
+        "seed",
+        "solver",
+        "solver_version",
+        "platform",
+        "model_sha256",
+    ):
+        assert key in cf.metadata
+    assert cf.metadata["seed"] is None  # deterministic: null, not an invented seed
+    assert cf.metadata["integration_method"] == "eflux2"
+    assert cf.metadata["conditions"] == ("condA", "condB")
+    assert cf.metadata["n_conditions"] == 2
+    assert cf.metadata["n_nonoptimal"] == 0
+    # Every condition is solved inside its own ``with model:`` block, so the recorded
+    # fingerprint is the one model state all of them were solved on.
+    assert cf.metadata["model_sha256"] == model_fingerprint(ecoli_core)
+    # Each condition keeps its own block for when its numbers are lifted out alone.
+    assert cf.results["condA"].metadata["model_sha256"] == cf.metadata["model_sha256"]

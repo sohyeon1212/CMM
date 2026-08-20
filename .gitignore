@@ -26,3 +26,6 @@ temp_figures/
 
 # Large legacy expression data (58 MB, unused by any code/test)
 test_data/log_tpm_qc.csv
+
+# Generated scenario figure outputs written via CMM_OUTPUT_DIR (see docs/scenario-figures.md)
+temp_figures_new/

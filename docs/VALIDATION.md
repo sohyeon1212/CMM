@@ -1,6 +1,6 @@
 # Scientific validation and reproducibility
 
-This document defines what CMM 0.3.0 has been validated against, how to reproduce the
+This document defines what CMM 0.4.0 has been validated against, how to reproduce the
 evidence, and what the tests do not establish. A green test suite supports numerical and
 implementation correctness; it is not a substitute for experimental validation of a new
 biological target.
@@ -31,9 +31,11 @@ uvx twine check dist/*
 ```
 
 CI executes the same locked environment on Linux (Python 3.10 and 3.12), Windows 3.12, and
-macOS 3.12. QP/MIQP checks use small models that fit the bundled Gurobi restricted license;
-they are required tests, not environment-dependent skips. Genome-scale LP validation uses
-GLPK. Pytest's ten slowest durations are retained in every CI log as a lightweight runtime
+macOS 3.12. QP/MIQP checks use small models that fit the bundled Gurobi restricted license
+(largest QP: 190 variables / 73 constraints, against that license's 200-variable limit for
+quadratic models); they are required tests, not environment-dependent skips. That 10-variable
+margin is deliberate and narrow — enlarging the E-Flux2 test model beyond 100 reactions would
+make these tests require a full license. Genome-scale LP validation uses GLPK. Pytest's ten slowest durations are retained in every CI log as a lightweight runtime
 regression record; solver/model/license details remain part of result provenance.
 
 ## Evidence matrix
@@ -67,6 +69,23 @@ upstream artifact.
 
 ## Method contracts
 
+### Gene-protein-reaction resolution
+
+Two different GPR rules ship, because the source papers specify two different operations, and
+each result records which one produced it.
+
+- **Continuous expression values** (`gene_to_reaction_weights`, and therefore E-Flux2 and LAD):
+  `AND` is `min`, `OR` is `or_rule`, defaulting to `"sum"`. Kim et al. (2016) take *"the sum of
+  the expression values of the associated genes"* for isozymes; Lee et al. (2012) state *"the
+  total capacity is given by the sum of its components"*. `or_rule="max"` is CMM's pre-0.4.0
+  behaviour, matches no source paper, and is retained only to reproduce an old result. The rule
+  is archived as `gpr_or_rule` in the result's provenance.
+- **Ternary direction labels** (`reaction_directions`, and therefore MTA/rMTA): Yizhak et al.'s
+  rule — all genes elevated or all reduced under `AND`, at least one under `OR`, and **mixed ⇒
+  unchanged**. It is implemented as a two-pass binary decomposition, not by reusing the numeric
+  `min`/`max` helper, and is recorded as `gpr_rule = "yizhak2013_two_pass_binary"`. A sum is
+  not type-correct over direction labels, so the two rules are deliberately not shared.
+
 ### E-Flux2
 
 CMM normalizes non-negative expression-derived reaction weights, constrains reaction bounds,
@@ -75,19 +94,72 @@ and minimizes the L2 norm of all fluxes. The default objective fraction is `1.0`
 support the method raises; the opt-in `allow_l1_fallback=True` result is labeled
 `eflux2_l1_fallback` and must not be reported as E-Flux2.
 
-Reference: Kim et al. (2016), <https://doi.org/10.1371/journal.pone.0157101>.
+Reference: Kim MK, Lane A, Kelley JJ, Lun DS (2016), *PLoS ONE* 11(6):e0157101,
+<https://doi.org/10.1371/journal.pone.0157101>. **Cite that author list.** "Kim, Woo, Choi" is
+a wrong author list for this paper and must not appear in any manuscript or docstring.
+E-Flux2 builds on E-Flux, Colijn et al. (2009), *PLoS Comput Biol* 5(8):e1000489,
+<https://doi.org/10.1371/journal.pcbi.1000489>.
+
+### LAD
+
+LAD fits fluxes to expression-derived reaction targets by minimizing absolute deviation, an LP.
+It is the method named "Lee-12" in the Machado & Herrgård (2014) survey of expression-integration
+methods.
+
+The residual is taken against the **absolute** flux, using COBRApy's forward/reverse split
+(`v = f − b`, `f, b ≥ 0`, with `b` pinned to 0 when `lb ≥ 0` and `f` pinned to 0 when `ub ≤ 0`),
+so the constraint is `f + b − d⁺ + d⁻ = target`. Fitting the signed flux instead — which CMM did
+before 0.4.0 — assessed a maximum penalty on a correct answer: a reversible reaction at `v = −5`
+with target 5 scores deviation 0 in the source formulation and 10 in the signed one.
+
+Two deviations from Lee et al., both recorded in `metadata["cmm_deviations"]` and neither
+silent. (i) The per-reaction `1/σ` weights of Eq. 2/3 are **off by default**; supply them with
+`reaction_sigma=`, and `metadata["sigma_weighted"]` records which was used. (ii) Fitting `f + b`
+in a single LP does not force `f · b = 0`, so a reversible reaction may satisfy a target by
+carrying flux in both directions; that is a property of the reference formulation too, which
+avoids it with an FVA-driven iteration CMM does not implement. `weight_threshold` defaults to
+`0.0` from 0.4.0 (previously 0.01), so a low-expression reaction is driven toward zero flux
+rather than excluded from the objective.
+
+Reference: Lee D, Smallbone K, Dunn WB, Murabito E, Winder CL, Kell DB, Mendes P, Swainston N
+(2012), *BMC Systems Biology* 6:73, <https://doi.org/10.1186/1752-0509-6-73>. Survey placement:
+Machado & Herrgård (2014), *PLoS Comput Biol* 10(4):e1003580,
+<https://doi.org/10.1371/journal.pcbi.1003580>.
 
 ### FSEOF and FVSEOF
 
 Scans begin at product flux observed under maximum growth and end at a selected fraction of
 the theoretical maximum. FSEOF fixes product flux and maximizes biomass at each level. FVSEOF
 fixes both product and an exact fraction of maximum biomass, computes reaction FVA, and reports
-midpoint, forced-minimum magnitude, range width, and their slopes. Optional grouping-reaction
-equalities are caller-supplied. Diagnostic tables contain all requested reactions; actionable
-lists exclude boundary/objective/no-GPR reactions.
+midpoint (Park's `V_avg`), forced-minimum magnitude, range width (Park's `l_sol`), and their
+slopes. `n_steps` defaults to 10, Park et al.'s stated minimum. Diagnostic tables contain all
+requested reactions; actionable lists exclude boundary/objective/no-GPR reactions.
 
-References: Choi et al. (2010), <https://doi.org/10.1128/AEM.00115-10>; Park et al. (2012),
-<https://doi.org/10.1186/1752-0509-6-106>.
+FVSEOF classification follows Park et al.'s **nine types**, taken from the joint sign of ΔV_avg
+and Δl_sol: types 1–3 (V_avg rising) are the amplification candidates, 4–6 the knockdown
+candidates, 7–9 neither. `amplification_targets()` returns types 1–3 ordered by ascending mean
+`l_sol`, which is Park's stated priority (*"reactions with smaller values of l_sol received
+higher priorities"*). The type index is exported as `park_type`. The index *within* each band
+is CMM's convention and is labelled as such: the paper's own numbering is in a figure that
+could not be resolved from the text, and no numbering was invented for it.
+
+The optional `linear_flux_couplings` keyword (renamed from `group_constraints` in 0.4.0) takes
+caller-supplied linear equalities `Σc·v = 0`.
+
+Two selection rules here are CMM's own and must not be attributed to the source papers.
+FSEOF's criterion (endpoint difference, positive linear slope, no sign reversal, baselined at
+the 10% scan level) is stricter than Choi et al.'s `|v_j|max > |v_j^initial|` ∧
+`v_j^max · v_j^min ≥ 0`. FVSEOF's `robust_targets()` flag — forced FVA minimum rising
+monotonically — has no counterpart in Park et al. and is not their variability criterion; Park's
+variability signal is Δl_sol, which the nine types encode. FVSEOF's `linear_flux_couplings` are
+caller-supplied linear equalities `Σc·v = 0`, a different object from Park et al.'s
+STRING-derived on/off reaction pairs with `|v1−mean| + |v2−mean| ≤ δ` on uptake-normalised
+fluxes, none of which CMM implements. FVSEOF's `slope` regresses `|V_avg|`, matching CMM's
+magnitude convention for reverse-running reactions, not Park's signed `q_slope`.
+
+References: Choi HS, Lee SY, Kim TY, Woo HM (2010), *Appl Environ Microbiol* 76(10):3097–3105,
+<https://doi.org/10.1128/AEM.00115-10>; Park JM, Park HM, Kim WJ, Kim HU, Kim TY, Lee SY (2012),
+*BMC Systems Biology* 6:106, <https://doi.org/10.1186/1752-0509-6-106>.
 
 ### OptKnock and RobustKnock
 
@@ -97,8 +169,70 @@ then independently fixes each design at its optimal growth and reports both maxi
 minimum product flux. A nonzero `guaranteed_product` is therefore an evaluated property, not
 an alias of the optimistic value.
 
-References: Burgard et al. (2003), <https://doi.org/10.1002/bit.10803>; Tepper and Shlomi
-(2010), <https://doi.org/10.1093/bioinformatics/btp704>.
+**Candidate sets are restricted by default.** `actionable_only=True` limits knockout candidates
+to gene-associated internal reactions, because a design deleting a boundary exchange with no GPR
+is not realisable as a gene deletion; Burgard et al. likewise restrict candidates to central
+metabolism. On `e_coli_core` this excludes 26 of 95 reactions and removes 10 of 18 returned
+designs without changing the top design or its numbers. `actionable_only=False` restores the
+unrestricted set. `max_solutions` caps MILP solutions, not distinct designs, and designs are
+de-duplicated by knockout set before being returned. Both functions take `condition=` as of
+0.4.0; before that they accepted no context at all.
+
+**Three citations are required together, not two.** The bilevel and three-level searches are
+solved by the `straindesign` package, which carries no literature citation of its own; citing
+only the original method papers would attribute that package's candidate set, network
+compression, decompression, and solution enumeration to the original authors.
+
+References: Burgard AP, Pharkya P, Maranas CD (2003), *Biotechnol Bioeng* 84(6):647–657,
+<https://doi.org/10.1002/bit.10803>; Tepper N, Shlomi T (2010), *Bioinformatics* 26(4):536–543,
+<https://doi.org/10.1093/bioinformatics/btp704>; Schneider P, Bekiaris PS, von Kamp A, Klamt S
+(2022), *Bioinformatics* 38(21):4981–4983, <https://doi.org/10.1093/bioinformatics/btac632>
+(the StrainDesign package itself).
+
+### MOMA and ROOM
+
+Both are delegated to COBRApy; nothing is reimplemented, so their numerical behaviour is the
+ecosystem's — including ROOM's constraint capping the perturbed objective at the reference
+objective, which is COBRApy's addition and is not in Shlomi et al.'s Eqs 1–3.
+
+**L2 MOMA is Segrè et al. (2002); the L1 variant is not.** That paper contains no linear
+variant, so `moma_l1` must be described as the linear variant as implemented in COBRApy, with
+no citation to Segrè et al., until a quotable source for it is obtained.
+
+ROOM's δ = 0.03 / ε = 0.001 are Shlomi et al.'s **flux-prediction** pair; the paper gives
+δ = 0.1 / ε = 0.01 for **lethality prediction**. Both ship as `cmm.features.ROOM_TOLERANCES` and
+are selected by `use_case` / `room_use_case`: `room()` and `knockout_comparison()` default to
+flux prediction, `batch_comparison` to lethality, and every result records the pair it used.
+Explicit `delta`/`epsilon` override the preset. The choice is not cosmetic — 531 against 401
+total switches over the same 35 gene knockouts, a 24% shift in the ranking score.
+
+**Every result in this family carries the full `run_provenance` block**, alongside the
+reference identity and (for ROOM) the tolerance pair. `moma`, `room` and `knockout_comparison`
+fingerprint the model *as handed to the solver*, so a knockout's record is the fingerprint of
+the knocked-out model; `batch_comparison` carries one block for the screen on its
+`BatchComparisonResult` container, fingerprinting the model before any knockout — the one
+model every row derives from — together with what the enumeration dropped
+(`n_inert_dropped`). `seed` is recorded as `null`, because MOMA and ROOM are deterministic and
+CMM does not invent a seed where a method has none.
+
+**The reported quantity is separated from the solver objective.** `objective_value` is the raw
+objective and differs in kind per method: `Σd²` for `moma_l2`, `Σ|d|` for `moma_l1`, and a
+*count of significantly changed reactions* for ROOM. `distance` is a distance and only a
+distance — the Euclidean `√(Σd²)` of Segrè et al.'s Eq. (4) for `moma_l2`, the L1 sum for
+`moma_l1`, and `None` for ROOM, whose count is exported as `n_changed_reactions`.
+`distance_kind` records which. Before 0.4.0 one field held all three; on the SC-01 design it
+reported 1303.99 where the Euclidean distance is 36.11.
+
+**The reference state is pFBA in both the Python API and the GUI.** Segrè et al. specify FBA,
+and `reference_flux(model, "fba")` remains available; pFBA is chosen for determinism and is a
+disclosed deviation. Measured: FBA vs pFBA changes MOMA growth by at most 0.00096 h⁻¹ (0.098%
+of wild type) with 0 of 24 knockouts reclassified on *i*JO1366 and byte-identical vectors on
+`e_coli_core`, while 8 identical `reference_flux(..., "fba")` calls on *i*JO1366 returned 3
+distinct vectors. Every result records the reference state it was measured against.
+
+References: Segrè D, Vitkup D, Church GM (2002), *PNAS* 99(23):15112–15117,
+<https://doi.org/10.1073/pnas.232349399>; Shlomi T, Berkman O, Ruppin E (2005), *PNAS*
+102(21):7695–7700, <https://doi.org/10.1073/pnas.0406346102>.
 
 ### Flux response
 
@@ -111,9 +245,28 @@ the robustness reading; naming a product exchange gives the production reading. 
 maximizing a product without a growth floor returns non-growing solutions, `biomass_fraction`
 holds biomass at a fraction of the wild-type optimum across the scan. Infeasible points are
 retained with NaN fluxes and their solver status: the flux at which a scan stops being
-solvable is a reported result, not an error. The bottleneck is the steepest decline in the
-finite-difference gradient of the response curve; a curve that never declines or is flat
-within tolerance is reported as "no bottleneck", which is itself the finding.
+solvable is a reported result, not an error. `feasible_range()` is computed by FVA on the
+scanned reaction under the applied growth floor, not read off the scan grid.
+
+Sensitivity is reported as the **shadow price** `d(response)/d(target)`, taken exactly from the
+LP dual, together with the phase boundaries at which it changes. The response curve is the
+optimal-value function of an LP parameterized in one bound and is therefore concave piecewise
+linear, so a finite-difference "steepest decline" locates the edge of the scan grid rather than
+a property of the network. The `bottleneck` field that reported it was removed in 0.4.0: its
+location moved by up to 29.53 flux units and its `found` flag inverted as `n_steps` went from 6
+to 160, and no published criterion in constraint-based modelling defines a bottleneck as the
+argmin of a finite-difference slope. Regions of constant shadow price and the boundaries
+between them are the published objects.
+
+References: Lee KH, Park JH, Kim TY, Kim HU, Lee SY (2007), *Mol Syst Biol* 3:149,
+<https://doi.org/10.1038/msb4100196> (PMC2174629, PMID 18059444 — **not** PMC1911197, which is
+Feist et al. 2007), for in silico flux response analysis; Edwards JS, Palsson BØ (2000),
+*Biotechnol Prog* 16(6):927–939, <https://doi.org/10.1021/bp0000712>, for the biomass case
+(robustness analysis); Edwards JS, Ramakrishna R, Palsson BØ (2002), *Biotechnol Bioeng*
+77(1):27–36, <https://doi.org/10.1002/bit.10047>, "Characterizing the metabolic phenotype: a
+phenotype phase plane analysis", for phases as regions of constant shadow price. **Orth, Thiele
+& Palsson (2010) contains no definition of shadow price or reduced cost and must not be cited
+for either.**
 
 ### Random flux sampling
 
@@ -143,8 +296,28 @@ The optimization, transformation score, and robust Equation 9 are documented in
 E-Flux2 source-state preprocessing, which differs from the original contextualization plus
 sampling protocol and must be disclosed in manuscripts.
 
-References: Yizhak et al. (2013), <https://doi.org/10.1038/ncomms3632>; Valcárcel et al.
-(2019), <https://doi.org/10.1093/bioinformatics/btz231>.
+References: Yizhak K, Gabay O, Cohen H, Ruppin E (2013), *Nat Commun* 4:2632,
+<https://doi.org/10.1038/ncomms3632>; Valcárcel LV, Torrano V, Tobalina L, Carracedo A,
+Planes FJ (2019), *Bioinformatics* 35(21):4350–4355,
+<https://doi.org/10.1093/bioinformatics/btz231>.
+
+### Transformation targets
+
+`transformation_targets` is **not a CMM invention.** Both of its paths map to published Yizhak
+et al. (2013) methods: the `mta` path is that paper's MIQP formulation applied to an arbitrary
+source→target pair rather than a disease→healthy one, and the `moma` path is the
+distance-reduction scoring the same paper uses as its comparison method. Cite Yizhak et al.
+(2013) for both; do not describe either as a method originating in CMM.
+
+Note that Yizhak et al. report the MOMA-style scoring as *markedly inferior* to MTA, and it is
+CMM's default. State which path produced a ranking.
+
+### Methods with no published source
+
+`flux_log_change` is a **CMM utility**: a log2 ratio of two flux vectors with a pseudocount. It
+implements no published method and **must not be cited to any paper.** Describe it as CMM's own
+reporting convenience, and state the pseudocount, which determines the value returned for
+switch-on and switch-off reactions.
 
 ## Run provenance
 
@@ -152,10 +325,17 @@ Numerical result metadata includes:
 
 - deterministic model SHA-256 over reaction bounds, objective coefficients, GPR rules, and
   stoichiometry;
-- model id and active solver;
+- model id and active solver, **and the solver version**;
+- the run timestamp in UTC (`timestamp_utc`, ISO-8601, never local time) and the run `seed`
+  (`null` when the method has none — a statement that this run had no seed, not an omission);
+- the platform, machine and processor;
 - Python, CMM, COBRApy, NumPy, pandas, and SciPy versions;
 - method parameters, source-state provenance, and counts of non-optimal scan levels where
-  applicable.
+  applicable;
+- for the production family, `applied_condition`: the medium as applied (with the components
+  the model could not express, under `dropped`), the oxygen exchange bounds, and every carbon
+  uptake with its rate — so a result file states its own conditions rather than leaving a reader
+  to reconstruct them from a fingerprint.
 
 Save result tables together with their metadata, the exact input model and omics files, the
 Git commit, and the `uv.lock` used for the analysis. Model fingerprints detect scientific
@@ -163,11 +343,26 @@ model changes; they do not replace archival storage of the model file.
 
 ## Known limits
 
+- Under the bundled restricted Gurobi license, L2 MOMA and `rmta_continuous` are exercised only
+  on toy networks; `rmta_continuous` has **no test that solves its QP** — only a GLPK
+  capability-gate test — so the QP row claimed for it in the README is unverified. L2 MOMA on
+  `e_coli_core` (286 variables, because COBRApy adds one distance variable per reaction)
+  exceeds the restricted license and requires a full one.
+- `fva` resolves `processes` to 1 below 500 analysed reactions, but leaves the pool to cobra's
+  configuration at genome scale. A full *i*JO1366 FVA on macOS therefore still needs the caller
+  to wrap it in `if __name__ == "__main__":`, or to pass `processes=1`. That residual is
+  cobra's multiprocessing behaviour, not CMM's.
 - No current automated test validates novel target predictions against new wet-lab data.
 - MIQP/MILP genome-scale runtime and feasibility depend strongly on the solver license,
   tolerances, candidate set, and network compression.
-- rMTA source-state preprocessing and optional FVSEOF grouping constraints must be described
+- rMTA source-state preprocessing and FVSEOF's `linear_flux_couplings` must be described
   exactly; CMM does not silently claim the full preprocessing protocol of either paper.
+- MTA/rMTA transformation scores floor the published denominator at the run's own `epsilon`, so
+  a "perfect transformation" receives a large finite score rather than `+∞`. The scale is a
+  documented function of a documented parameter. Check `n_distinct_scores`,
+  `largest_tie_block` and `score_resolution` in the ranking's metadata before quoting a top-k:
+  `TargetRanking.sorted` breaks ties on `target_id`, so a large tie block is an alphabetical
+  slice, not a ranking.
 - Floating-point optima can vary within solver tolerance. Manuscripts should report the
   solver, tolerance, model fingerprint, parameters, and acceptance tolerance.
 - Sampler convergence is not asserted. OptGP needs large sample counts (roughly >1000) to mix;

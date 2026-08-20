@@ -67,6 +67,48 @@ def test_fva_returns_flux_ranges(toy_model):
     assert ranges["PRODUCT"].maximum == pytest.approx(10)
 
 
+def test_fva_carries_provenance_like_its_siblings(toy_model):
+    result = fva(toy_model, reactions=("BIOMASS",), fraction_of_optimum=0.5)
+
+    assert len(result.metadata["model_sha256"]) == 64
+    assert result.metadata["parameters"]["method"] == "fva"
+    assert result.metadata["parameters"]["fraction_of_optimum"] == 0.5
+    assert result.metadata["parameters"]["loopless"] is False
+    assert result.metadata["timestamp_utc"].endswith("Z")
+    frame = result.to_frame()
+    assert list(frame.columns) == ["reaction_id", "minimum", "maximum"]
+    assert list(frame["reaction_id"]) == ["BIOMASS"]
+
+
+def test_fva_forwards_loopless(ecoli_core):
+    """Loopless FVA removes the FRD7/SUCDi thermodynamic loop; plain FVA does not."""
+
+    looped = fva(ecoli_core, reactions=("FRD7",), fraction_of_optimum=0.0)
+    loopless = fva(
+        ecoli_core, reactions=("FRD7",), fraction_of_optimum=0.0, loopless=True
+    )
+
+    assert looped["FRD7"].maximum == pytest.approx(1000.0)
+    assert loopless["FRD7"].maximum < looped["FRD7"].maximum
+    assert loopless.metadata["parameters"]["loopless_algorithm"] == "cycleFreeFlux"
+    assert looped.metadata["parameters"]["loopless_algorithm"] is None
+
+
+def test_fva_rejects_an_unknown_loopless_algorithm(toy_model):
+    with pytest.raises(ValueError, match="fastSNP"):
+        fva(toy_model, loopless="nonsense")
+
+
+def test_fva_does_not_spawn_a_pool_for_a_small_model(toy_model):
+    """Small models run in-process: a pool is pure overhead and breaks on macOS spawn."""
+
+    result = fva(toy_model)
+    assert result.metadata["parameters"]["processes"] == 1
+
+    forced = fva(toy_model, processes=2)
+    assert forced.metadata["parameters"]["processes"] == 2
+
+
 def test_fva_validates_fraction(toy_model):
     with pytest.raises(ValueError, match="fraction_of_optimum"):
         fva(toy_model, fraction_of_optimum=1.5)

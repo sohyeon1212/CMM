@@ -22,7 +22,7 @@ from cobra.io import load_model  # noqa: E402
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
 from cmm.app.main_window import CmmMainWindow  # noqa: E402
-from cmm.core import fba  # noqa: E402
+from cmm.core import Condition, ReactionBound, fba  # noqa: E402
 from cmm.features.production import (  # noqa: E402
     fseof,
     production_envelope,
@@ -49,13 +49,43 @@ ESCHER_MAP = _REPO_ROOT / "test_data" / "e_coli_core.Core metabolism.json"
 # Growth-coupled succinate design: go anaerobic and block the competing fermentation
 # secretions (upper bound 0), leaving succinate (via FRD7) as the only NADH sink. Under
 # growth maximization this forces succinate excretion from 0 up to ~10.
+#
+# Every bound this design depends on is declared here, including the CO2 supply. That is
+# deliberate: reductive-TCA succinate runs through PEP carboxylase (pep + co2 -> oaa), so the
+# route consumes CO2 and cannot carry flux without a source of it. Industrial anaerobic
+# succinate fermentation supplies exactly that, by CO2 sparging or bicarbonate. Since 0.4.0
+# the media layer closes CO2 uptake by default so that a product's carbon is attributed to the
+# named substrate unless stated otherwise, and this design states otherwise.
+#
+# Measured on e_coli_core with glucose_aerobic applied, then these bounds:
+#   CO2 supply declared (below)  -> growth 0.020154, succinate 9.8848, CO2 uptake 0.0147
+#   CO2 uptake left closed       -> growth 0.000000, succinate 8.3900, CO2 uptake 0.0
+# Fluxes are mmol gDW-1 h-1 and growth is h-1. This is a demonstration of bound editing; the
+# yields reported by ``theoretical_yield`` elsewhere in this module use the default closed-CO2
+# condition and are not affected by the supply declared here.
 ENGINEERING_BOUNDS = {
     "EX_o2_e": (0.0, 1000.0),  # anaerobic
+    "EX_co2_e": (
+        -1000.0,
+        1000.0,
+    ),  # CO2 supplied (sparging/bicarbonate); PPC requires it
     "EX_ac_e": (0.0, 0.0),  # block acetate secretion
     "EX_etoh_e": (0.0, 0.0),  # block ethanol
     "EX_for_e": (0.0, 0.0),  # block formate
     "EX_lac__D_e": (0.0, 0.0),  # block lactate
 }
+
+
+#: 0.4.0 removed ``aerobic=`` from cmm.features.production: the condition is stated once, the
+#: same way every other caller states it. CO2 uptake is closed alongside oxygen, matching what
+#: the ``glucose_anaerobic`` preset does through the media layer.
+ANAEROBIC = Condition(
+    name="anaerobic (O2 and CO2 uptake closed)",
+    bounds=(
+        ReactionBound(reaction_id="EX_o2_e", lower_bound=0.0),
+        ReactionBound(reaction_id="EX_co2_e", lower_bound=0.0),
+    ),
+)
 
 
 def _output_dir() -> Path:
@@ -73,8 +103,8 @@ def generate_publication_figures(model) -> list[Path]:
 
     saved: list[Path] = []
 
-    aerobic_yield = theoretical_yield(model, SUCC, aerobic=True)
-    anaerobic_yield = theoretical_yield(model, SUCC, aerobic=False)
+    aerobic_yield = theoretical_yield(model, SUCC)
+    anaerobic_yield = theoretical_yield(model, SUCC, condition=ANAEROBIC)
     saved.append(
         save_figure(
             yield_figure(
@@ -84,7 +114,7 @@ def generate_publication_figures(model) -> list[Path]:
         )
     )
 
-    envelope = production_envelope(model, SUCC, aerobic=True, points=20)
+    envelope = production_envelope(model, SUCC, points=20)
     saved.append(
         save_figure(
             production_envelope_figure(envelope, title="Succinate production envelope"),
@@ -92,7 +122,7 @@ def generate_publication_figures(model) -> list[Path]:
         )
     )
 
-    result = fseof(model, SUCC, n_steps=10, aerobic=False)
+    result = fseof(model, SUCC, n_steps=10, condition=ANAEROBIC)
     saved.append(
         save_figure(
             fseof_figure(

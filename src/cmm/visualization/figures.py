@@ -259,7 +259,13 @@ def flux_response_figure(
     show_biomass: bool = True,
     column_width: int = 2,
 ) -> Figure:
-    """Response curve vs enforced target flux, with infeasible range and bottleneck marked.
+    """Response curve vs enforced target flux, with the response limit and phases marked.
+
+    The curve is the optimal-value function of an LP parameterised in one right-hand side,
+    so it is concave piecewise linear: the light dividers are the phase boundaries where the
+    shadow price changes, and the solid marker is ``result.limit`` — the exact target flux
+    beyond which the response starts to fall. Neither moves with ``n_steps``, which the
+    finite-difference "steepest decline" span they replace did, by up to 29.5 flux units.
 
     When the response is a product (not biomass itself) the biomass trace is drawn on a
     secondary axis, because the growth cost of each target flux is what decides whether a
@@ -308,14 +314,33 @@ def flux_response_figure(
             label=f"optimum ({optimum.response_flux:.3g})",
         )
 
-    bottleneck = result.bottleneck
-    if bottleneck.found and bottleneck.decline_interval is not None:
-        ax.axvspan(
-            bottleneck.decline_interval[0],
-            bottleneck.decline_interval[1],
+    # Phase boundaries: where the LP dual (and therefore the slope) changes. Drawn as light
+    # dividers, and deliberately unlabelled when there are many, so they read as structure
+    # rather than as a claim about any single one of them.
+    for phase in result.phases[1:]:
+        ax.axvline(
+            phase.target_low,
+            color="#BBBBBB",
+            linewidth=0.8,
+            linestyle="-",
+            zorder=0,
+        )
+
+    limit = result.limit
+    if (
+        limit.found
+        and limit.target_flux is not None
+        and limit.response_flux is not None
+    ):
+        ax.axvline(
+            limit.target_flux,
             color=PALETTE[1],
-            alpha=0.15,
-            label="steepest decline",
+            linewidth=1.6,
+            linestyle="--",
+            label=(
+                f"response limit ({limit.target_flux:.3g}; shadow price "
+                f"{limit.shadow_price_after:.3g})"
+            ),
         )
 
     handles, labels = ax.get_legend_handles_labels()

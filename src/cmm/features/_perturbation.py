@@ -71,13 +71,63 @@ class Perturbation:
         return len(self.reaction_ids) == 0
 
 
+class PerturbationList(list[Perturbation]):
+    """A knockout enumeration that remembers what it left out.
+
+    Behaves exactly like ``list[Perturbation]``. Genes whose deletion blocks no reaction
+    under the GPR are dropped by default, because scoring them is a guaranteed no-op — but
+    dropping them silently understates the screen: 66 of 137 genes on ``e_coli_core`` never
+    reach the table. ``inert_dropped`` names them so a caller can put the count in its own
+    provenance instead, via :meth:`provenance`.
+    """
+
+    def __init__(
+        self,
+        perturbations: Iterable[Perturbation] = (),
+        *,
+        inert_dropped: Iterable[str] = (),
+    ) -> None:
+        super().__init__(perturbations)
+        self.inert_dropped: tuple[str, ...] = tuple(inert_dropped)
+
+    @property
+    def n_inert_dropped(self) -> int:
+        return len(self.inert_dropped)
+
+    def provenance(self) -> dict[str, object]:
+        """The counts a report needs to state what the enumeration covered."""
+
+        return {
+            "n_perturbations": len(self),
+            "n_inert_dropped": self.n_inert_dropped,
+            "n_candidates_considered": len(self) + self.n_inert_dropped,
+        }
+
+
+def perturbation_provenance(perturbations: Sequence[Perturbation]) -> dict[str, object]:
+    """Enumeration counts for any perturbation sequence, dropped-gene count when known."""
+
+    if isinstance(perturbations, PerturbationList):
+        return perturbations.provenance()
+    return {
+        "n_perturbations": len(perturbations),
+        "n_inert_dropped": None,
+        "n_candidates_considered": None,
+    }
+
+
 def gene_perturbations(
     model: Model,
     genes: Iterable[str] | None = None,
     *,
     include_inert: bool = False,
-) -> list[Perturbation]:
-    """Enumerate gene knockouts, resolving each gene to the reactions it disables via GPR."""
+) -> PerturbationList:
+    """Enumerate gene knockouts, resolving each gene to the reactions it disables via GPR.
+
+    Genes that block no reaction are omitted unless ``include_inert=True``; the result
+    records how many were dropped (see :class:`PerturbationList`) so the omission can be
+    reported rather than being invisible.
+    """
 
     gene_objs = (
         [model.genes.get_by_id(g) for g in genes]
@@ -85,13 +135,15 @@ def gene_perturbations(
         else list(model.genes)
     )
     perts: list[Perturbation] = []
+    dropped: list[str] = []
     for gene in gene_objs:
         reaction_ids = _blocked_reaction_ids(model, gene.id)
         pert = Perturbation(target_id=gene.id, kind="gene", reaction_ids=reaction_ids)
         if pert.is_inert and not include_inert:
+            dropped.append(gene.id)
             continue
         perts.append(pert)
-    return perts
+    return PerturbationList(perts, inert_dropped=dropped)
 
 
 def grouped_gene_perturbations(
@@ -100,11 +152,12 @@ def grouped_gene_perturbations(
     genes: Iterable[str] | None = None,
     *,
     include_inert: bool = False,
-) -> list[Perturbation]:
+) -> PerturbationList:
     """Group transcript-like gene IDs before knockout (COBRA rMTA ``SeparateTranscript``).
 
     For example, separator ``'.'`` groups ``g2.1`` and ``g2.2`` into a joint knockout named
-    ``g2``. This is required to reproduce published MTA/rMTA gene-level screens.
+    ``g2``. This is required to reproduce published MTA/rMTA gene-level screens. As with
+    :func:`gene_perturbations`, inert groups are dropped but counted.
     """
 
     if not separator:
@@ -120,30 +173,32 @@ def grouped_gene_perturbations(
             raise KeyError(f"unknown grouped genes: {sorted(unknown)}")
 
     perturbations: list[Perturbation] = []
+    dropped: list[str] = []
     for base in sorted(grouped):
         if selected is not None and base not in selected:
             continue
         reaction_ids = blocked_reactions_for_genes(model, grouped[base])
         perturbation = Perturbation(base, "gene", reaction_ids)
         if perturbation.is_inert and not include_inert:
+            dropped.append(base)
             continue
         perturbations.append(perturbation)
-    return perturbations
+    return PerturbationList(perturbations, inert_dropped=dropped)
 
 
 def reaction_perturbations(
     model: Model,
     reactions: Iterable[str] | None = None,
-) -> list[Perturbation]:
-    """Enumerate single-reaction knockouts."""
+) -> PerturbationList:
+    """Enumerate single-reaction knockouts. Nothing is inert, so nothing is dropped."""
 
     reaction_ids = (
         list(reactions) if reactions is not None else [r.id for r in model.reactions]
     )
-    return [
+    return PerturbationList(
         Perturbation(target_id=rid, kind="reaction", reaction_ids=(rid,))
         for rid in reaction_ids
-    ]
+    )
 
 
 @contextmanager

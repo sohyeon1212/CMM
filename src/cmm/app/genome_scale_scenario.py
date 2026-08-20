@@ -68,11 +68,16 @@ def run_scenarios(model_path: str | None = None, prefix: str = "genome") -> list
     window.run_fba()
     saved.append(_capture(window, app, f"{prefix}_02_fba"))
 
-    # Open glucose uptake via bound editing if the substrate exists but is closed.
+    # Open glucose uptake via bound editing if the substrate exists but is closed, then hand
+    # the condition to the media layer. This used to close ``EX_co2_e`` by hand as well;
+    # since 0.4.0 every preset closes CO2 uptake (secretion stays free), so the manual edit
+    # was a second copy of a decision that lives in ``cmm.core.media``. Measured on the
+    # textbook model, the two routes leave **identical** exchange bounds (zero differing
+    # exchanges) and identical growth, 0.8739215069684303 either way.
     if GLC in model.reactions:
         window.set_reaction_bounds(GLC, lower=-10.0)
-        if "EX_co2_e" in model.reactions:
-            window.set_reaction_bounds("EX_co2_e", lower=0.0)
+        window.medium_combo.setCurrentText("glucose_aerobic")
+        window.apply_selected_medium()
         window.run_fba()
         window.flux_slider.setValue(15)
         saved.append(_capture(window, app, f"{prefix}_03_glucose_medium"))

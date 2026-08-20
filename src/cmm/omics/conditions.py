@@ -9,20 +9,30 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 from cobra import Model
 
+from cmm.core.provenance import run_provenance
 from cmm.omics.expression import OmicsFluxResult, integrate_expression
 
 
 @dataclass(frozen=True)
 class ConditionFluxes:
-    """Per-condition predicted flux distributions from one expression table."""
+    """Per-condition predicted flux distributions from one expression table.
+
+    ``metadata`` is the run provenance of the multi-condition job as a whole: one
+    :func:`~cmm.core.provenance.run_provenance` block for the model every condition was solved
+    on, plus the condition names and the integration method. Each condition's own solve keeps
+    its own block under ``results[condition].metadata``, so a single condition's numbers stay
+    traceable when they are lifted out of the container. Save ``metadata`` alongside any CSV
+    of the fluxes.
+    """
 
     method: str
     results: dict[str, OmicsFluxResult]
+    metadata: dict[str, object] = field(default_factory=dict)
 
     def conditions(self) -> tuple[str, ...]:
         return tuple(self.results.keys())
@@ -69,7 +79,22 @@ def predict_condition_fluxes(
     conditions: Iterable[str] | None = None,
     **kwargs,
 ) -> ConditionFluxes:
-    """Predict a flux distribution for each condition column with E-Flux2 or LAD."""
+    """Predict a flux distribution for each condition column with E-Flux2 or LAD.
+
+    Conditions are solved independently — one ``integrate_expression`` call per column, each
+    inside its own ``with model:`` block — so no bound or objective mutation leaks between
+    them and adding or removing a column cannot change another column's fluxes. No
+    cross-condition normalisation is applied either, by ``read_expression_table`` or here.
+
+    **Consequence to keep in mind when interpreting the result.** E-Flux2's normalisation
+    denominator is computed *within* each condition, so a condition in which every gene is
+    uniformly k-fold higher produces identical bounds and therefore an identical flux
+    distribution: **a uniform global expression shift produces zero predicted flux change**,
+    and only within-condition relative expression influences the prediction. (Kim et al. 2016
+    are not blind to it — their bound is the absolute expression value.) Normalise the
+    expression table for library size before integration, and do not draw conclusions from a
+    global shift in expression level.
+    """
 
     if expression.empty:
         raise ValueError("expression table is empty")
@@ -79,6 +104,16 @@ def predict_condition_fluxes(
     ]
     if missing:
         raise KeyError(f"unknown condition columns: {missing}")
+    # Fingerprint the model before the per-condition solves: each runs inside its own
+    # ``with model:`` block, so this is the one model state every condition was solved on.
+    provenance = run_provenance(
+        model,
+        method="predict_condition_fluxes",
+        integration_method=method,
+        conditions=tuple(str(condition) for condition in columns),
+        n_genes=int(expression.shape[0]),
+        **kwargs,
+    )
     results: dict[str, OmicsFluxResult] = {}
     for condition in columns:
         gene_expression = {
@@ -89,7 +124,19 @@ def predict_condition_fluxes(
         results[condition] = integrate_expression(
             model, gene_expression, method=method, **kwargs
         )
-    return ConditionFluxes(method=method, results=results)
+    return ConditionFluxes(
+        method=method,
+        results=results,
+        metadata={
+            **provenance,
+            "integration_method": method,
+            "conditions": tuple(str(condition) for condition in columns),
+            "n_conditions": len(columns),
+            "n_nonoptimal": sum(
+                1 for result in results.values() if result.status != "optimal"
+            ),
+        },
+    )
 
 
 def flux_log_change(
@@ -101,8 +148,22 @@ def flux_log_change(
 ) -> dict[str, float]:
     """log2 fold-change of flux *magnitude* between two conditions (target vs source).
 
+    **A CMM utility, not an implementation of a published method.** A pseudocounted log2
+    ratio is generic practice; there is no source paper for this function and it must not be
+    cited to one, nor described as a differential-flux *method*.
+
     Uses ``log2((|v_target| + pseudo) / (|v_source| + pseudo))`` so zero/near-zero fluxes are
     handled gracefully; the pseudocount bounds the change for reactions that switch on/off.
+
+    Two artefacts of that definition, both to report alongside the numbers:
+
+    - **A direction reversal reads as "no change".** The ratio is taken on magnitudes, so a
+      reaction going ``+5 -> -5`` returns ``0.0``. Use ``sign_flips`` to detect reversals;
+      this function alone will not show them.
+    - **The on/off magnitude is set by the pseudocount, not by the data.** For ``0 -> v`` the
+      result is ``log2(1 + v / pseudo)``, so at the default ``pseudo = 1e-3`` a reaction
+      switching on at ``v = 10`` reports about 13.3. Changing the pseudocount changes every
+      on/off value while leaving the ranking intact, so the pseudocount must be reported.
     """
 
     if pseudocount < 0 or not math.isfinite(pseudocount):
