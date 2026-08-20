@@ -359,6 +359,10 @@ class CmmMainWindow(QMainWindow):
         self._fluxes: dict[
             str, float
         ] = {}  # the last-run distribution (drives left panel/FVA/map)
+        # What produced `_fluxes`. Every view of a flux distribution has to be able to name
+        # the method behind it — a pFBA map read as an FBA map is a wrong figure, not a
+        # cosmetic one — so the label travels with the numbers.
+        self._flux_source: str = ""
         self._fba_fluxes: dict[str, float] = {}  # FBA column of the simulation table
         self._pfba_fluxes: dict[str, float] = {}  # pFBA column of the simulation table
         self._loading = False
@@ -392,6 +396,7 @@ class CmmMainWindow(QMainWindow):
         # Last computed per-condition fluxes (condition -> {reaction: flux}), kept so the
         # active-only / show-all toggle can re-render without recomputing.
         self._omics_fluxes_by_condition: dict[str, dict[str, float]] | None = None
+        self._omics_method_label = ""
         self._omics_conditions_order: list[str] = []
         # Guards re-entrant background runs (see _run_in_background).
         self._busy = False
@@ -618,6 +623,8 @@ class CmmMainWindow(QMainWindow):
         self._transform_target_expression = None
         self._omics_table_df = None
         self._omics_fluxes_by_condition = None
+        self.omics_map_btn.setEnabled(False)
+        self.omics_map_combo.clear()
         self._omics_conditions_order = []
         self.revert_source_label.setText("not loaded")
         self.revert_target_label.setText("not loaded")
@@ -852,6 +859,24 @@ class CmmMainWindow(QMainWindow):
         )
         cond_row.addWidget(self.omics_cond_list, 1)
         cbox.addLayout(cond_row)
+
+        # Row 3: send one computed condition to the flux map. An expression-derived flux state
+        # is a distribution over the whole network; a 95-row table is the wrong way to read it.
+        map_row = QHBoxLayout()
+        map_row.addWidget(QLabel("Show on flux map:"))
+        self.omics_map_combo = QComboBox()
+        self.omics_map_combo.setMinimumWidth(160)
+        self.omics_map_combo.setToolTip("Which computed condition to draw")
+        map_row.addWidget(self.omics_map_combo)
+        self.omics_map_btn = QPushButton("Draw")
+        self.omics_map_btn.setEnabled(False)
+        self.omics_map_btn.setToolTip(
+            "Compute a condition first, then draw it on the map."
+        )
+        self.omics_map_btn.clicked.connect(self.show_omics_on_flux_map)
+        map_row.addWidget(self.omics_map_btn)
+        map_row.addStretch(1)
+        cbox.addLayout(map_row)
         layout.addWidget(controls)
 
         self.omics_summary = QLabel(
@@ -1995,8 +2020,15 @@ class CmmMainWindow(QMainWindow):
             "targets, or all targets of this level when none are selected."
         )
         batch_btn.clicked.connect(self.run_batch_comparison)
+        self.cmp_map_btn = QPushButton("Show on flux map")
+        self.cmp_map_btn.setEnabled(False)
+        self.cmp_map_btn.setToolTip(
+            "Draw the perturbed flux distribution from the last single run on the map."
+        )
+        self.cmp_map_btn.clicked.connect(self.show_comparison_on_flux_map)
         row2.addWidget(run_btn)
         row2.addWidget(batch_btn)
+        row2.addWidget(self.cmp_map_btn)
         row2.addStretch(1)
         controls_layout.addLayout(row2)
 
@@ -2266,6 +2298,7 @@ class CmmMainWindow(QMainWindow):
 
     def run_comparison(self) -> None:
         self._comparison_cache = None  # drop any prior result until this run succeeds
+        self.cmp_map_btn.setEnabled(False)
         method_label = self.comparison_method_combo.currentText()
         template = self.template_combo.currentText()
         level = self.ko_level_combo.currentText()
@@ -2351,6 +2384,7 @@ class CmmMainWindow(QMainWindow):
             "quantity": self._comparison_quantity(result),
             "synthetic_note": synthetic_note,
         }
+        self.cmp_map_btn.setEnabled(True)
         self._render_comparison_table()
 
     @staticmethod
@@ -2439,6 +2473,7 @@ class CmmMainWindow(QMainWindow):
         # The batch reshapes the table; drop the single-run cache so the change-threshold
         # spinbox can't re-render a stale single-run over the batch table.
         self._comparison_cache = None
+        self.cmp_map_btn.setEnabled(False)
 
         method_label = self.comparison_method_combo.currentText()
         template = self.template_combo.currentText()
@@ -2772,6 +2807,7 @@ class CmmMainWindow(QMainWindow):
         self._fluxes = {}
         self._fba_fluxes = {}
         self._pfba_fluxes = {}
+        self._flux_source = ""
         self._fluxes_stale = False
         if getattr(self, "pfba_total_label", None) is not None:
             self.pfba_total_label.setText("")
@@ -2850,6 +2886,7 @@ class CmmMainWindow(QMainWindow):
             return
         self._fluxes = dict(solution.fluxes)
         self._fba_fluxes = dict(solution.fluxes)
+        self._flux_source = "FBA"
         self._fluxes_stale = False
         obj = solution.objective_value
         obj_text = f"{obj:.4g}" if obj is not None else "infeasible"
@@ -2873,6 +2910,7 @@ class CmmMainWindow(QMainWindow):
             return
         self._fluxes = dict(solution.fluxes)
         self._pfba_fluxes = dict(solution.fluxes)
+        self._flux_source = "pFBA"
         self._fluxes_stale = False
         # pFBA's objective value is the minimal total flux; show the growth (objective rxn).
         growth = next(
@@ -3042,6 +3080,48 @@ class CmmMainWindow(QMainWindow):
             self.sd_anaerobic_combo.currentText() == "aerobic"
         )
 
+    def show_omics_on_flux_map(self) -> None:
+        """Draw one computed condition's expression-derived flux state."""
+
+        if not self._omics_fluxes_by_condition:
+            self.status_label.setText("Compute a condition on the Omics tab first.")
+            return
+        condition = self.omics_map_combo.currentText()
+        fluxes = self._omics_fluxes_by_condition.get(condition)
+        if not fluxes:
+            self.status_label.setText(f"No computed flux state for '{condition}'.")
+            return
+        self.show_on_flux_map(fluxes, f"{self._omics_method_label} · {condition}")
+
+    def show_comparison_on_flux_map(self) -> None:
+        """Draw the perturbed flux distribution from the last MOMA/ROOM run."""
+
+        cache = self._comparison_cache
+        if not cache:
+            self.status_label.setText("Run a single MOMA/ROOM comparison first.")
+            return
+        self.show_on_flux_map(
+            cache["fluxes"], f"{cache['method_label']} · {cache['ko_label']}"
+        )
+
+    def show_on_flux_map(self, fluxes: dict[str, float], source: str) -> None:
+        """Make ``fluxes`` the window's current distribution and draw it on the map.
+
+        The map used to be reachable only from FBA and pFBA, which left out the two results it
+        is most useful for — an expression-derived flux state and a knockout's redistribution.
+        Those are exactly the cases where a picture beats a table of 95 numbers.
+        """
+
+        if not fluxes:
+            self.status_label.setText("Nothing to show on the flux map.")
+            return
+        self._fluxes = dict(fluxes)
+        self._flux_source = source
+        self._fluxes_stale = False
+        self._populate_flux_column()  # the reaction table shows this distribution too
+        self._goto_tab("Flux Map")
+        self.render_flux_map()
+
     def render_flux_map(self) -> None:
         """Draw the current flux distribution on the selected layout."""
 
@@ -3054,9 +3134,12 @@ class CmmMainWindow(QMainWindow):
             and self._map_path is not None
         )
         try:
+            source = self._flux_source or "flux"
             if escher:
                 fig = escher_flux_map(
-                    self._map_path, self._fluxes, title=f"{self.model.id} — flux map"
+                    self._map_path,
+                    self._fluxes,
+                    title=f"{self.model.id} — {source}",
                 )
                 note = f"Escher layout, {Path(self._map_path).stem}"
             else:
@@ -3065,14 +3148,14 @@ class CmmMainWindow(QMainWindow):
                     self.model,
                     self._fluxes,
                     top_n=top_n,
-                    title=f"{self.model.id} — top {top_n} reactions by |flux|",
+                    title=f"{self.model.id} — {source}, top {top_n} reactions by |flux|",
                 )
                 note = f"schematic, top {top_n} reactions"
         except Exception as exc:
             self.status_label.setText(f"Flux map failed: {html.escape(str(exc))}")
             return
         self._set_figure(self.map_canvas_holder, "map", fig)
-        self.status_label.setText(f"Flux map rendered ({note}).")
+        self.status_label.setText(f"Flux map rendered — {source} ({note}).")
 
     def _on_product_changed(self, product: str) -> None:
         if not self._loading and product:
@@ -3404,6 +3487,8 @@ class CmmMainWindow(QMainWindow):
         # Discard any previous result so the show-all toggle can't re-render stale data, and
         # so a new source's methods must be recomputed before they back a Comparison template.
         self._omics_fluxes_by_condition = None
+        self.omics_map_btn.setEnabled(False)
+        self.omics_map_combo.clear()
         self._omics_conditions_order = []
         self._omics_expression = None
         self._omics_computed_methods = set()
@@ -3526,6 +3611,8 @@ class CmmMainWindow(QMainWindow):
         ok = [c for c in conditions if c in per_condition]
         if not ok:
             self._omics_fluxes_by_condition = None
+            self.omics_map_btn.setEnabled(False)
+            self.omics_map_combo.clear()
             self._omics_conditions_order = []
             self.omics_table.setColumnCount(1)
             self.omics_table.setHorizontalHeaderLabels(["Reaction"])
@@ -3538,6 +3625,15 @@ class CmmMainWindow(QMainWindow):
         # Cache the result so the show-all toggle can re-render without recomputing.
         self._omics_fluxes_by_condition = per_condition
         self._omics_conditions_order = ok
+        self._omics_method_label = method.upper()
+        self._loading = True
+        self.omics_map_combo.clear()
+        self.omics_map_combo.addItems(ok)
+        self._loading = False
+        self.omics_map_btn.setEnabled(True)
+        self.omics_map_btn.setToolTip(
+            f"Draw the {method.upper()} flux state of the chosen condition on the flux map."
+        )
         n_active = len(
             {
                 rid

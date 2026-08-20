@@ -45,7 +45,9 @@ Zenodo or an equivalent long-term repository and its DOI added to this section,
 - MTA/rMTA: published MTA MIQP, published rMTA best/MOMA/worst scoring, and an explicitly
   labeled legacy continuous heuristic. Reached as `revert_targets` and `transformation_targets`
   in Python and as the *Revert Metabolism* and *Transform (A→B)* tabs in the application.
-- Visualization: flux maps on a curated Escher layout — Escher's *E. coli* core map is bundled
+- Visualization: flux maps of any current flux state — FBA, pFBA, an E-Flux2/LAD prediction,
+  or a MOMA/ROOM redistribution, each labelled with the method that produced it — on a curated
+  Escher layout — Escher's *E. coli* core map is bundled
   and offered automatically to any model containing at least half its reactions, including
   genome-scale ones — or a dependency-free schematic of the highest-flux reactions for models
   no map fits. Any Escher JSON can be loaded from the GUI.

@@ -333,8 +333,22 @@ works from two explicit predicted flux **states**.
 ## 9. Flux Map tab — Escher-layout flux maps
 
 The **Flux Map** tab draws the current flux distribution on the network. Click **Render flux
-map** after running FBA; colour and width encode flux (diverging: blue = reverse/negative,
-red = forward/positive; width ∝ `|flux|`).
+map**; colour and width encode flux (diverging: blue = reverse/negative, red =
+forward/positive; width ∝ `|flux|`).
+
+**Which flux state is drawn.** The map draws the window's current distribution, and the figure
+title names the method that produced it — `e_coli_core — pFBA`, `e_coli_core — LAD · condB`.
+Rendering with no distribution loaded runs FBA first; editing a bound marks the distribution
+stale, so the next render re-solves. Four things can put a distribution on the map:
+
+| From | How |
+|---|---|
+| FBA / pFBA | Run it on the Simulation tab, or just press **Render flux map** |
+| E-Flux2 / LAD | Omics tab → **Show on flux map** → pick the condition → **Draw** |
+| MOMA / ROOM | Comparison tab → run a single knockout → **Show on flux map** |
+
+The reaction table on the left switches to the same distribution, so the map and the numbers
+never disagree.
 
 Two layouts, chosen with the **layout** selector:
 

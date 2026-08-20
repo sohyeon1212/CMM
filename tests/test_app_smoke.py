@@ -1079,3 +1079,84 @@ def test_map_label_describes_the_layout_actually_shown(app, ecoli_core):
 
     window.map_layout_combo.setCurrentText(escher)
     assert window.map_source_label.text().startswith("Escher map:")
+
+
+def test_flux_map_title_names_the_method_behind_the_numbers(app, ecoli_core):
+    """A pFBA map read as an FBA map is a wrong figure, so the title has to say which."""
+
+    window, _, _ = _flux_map_window(ecoli_core)
+
+    window.run_fba()
+    window.render_flux_map()
+    assert window._flux_source == "FBA"
+    assert "FBA" in window._map_canvas.figure.axes[0].get_title()
+
+    window.run_pfba()
+    window.render_flux_map()
+    assert window._flux_source == "pFBA"
+    title = window._map_canvas.figure.axes[0].get_title()
+    assert "pFBA" in title and "FBA," not in title
+
+
+def test_omics_flux_state_can_be_drawn_on_the_map(app, tmp_path):
+    """The expression-derived distribution is what the map is most useful for."""
+
+    from cmm.omics.conditions import read_expression_table
+
+    path = tmp_path / "conditions.csv"
+    path.write_text(
+        "gene,condA,condB\ng1,50,50\ng2,100,1\ng3,1,100\ng5,1,100\ngb,50,50\n"
+    )
+
+    window = CmmMainWindow(build_demo_model())
+    assert not window.omics_map_btn.isEnabled()  # nothing computed yet
+
+    window._set_omics_source(read_expression_table(str(path)), "conditions.csv")
+    window.omics_method_combo.setCurrentText("lad")  # an LP, so no QP solver needed
+    window.compute_omics()
+
+    assert window.omics_map_btn.isEnabled()
+    assert [
+        window.omics_map_combo.itemText(i)
+        for i in range(window.omics_map_combo.count())
+    ] == ["condA", "condB"]
+
+    window.omics_map_combo.setCurrentText("condB")
+    window.show_omics_on_flux_map()
+
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Flux Map"
+    assert window._flux_source == "LAD · condB"
+    assert "LAD" in window._map_canvas.figure.axes[0].get_title()
+    # The distribution drawn is the omics one, not a quietly re-run FBA.
+    assert window._fluxes == dict(window._omics_fluxes_by_condition["condB"])
+
+
+def test_knockout_redistribution_can_be_drawn_on_the_map(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    assert not window.cmp_map_btn.isEnabled()
+
+    window.medium_combo.setCurrentText("glucose_aerobic")
+    window.apply_selected_medium()
+    window.comparison_method_combo.setCurrentText("MOMA (L1)")
+    window.template_combo.setCurrentText("pfba")
+    window.ko_level_combo.setCurrentText("reaction")
+    _select_ko(window, ["PFK"])
+    window.run_comparison()
+
+    assert window.cmp_map_btn.isEnabled()
+    window.show_comparison_on_flux_map()
+
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Flux Map"
+    assert "MOMA" in window._flux_source and "PFK" in window._flux_source
+    assert window._fluxes == dict(window._comparison_cache["fluxes"])
+    assert "MOMA" in window._map_canvas.figure.axes[0].get_title()
+
+
+def test_a_new_model_forgets_which_flux_state_was_drawn(app, ecoli_core):
+    window, _, _ = _flux_map_window(ecoli_core)
+    window.run_fba()
+    assert window._flux_source == "FBA"
+
+    window.load_model(build_demo_model())
+    assert window._flux_source == ""
+    assert not window._fluxes

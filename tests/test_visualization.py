@@ -291,11 +291,7 @@ def test_schematic_keeps_nodes_apart_as_the_count_grows(ecoli_core):
     for top_n in (12, 20, 25):
         fig = network_flux_map(ecoli_core, fluxes, top_n=top_n)
         nodes = np.asarray(_schematic_nodes(fig))
-        gaps = [
-            np.hypot(*(a - b))
-            for i, a in enumerate(nodes)
-            for b in nodes[i + 1 :]
-        ]
+        gaps = [np.hypot(*(a - b)) for i, a in enumerate(nodes) for b in nodes[i + 1 :]]
         assert min(gaps) > 0.05, f"nodes collide at top_n={top_n}: {min(gaps):.3f}"
         rows = len(set(np.round(nodes[:, 1], 3)))
         assert rows > 1, f"everything landed on one row at top_n={top_n}"
