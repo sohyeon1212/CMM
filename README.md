@@ -38,9 +38,13 @@ Zenodo or an equivalent long-term repository and its DOI added to this section,
   boundaries, and seeded random flux sampling both uniform and constrained around a reference
   flux state.
 - Strain design: distinct OptKnock and three-level RobustKnock modules through StrainDesign,
-  followed by independent maximum/guaranteed-product evaluation.
-- Normalization: published MTA MIQP, published rMTA best/MOMA/worst scoring, and an explicitly
-  labeled legacy continuous heuristic.
+  followed by independent maximum/guaranteed-product evaluation. Knockout candidates are
+  restricted to gene-associated internal reactions, so a returned design is buildable as a gene
+  deletion: exchanges are excluded, and so are reactions whose only gene is COBRA's `s0001`
+  spontaneous-reaction placeholder.
+- MTA/rMTA: published MTA MIQP, published rMTA best/MOMA/worst scoring, and an explicitly
+  labeled legacy continuous heuristic. Reached as `revert_targets` and `transformation_targets`
+  in Python and as the *Revert Metabolism* and *Transform (A→B)* tabs in the application.
 - Auditability: deterministic model fingerprints and solver/package/parameter provenance on
   numerical results.
 

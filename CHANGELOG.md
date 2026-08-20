@@ -7,10 +7,9 @@ original publication; this release acts on their findings. It changes reported n
 one public parameter and one result field, and corrects documentation that overstated what the
 code does. **Results produced with 0.3.0 are not directly comparable and must be regenerated.**
 
-The scenario *documents* have been corrected. The archived runs under `paper/runs/` and the
-figures derived from them have **not** been regenerated in this release: the run scripts have
-been updated to the 0.4.0 API and column names, but re-executing them is a separate step. Any
-number quoted from a pre-0.4.0 run directory is stale.
+The scenario *documents* have been corrected. Any result produced by 0.3.0 — a saved run
+directory, an exported CSV, a figure — is stale and must be regenerated: the changes below move
+yields, design rankings, expression-derived fluxes and one result field's meaning.
 
 ### Breaking
 
@@ -81,6 +80,14 @@ number quoted from a pre-0.4.0 run directory is stale.
   — a factor of about 36 apart. `distance_kind` and `n_changed_reactions` are written
   alongside, and both SC-01 and SC-03 reports state which quantity each column holds.
 
+- `BatchComparisonResult.to_frame()` omits the column the screen's method cannot fill: a MOMA
+  screen has no switch count, and a ROOM screen has no distance since ROOM reports a count
+  rather than a norm. Both were previously written as a column of `NaN`, which in an exported
+  CSV is indistinguishable from a run that failed. `distance_kind` survives on a ROOM screen —
+  `"none"` is a statement about ROOM, not a missing value — and
+  `to_frame(drop_empty_method_columns=False)` returns the full schema for a caller
+  concatenating screens run under different methods.
+
 ### Scientific correctness
 
 - **GPR `OR` resolution is per method, matching each source paper.** CMM's global `max` matched
@@ -99,6 +106,12 @@ number quoted from a pre-0.4.0 run directory is stale.
   set by default, with an opt-out. Designs deleting boundary reactions with no GPR
   (`EX_co2_e`, `EX_ac_e`, `EX_for_e`, `EX_etoh_e`, `EX_lac__D_e`) are not realisable as gene
   deletions and are no longer proposed.
+- The same filter now also rejects reactions whose only gene is COBRA's `s0001`
+  spontaneous-reaction placeholder, which is not a gene anyone can delete. On `e_coli_core`
+  that removes `ACALDt`, `CO2t` and `O2t`, taking the candidate set from 69 to 66 — and with it
+  every design the filter had been letting through under a gene it could not name. The
+  top-ranked anaerobic succinate design changes accordingly, and both arms of the production
+  scenario now return a design that is buildable as written.
 - FVSEOF selects on Park et al.'s **joint** sign of ΔV_avg and Δl_sol rather than V_avg alone;
   the capacity slope was already computed and simply never used for selection. Its default
   `n_steps` rises from 8 to 10, Park's stated minimum.
