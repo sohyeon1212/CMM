@@ -32,12 +32,25 @@ def test_bundled_map_is_byte_identical_to_its_attributed_digest():
     assert actual == recorded.group(1)
 
 
-def test_attribution_names_the_license_and_the_paper_to_cite():
-    text = ATTRIBUTION.read_text()
+def test_attribution_records_the_chain_the_licence_claim_rests_on():
+    """Naming a licence is not enough — the file has to show why that licence applies.
+
+    The map is served from a URL, and a URL carries no licence. What makes redistribution
+    sound is that the served bytes are the bytes of a file tracked in a repository whose
+    LICENSE is MIT, and each link of that chain is recorded here rather than assumed.
+    """
+
+    raw = ATTRIBUTION.read_text()
+    # The notice is a wrapped block quote, so match against it with the quote markers and
+    # line breaks flattened rather than against however it happens to be laid out today.
+    text = " ".join(raw.replace("\n>", " ").split())
+    assert "escher/escher.github.io" in text  # the repository the licence comes from
+    assert "1-0-0/6/maps" in text  # the path the file is tracked at within it
+    assert "byte-identical" in text  # why that repository's file is this file
     assert "MIT" in text
-    assert "Regents of the University of California" in text
+    assert "Copyright © 2019 The Regents of the University of California" in text
+    assert "BiGG" in text  # the same map under terms that would not permit this
     assert "10.1371/journal.pcbi.1004321" in text  # King et al. 2015, the Escher paper
-    assert "escher.github.io" in text
 
 
 def test_map_is_a_schema_1_escher_document():
