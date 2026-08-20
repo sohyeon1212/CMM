@@ -343,9 +343,15 @@ stale, so the next render re-solves. Four things can put a distribution on the m
 
 | From | How |
 |---|---|
-| FBA / pFBA | Run it on the Simulation tab, or just press **Render flux map** |
-| E-Flux2 / LAD | Omics tab → **Show on flux map** → pick the condition → **Draw** |
+| FBA, pFBA | **draw: FBA** / **pFBA** on this tab — solves and draws in one click |
+| E-Flux2 / LAD | Omics tab → pick the condition → **Show on flux map** |
 | MOMA / ROOM | Comparison tab → run a single knockout → **Show on flux map** |
+
+**Render flux map** redraws whatever is already loaded — use it after switching layout or
+changing the reaction count, not to solve. Pressing it with nothing loaded runs FBA.
+
+Batch comparison is not on this list: it produces one distribution per target, so there is no
+single "the" flux state to draw. Run the target you care about as a single knockout.
 
 The reaction table on the left switches to the same distribution, so the map and the numbers
 never disagree.

@@ -1160,3 +1160,35 @@ def test_a_new_model_forgets_which_flux_state_was_drawn(app, ecoli_core):
     window.load_model(build_demo_model())
     assert window._flux_source == ""
     assert not window._fluxes
+
+
+def test_flux_map_tab_can_run_either_simulation_itself(app, ecoli_core):
+    """pFBA was unreachable from the map: it had to be run on another tab first."""
+
+    window, _, _ = _flux_map_window(ecoli_core)
+    assert not window._fluxes  # nothing solved yet
+
+    window._draw_simulation_on_map(window.run_pfba)
+    assert window._flux_source == "pFBA"
+    assert "pFBA" in window._map_canvas.figure.axes[0].get_title()
+    pfba = dict(window._fluxes)
+
+    window._draw_simulation_on_map(window.run_fba)
+    assert window._flux_source == "FBA"
+    assert "FBA" in window._map_canvas.figure.axes[0].get_title()
+    # pFBA minimises total flux subject to the same optimum, so it can never exceed FBA's.
+    # It can equal it — on this medium the FBA vertex is already parsimonious — which is
+    # exactly why the title has to name the method rather than leave it to the numbers.
+    assert (
+        sum(abs(v) for v in pfba.values())
+        <= sum(abs(v) for v in window._fluxes.values()) + 1e-6
+    )
+
+
+def test_both_tabs_offer_the_map_under_the_same_name(app, ecoli_core):
+    """One action, one label — 'Draw' on one tab and 'Show on flux map' on another is two."""
+
+    window = CmmMainWindow(ecoli_core)
+    assert (
+        window.omics_map_btn.text() == window.cmp_map_btn.text() == "Show on flux map"
+    )

@@ -17,10 +17,13 @@
   `src/cmm/resources/ATTRIBUTION.md`, and a test asserts the digest so the attribution cannot
   silently go stale.
 - **The flux map draws expression-derived and knockout flux states, not just FBA/pFBA.** The
-  Omics tab gained a condition selector and a **Draw** button, and the Comparison tab a **Show
-  on flux map** button. These are the two results a map is most useful for — a distribution
+  Omics tab gained a condition selector, and both it and the Comparison tab gained a **Show on
+  flux map** button. These are the two results a map is most useful for — a distribution
   over the whole network is not something to read as a 95-row table — and they were the two it
   could not show.
+- **The Flux Map tab runs FBA or pFBA itself** (`draw: FBA | pFBA`). pFBA was reachable only by
+  running it on the Simulation tab first, which nothing on the map suggested; the tab silently
+  drew FBA and looked like that was all it could do.
 - **The figure title names the method behind the numbers** (`e_coli_core — LAD · condB`). The
   map previously drew whichever of FBA or pFBA had run last while its title said only "flux
   map", so a pFBA map was indistinguishable from an FBA one.

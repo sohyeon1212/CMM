@@ -863,12 +863,12 @@ class CmmMainWindow(QMainWindow):
         # Row 3: send one computed condition to the flux map. An expression-derived flux state
         # is a distribution over the whole network; a 95-row table is the wrong way to read it.
         map_row = QHBoxLayout()
-        map_row.addWidget(QLabel("Show on flux map:"))
+        map_row.addWidget(QLabel("Condition:"))
         self.omics_map_combo = QComboBox()
         self.omics_map_combo.setMinimumWidth(160)
         self.omics_map_combo.setToolTip("Which computed condition to draw")
         map_row.addWidget(self.omics_map_combo)
-        self.omics_map_btn = QPushButton("Draw")
+        self.omics_map_btn = QPushButton("Show on flux map")
         self.omics_map_btn.setEnabled(False)
         self.omics_map_btn.setToolTip(
             "Compute a condition first, then draw it on the map."
@@ -920,8 +920,24 @@ class CmmMainWindow(QMainWindow):
 
         controls = QHBoxLayout()
         render_btn = QPushButton("Render flux map")
+        render_btn.setToolTip(
+            "Redraw the current flux state — after changing the layout, or the reaction count."
+        )
         render_btn.clicked.connect(self.render_flux_map)
         controls.addWidget(render_btn)
+
+        # Solve and draw in one click. Without these the tab silently drew FBA and there was
+        # nothing to suggest pFBA was equally available — it had to be run from another tab
+        # first, which no one would guess.
+        controls.addWidget(QLabel("draw:"))
+        fba_btn = QPushButton("FBA")
+        fba_btn.setToolTip("Run FBA and draw it")
+        fba_btn.clicked.connect(lambda: self._draw_simulation_on_map(self.run_fba))
+        controls.addWidget(fba_btn)
+        pfba_btn = QPushButton("pFBA")
+        pfba_btn.setToolTip("Run pFBA (minimal total flux) and draw it")
+        pfba_btn.clicked.connect(lambda: self._draw_simulation_on_map(self.run_pfba))
+        controls.addWidget(pfba_btn)
 
         controls.addWidget(QLabel("layout:"))
         self.map_layout_combo = QComboBox()
@@ -3079,6 +3095,13 @@ class CmmMainWindow(QMainWindow):
         return self._aeration_condition(
             self.sd_anaerobic_combo.currentText() == "aerobic"
         )
+
+    def _draw_simulation_on_map(self, solve) -> None:
+        """Run a simulation and draw it, so the map is one click from either method."""
+
+        solve()
+        if self._fluxes:  # a failed solve has already reported why
+            self.render_flux_map()
 
     def show_omics_on_flux_map(self) -> None:
         """Draw one computed condition's expression-derived flux state."""
