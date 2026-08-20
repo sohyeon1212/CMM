@@ -942,9 +942,22 @@ def escher_flux_map(
         ax.set_xlim(min(xs) - mx, max(xs) + mx)
         ax.set_ylim(max(ys) + my, min(ys) - my)  # Escher y grows downward
     mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
-    cbar = fig.colorbar(mappable, ax=ax, fraction=0.025, pad=0.01)
+    # shrink/aspect keep this a legible bar. Left to its defaults against a tall map axes it
+    # is drawn as a ~1:23 hairline, which reads as a rule rather than a scale.
+    cbar = fig.colorbar(
+        mappable, ax=ax, fraction=0.035, pad=0.02, shrink=0.55, aspect=14
+    )
     cbar.set_label("flux (mmol gDW$^{-1}$ h$^{-1}$)", fontsize=9)
+    # `colorbar` re-anchors its parent to (1.0, 0.5) so the axes hugs the bar. With
+    # `set_aspect("equal")` the axes box shrinks whenever the canvas is wider than the map,
+    # and a right anchor takes every bit of that shrinkage off the left edge — the map and its
+    # title drift right inside the panel. The map should sit in the middle of the space it has.
+    ax.set_anchor("C")
     if title:
         ax.set_title(title, fontsize=14, fontweight="bold")
-    fig.tight_layout()
+    # `tight_layout` solves the margins once, at the size the figure was authored. The GUI
+    # canvas then stretches the figure to whatever the panel is, the solved margins no longer
+    # fit, and the title is clipped against the top edge. A constrained layout re-solves on
+    # every draw, so the figure stays correct at any panel size and at 300 DPI on export.
+    fig.set_layout_engine("constrained")
     return fig

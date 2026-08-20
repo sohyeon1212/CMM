@@ -62,3 +62,64 @@ def test_no_map_is_offered_for_an_unrelated_model():
 
     assert map_coverage(CORE_MAP, model) == 0.0
     assert bundled_map_for(model) is None
+
+
+def _draw(fig, width_in, height_in, dpi=100):
+    """Render at a given panel size the way a resized GUI canvas would."""
+
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    FigureCanvasAgg(fig)
+    fig.set_dpi(dpi)
+    fig.set_size_inches(width_in, height_in)
+    fig.canvas.draw()
+    return fig.canvas.get_renderer()
+
+
+def _flux_map(ecoli_core):
+    from cmm.core import fba
+    from cmm.visualization import escher_flux_map
+
+    return escher_flux_map(
+        str(CORE_MAP), dict(fba(ecoli_core).fluxes), title="e_coli_core — flux map"
+    )
+
+
+def test_flux_map_survives_a_wide_panel(ecoli_core):
+    """The GUI stretches the figure to its panel; the layout has to hold at that shape.
+
+    Three regressions live here, all invisible at the authored figure size and all obvious in
+    the application: a title clipped off the top edge, the map drifting right because
+    ``colorbar`` re-anchors its parent axes, and a colorbar squeezed to a hairline.
+    """
+
+    fig = _flux_map(ecoli_core)
+    width, height = 12.42, 6.87  # the panel of a maximised window
+    renderer = _draw(fig, width, height)
+    ax, cax = fig.axes[0], fig.axes[1]
+
+    title = ax.title.get_window_extent(renderer)
+    assert title.y1 <= height * 100, "the title is clipped against the top of the panel"
+
+    box, bar = ax.get_position(), cax.get_position()
+    centre = (box.x0 + box.x1) / 2
+    # Centred in the room left over once the colorbar and its label have taken theirs.
+    assert abs(centre - bar.x0 / 2) < 0.06, f"map is off-centre at x={centre:.3f}"
+
+    long_to_short = (bar.height * height) / (bar.width * width)
+    assert long_to_short < 16, f"colorbar is a hairline (1:{long_to_short:.0f})"
+
+
+def test_flux_map_layout_is_stable_across_panel_sizes(ecoli_core):
+    """Re-solved on every draw, so a resize must not move the map or reshape the bar."""
+
+    centres, bars = [], []
+    for size in [(12.0, 9.84), (12.42, 6.87), (8.0, 6.0)]:
+        fig = _flux_map(ecoli_core)
+        _draw(fig, *size)
+        box, bar = fig.axes[0].get_position(), fig.axes[1].get_position()
+        centres.append((box.x0 + box.x1) / 2)
+        bars.append((bar.height * size[1]) / (bar.width * size[0]))
+
+    assert max(centres) - min(centres) < 0.08, f"map centre drifts: {centres}"
+    assert max(bars) - min(bars) < 4, f"colorbar aspect drifts: {bars}"
