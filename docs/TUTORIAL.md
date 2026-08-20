@@ -332,8 +332,8 @@ works from two explicit predicted flux **states**.
 
 ## 9. Flux Map tab — Escher-layout flux maps
 
-The **Flux Map** tab draws the current flux distribution on the network. Click **Render flux
-map**; colour and width encode flux (diverging: blue = reverse/negative, red =
+The **Flux Map** tab draws the current flux distribution on the network. Click **draw: FBA**
+or **pFBA** to solve and draw in one step; colour and width encode flux (diverging: blue = reverse/negative, red =
 forward/positive; width ∝ `|flux|`).
 
 **Which flux state is drawn.** The map draws the window's current distribution, and the figure
@@ -347,8 +347,10 @@ stale, so the next render re-solves. Four things can put a distribution on the m
 | E-Flux2 / LAD | Omics tab → pick the condition → **Show on flux map** |
 | MOMA / ROOM | Comparison tab → run a single knockout → **Show on flux map** |
 
-**Render flux map** redraws whatever is already loaded — use it after switching layout or
-changing the reaction count, not to solve. Pressing it with nothing loaded runs FBA.
+Switching the layout, or changing the reaction count, redraws the loaded flux state by itself.
+Those controls never solve — that is the point of keeping them separate from **draw:**, which
+always does. Pressing **FBA** merely to see the schematic would replace an omics or knockout
+flux state you had drawn with a fresh FBA solve.
 
 Batch comparison is not on this list: it produces one distribution per target, so there is no
 single "the" flux state to draw. Run the target you care about as a single knockout.

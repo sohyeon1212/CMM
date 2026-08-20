@@ -1192,3 +1192,43 @@ def test_both_tabs_offer_the_map_under_the_same_name(app, ecoli_core):
     assert (
         window.omics_map_btn.text() == window.cmp_map_btn.text() == "Show on flux map"
     )
+
+
+def test_changing_the_layout_redraws_without_re_solving(app, ecoli_core):
+    """The reason there is no render button: a display change must not touch the numbers.
+
+    Removing it would be wrong if switching layout meant pressing "FBA" to redraw — that
+    quietly replaces an omics or knockout flux state with a fresh FBA solve. The display
+    controls redraw what is loaded and never solve.
+    """
+
+    window, escher, schematic = _flux_map_window(ecoli_core)
+    window._draw_simulation_on_map(window.run_pfba)
+    loaded = dict(window._fluxes)
+    assert window._flux_source == "pFBA"
+
+    window.map_layout_combo.setCurrentText(schematic)
+    assert window._map_redraw_timer.isActive(), "layout change scheduled no redraw"
+    window._map_redraw_timer.stop()
+    window.render_flux_map()
+    assert window._flux_source == "pFBA"  # not silently re-solved as FBA
+    assert window._fluxes == loaded
+
+    window.map_topn_spin.setValue(18)
+    assert window._map_redraw_timer.isActive(), "reaction count changed nothing"
+    window._map_redraw_timer.stop()
+    window.render_flux_map()
+    assert window._fluxes == loaded
+    assert "top 18" in window._map_canvas.figure.axes[0].get_title()
+
+
+def test_display_controls_do_not_solve_before_anything_is_drawn(app, ecoli_core):
+    """With no figure yet, a layout change must not quietly run FBA to have something to draw."""
+
+    window, _, schematic = _flux_map_window(ecoli_core)
+    assert window._map_canvas is None
+
+    window.map_layout_combo.setCurrentText(schematic)
+    assert not window._map_redraw_timer.isActive()
+    assert not window._fluxes
+    assert window._flux_source == ""

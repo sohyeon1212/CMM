@@ -21,7 +21,10 @@
   flux map** button. These are the two results a map is most useful for — a distribution
   over the whole network is not something to read as a 95-row table — and they were the two it
   could not show.
-- **The Flux Map tab runs FBA or pFBA itself** (`draw: FBA | pFBA`). pFBA was reachable only by
+- **The Flux Map tab runs FBA or pFBA itself** (`draw: FBA | pFBA`), and has no separate
+  render button: changing the layout or the reaction count redraws the loaded flux state, and
+  those controls never solve. A render button invited pressing **FBA** to redraw, which
+  silently replaced a drawn omics or knockout flux state with a fresh FBA solve. pFBA was reachable only by
   running it on the Simulation tab first, which nothing on the map suggested; the tab silently
   drew FBA and looked like that was all it could do.
 - **The figure title names the method behind the numbers** (`e_coli_core — LAD · condB`). The

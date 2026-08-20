@@ -919,16 +919,13 @@ class CmmMainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         controls = QHBoxLayout()
-        render_btn = QPushButton("Render flux map")
-        render_btn.setToolTip(
-            "Redraw the current flux state — after changing the layout, or the reaction count."
-        )
-        render_btn.clicked.connect(self.render_flux_map)
-        controls.addWidget(render_btn)
 
         # Solve and draw in one click. Without these the tab silently drew FBA and there was
         # nothing to suggest pFBA was equally available — it had to be run from another tab
-        # first, which no one would guess.
+        # first, which no one would guess. There is no separate "render" button: changing the
+        # layout or the reaction count redraws by itself, which is all that button ever did
+        # that these two do not, and it invited pressing "FBA" to redraw — quietly replacing
+        # an omics or knockout flux state with a fresh FBA solve.
         controls.addWidget(QLabel("draw:"))
         fba_btn = QPushButton("FBA")
         fba_btn.setToolTip("Run FBA and draw it")
@@ -962,6 +959,7 @@ class CmmMainWindow(QMainWindow):
             "Capped at 25 — beyond that the schematic cannot stay readable; "
             "use a curated Escher map instead."
         )
+        self.map_topn_spin.valueChanged.connect(self._schedule_map_redraw)
         controls.addWidget(self.map_topn_spin)
 
         load_btn = QPushButton("Load map…")
@@ -980,8 +978,21 @@ class CmmMainWindow(QMainWindow):
         layout.addWidget(holder, 1)
         self._map_canvas = None
         self._map_toolbar = None
+        # Coalesces a burst of changes — holding the spin arrow steps the value many times a
+        # second — into one redraw once the user stops.
+        self._map_redraw_timer = QTimer(self)
+        self._map_redraw_timer.setSingleShot(True)
+        self._map_redraw_timer.setInterval(150)
+        self._map_redraw_timer.timeout.connect(self.render_flux_map)
         self._refresh_map_source()
         return tab
+
+    def _schedule_map_redraw(self) -> None:
+        """Redraw the loaded flux state after a display change — never solve for one."""
+
+        if self._loading or self._map_canvas is None:
+            return  # nothing drawn yet; the draw buttons are the way in
+        self._map_redraw_timer.start()
 
     def _on_map_layout_changed(self, _text: str = "") -> None:
         """Only the schematic has a reaction count to choose, and it says something else."""
@@ -990,6 +1001,7 @@ class CmmMainWindow(QMainWindow):
         self.map_topn_label.setVisible(schematic)
         self.map_topn_spin.setVisible(schematic)
         self._refresh_map_label()
+        self._schedule_map_redraw()
 
     def _refresh_map_label(self) -> None:
         """Describe the layout that is actually on screen, not the one merely available."""
