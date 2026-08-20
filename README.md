@@ -19,7 +19,7 @@ Tagged releases and their test data will remain available for at least two years
 publication, with issue reporting through the repository's
 [GitHub Issues](https://github.com/jyryu3161/CMM/issues).
 
-Before journal submission, the exact `v0.4.0` release must additionally be archived in
+Before journal submission, the exact `v0.5.0` release must additionally be archived in
 Zenodo or an equivalent long-term repository and its DOI added to this section,
 `CITATION.cff`, and the manuscript's Availability and Implementation statement.
 
@@ -84,7 +84,7 @@ Gurobi extras by default:
 
 Tagged wheels and source archives are published on the
 [GitHub Releases page](https://github.com/jyryu3161/CMM/releases). The current source version
-is 0.4.0, a **breaking** release — see `CHANGELOG.md`.
+is 0.5.0; 0.4.0 was a **breaking** release — see `CHANGELOG.md`.
 
 ## Solver requirements
 
@@ -225,6 +225,6 @@ builds the wheel and sdist, validates them, installs the wheel in a clean enviro
 then attaches the artifacts to a GitHub Release.
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.5.0
+git push origin v0.5.0
 ```

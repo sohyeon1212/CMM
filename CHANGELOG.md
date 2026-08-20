@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — unreleased
+
+The flux map, which shipped in 0.4.0 but could not be reached from the application,
+is now a working part of it. Additive: nothing is removed and no result changes.
 
 ### Added
 
