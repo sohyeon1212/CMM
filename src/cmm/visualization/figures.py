@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 from matplotlib import __version__ as matplotlib_version
 from matplotlib import cm, colormaps
+from matplotlib import image as plt_image
 from matplotlib.colors import ListedColormap, Normalize, TwoSlopeNorm
 from matplotlib.figure import Figure
 from matplotlib.patches import PathPatch
@@ -648,6 +649,7 @@ def network_flux_map(
     top_n: int = 12,
     title: str = "Flux network (top reactions)",
     seed: int = 0,
+    line_width: float | None = None,
 ) -> Figure:
     """Schematic carbon-backbone flux network: top-|flux| reactions as edges, width ∝ |flux|.
 
@@ -715,7 +717,7 @@ def network_flux_map(
             arrowprops=dict(
                 arrowstyle="-|>",
                 color=cmap(0.15 + 0.85 * w / max_w),
-                lw=1.2 + 5.0 * w / max_w,
+                lw=line_width if line_width is not None else 1.2 + 5.0 * w / max_w,
                 alpha=0.9,
                 shrinkA=14,
                 shrinkB=14,
@@ -761,7 +763,12 @@ def network_flux_map(
     ax.text(
         0.5,
         -0.10,
-        "arrow colour and width both scale with |flux|; direction is the net direction",
+        (
+            "arrow colour scales with |flux|; direction is the net direction"
+            if line_width is not None
+            else "arrow colour and width both scale with |flux|; "
+            "direction is the net direction"
+        ),
         transform=ax.transAxes,
         fontsize=font["legend"],
         color="#555555",
@@ -872,15 +879,64 @@ def _display_metabolite_id(mid: str) -> str:
     return _base_id(mid).replace("__", "-")
 
 
+def _map_canvas_extent(body: dict) -> tuple[float, float, float, float]:
+    """Where a drawing of this map belongs, in the map's coordinates.
+
+    An Escher map records the canvas its layout was drawn on, so a picture exported from that
+    same map lines up with the node coordinates without the caller nudging it. Escher's y grows
+    downward, which is also how the axes are set below, so the extent is given top-edge-last.
+    """
+
+    canvas = body.get("canvas")
+    if canvas:
+        x, y = float(canvas["x"]), float(canvas["y"])
+        return (x, x + float(canvas["width"]), y + float(canvas["height"]), y)
+    xs = [float(n["x"]) for n in body["nodes"].values()]
+    ys = [float(n["y"]) for n in body["nodes"].values()]
+    return (min(xs), max(xs), max(ys), min(ys))
+
+
+def _fit_extent(
+    box: tuple[float, float, float, float], width: int, height: int
+) -> tuple[float, float, float, float]:
+    """Largest sub-box of ``box`` with the image's own proportions, centred in it.
+
+    A picture placed on an extent is stretched to fill it, so a drawing whose proportions do
+    not match the map's canvas would be distorted — circles into ellipses, a map skewed out of
+    true. Fitting inside and centring leaves margin instead, which is honest about the
+    mismatch; an export of this very map matches exactly and is unaffected.
+    """
+
+    left, right, bottom, top = box
+    box_w, box_h = abs(right - left), abs(bottom - top)
+    if not (box_w and box_h and width and height):
+        return box
+    scale = min(box_w / width, box_h / height)
+    half_w, half_h = width * scale / 2, height * scale / 2
+    cx, cy = (left + right) / 2, (top + bottom) / 2
+    # Preserve the caller's y direction: Escher's y grows downward, so bottom > top here.
+    down = bottom > top
+    return (
+        cx - half_w,
+        cx + half_w,
+        cy + half_h if down else cy - half_h,
+        cy - half_h if down else cy + half_h,
+    )
+
+
 def escher_flux_map(
     map_path: str | Path,
     fluxes: dict[str, float],
     *,
     title: str | None = None,
     abs_max: float | None = None,
-    label_metabolites: bool = True,
-    label_reactions: bool = True,
+    label_metabolites: bool | None = None,
+    label_reactions: bool | None = None,
     width: float = 12.0,
+    background: "np.ndarray | str | Path | None" = None,
+    background_extent: tuple[float, float, float, float] | None = None,
+    background_alpha: float = 1.0,
+    line_width: float | None = None,
 ) -> Figure:
     """Render an Escher map (curated node/segment layout) coloured by flux.
 
@@ -889,7 +945,21 @@ def escher_flux_map(
     instead of an invented force layout. Reaction edge width and colour encode flux
     (diverging: blue = negative/reverse, red = positive/forward). ``map_path`` is supplied by
     the caller (CMM bundles no maps).
+        ``line_width`` overrides the flux-proportional stroke width with one constant width, so
+    colour alone encodes magnitude. Useful over a ``background``, where a wide stroke covers
+    the drawing underneath it.
+
     """
+
+    # A background drawing of this map already carries the labels and the metabolite circles,
+    # so drawing CMM's on top of them doubles every one and the text turns to mush. Unless the
+    # caller asks for them explicitly, the background is left to say what things are called and
+    # this function contributes only the flux.
+    if label_metabolites is None:
+        label_metabolites = background is None
+    if label_reactions is None:
+        label_reactions = background is None
+    draw_nodes = background is None
 
     with open(map_path) as handle:
         data = json.load(handle)
@@ -904,6 +974,35 @@ def escher_flux_map(
     ax.set_axis_off()
     ax.set_aspect("equal")
 
+    if background is not None:
+        # A drawing of the same map, laid underneath in the map's own coordinates. An Escher
+        # export renders the network the way Escher draws it — arrowheads, node sizes, the
+        # lot — which this function does not attempt; the flux strokes then go on top, so the
+        # picture is Escher's and the colouring is CMM's. Rasterisation belongs to the caller
+        # (SVG needs a renderer, and this module stays free of Qt), so an array is accepted
+        # directly and a path only for formats matplotlib itself reads.
+        image = background
+        if isinstance(image, (str, Path)):
+            if str(image).lower().endswith(".svg"):
+                raise ValueError(
+                    "escher_flux_map cannot rasterise SVG. Render it to an RGBA array first "
+                    "and pass that (cmm.app.svg_background does this with Qt)."
+                )
+            image = plt_image.imread(str(image))
+        extent = background_extent or _fit_extent(
+            _map_canvas_extent(body), image.shape[1], image.shape[0]
+        )
+        ax.imshow(
+            image,
+            extent=extent,
+            alpha=background_alpha,
+            interpolation="antialiased",
+            zorder=0,
+            # Not aspect="auto": imshow writes its aspect onto the axes, and "auto" would
+            # discard the equal aspect set above, stretching the whole map to the panel.
+            aspect="equal",
+        )
+
     signed = [fluxes.get(r["bigg_id"], 0.0) for r in reactions.values()]
     amax = abs_max or max((abs(v) for v in signed), default=1.0) or 1.0
     norm = TwoSlopeNorm(vmin=-amax, vcenter=0.0, vmax=amax)
@@ -913,9 +1012,17 @@ def escher_flux_map(
         flux = fluxes.get(r["bigg_id"], 0.0)
         mag = abs(flux)
         if mag <= 1e-9:
-            color, lw, alpha = "#d7dbe0", 0.7, 0.7
+            color = "#d7dbe0"
+            lw = line_width if line_width is not None else 0.7
+            alpha = 0.7
         else:
-            color, lw, alpha = cmap(norm(flux)), 0.8 + 5.5 * mag / amax, 0.95
+            color = cmap(norm(flux))
+            # Width and colour carry the same number. Doubling it up makes a large flux
+            # unmissable, which is the point on a bare layout; over a drawing of the network it
+            # is a thick band hiding the very lines it is drawn on, so the caller can ask for
+            # one constant width and let colour alone carry the magnitude.
+            lw = line_width if line_width is not None else 0.8 + 5.5 * mag / amax
+            alpha = 0.95
         for seg in r["segments"].values():
             a = node_xy.get(seg["from_node_id"])
             b = node_xy.get(seg["to_node_id"])
@@ -943,7 +1050,8 @@ def escher_flux_map(
     xs, ys = [], []
     for n in nodes.values():
         if n.get("node_type") == "metabolite":
-            ax.plot(n["x"], n["y"], "o", ms=2.2, color="#2b3a4a", zorder=3)
+            if draw_nodes:
+                ax.plot(n["x"], n["y"], "o", ms=2.2, color="#2b3a4a", zorder=3)
             xs.append(n["x"])
             ys.append(n["y"])
             if label_metabolites:
