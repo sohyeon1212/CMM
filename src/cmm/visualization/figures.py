@@ -658,7 +658,9 @@ def network_flux_map(
 
     fig, ax, font = _new_figure(width=8.0, height=4.8)
     ax.set_axis_off()
-    ax.set_title(title, fontsize=font["title"], fontweight="bold")
+    # The network is drawn edge-to-edge with no axes frame, so a title set tight against it
+    # reads as a label stuck on the drawing rather than a caption above it.
+    ax.set_title(title, fontsize=font["title"], fontweight="bold", pad=14)
 
     met_ids: list[str] = []
     edges: list[tuple[int, int, float, str]] = []
@@ -987,7 +989,9 @@ def escher_flux_map(
     # title drift right inside the panel. The map should sit in the middle of the space it has.
     ax.set_anchor("C")
     if title:
-        ax.set_title(title, fontsize=14, fontweight="bold")
+        # Smaller and further off the drawing than the default: an Escher map fills its axes
+        # completely, so a large title sitting on the top edge crowds the network it names.
+        ax.set_title(title, fontsize=12, fontweight="bold", pad=16)
     # `tight_layout` solves the margins once, at the size the figure was authored. The GUI
     # canvas then stretches the figure to whatever the panel is, the solved margins no longer
     # fit, and the title is clipped against the top edge. A constrained layout re-solves on
