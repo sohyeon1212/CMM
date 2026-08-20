@@ -341,12 +341,17 @@ Two layouts, chosen with the **layout** selector:
 | Layout | What it draws | Needs |
 |---|---|---|
 | **Escher map (curated)** | A published Escher map's hand-laid coordinates and bezier segments — every reaction the map covers | an Escher map JSON |
-| **Schematic (top reactions)** | The *n* highest-`|flux|` reactions, currency metabolites (ATP, H₂O, CO₂, NAD(P)H…) dropped so the layout follows the carbon skeleton | nothing |
+| **Schematic (top reactions)** | The *n* highest-`|flux|` reactions (4–25), currency metabolites (ATP, H₂O, CO₂, NAD(P)H…) dropped so the layout follows the carbon skeleton. Arrow colour *and* width scale with `|flux|`, read against the colorbar; the arrow points the net direction | nothing |
 
 CMM never invents a map layout. A readable metabolic map is hand-drawn, and an automatic
 layout of a genome-scale network is a hairball rather than a figure — which is why the
 schematic draws a handful of reactions and says so in its title rather than pretending to
 show the whole network.
+
+The reaction count is capped at 25 for the same reason. The schematic folds the carbon
+backbone into evenly spaced rows, but a metabolic network branches, and past roughly that many
+reactions the arrows between rows dominate the picture. Reading more of the network at once is
+what a curated map is for.
 
 **The bundled map.** CMM ships Escher's *E. coli* core map and offers it automatically to any
 model containing at least half its reactions. That covers `e_coli_core` (94 of 95) and also

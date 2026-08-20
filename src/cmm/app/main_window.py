@@ -911,10 +911,15 @@ class CmmMainWindow(QMainWindow):
         self.map_topn_label = QLabel("reactions:")
         controls.addWidget(self.map_topn_label)
         self.map_topn_spin = QSpinBox()
-        self.map_topn_spin.setRange(4, 60)
+        # Capped low on purpose. The schematic folds the carbon backbone into rows, and a
+        # metabolic network branches — past roughly this many reactions the cross-row arrows
+        # dominate and the figure stops being readable. That is a curated map's job.
+        self.map_topn_spin.setRange(4, 25)
         self.map_topn_spin.setValue(12)
         self.map_topn_spin.setToolTip(
-            "How many of the highest-|flux| reactions to draw"
+            "How many of the highest-|flux| reactions to draw.\n"
+            "Capped at 25 — beyond that the schematic cannot stay readable; "
+            "use a curated Escher map instead."
         )
         controls.addWidget(self.map_topn_spin)
 

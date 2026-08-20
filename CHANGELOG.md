@@ -22,8 +22,24 @@
 - `cmm.resources.bundled_map_for(model)` returns the bundled map's path when it suits a model,
   and `None` when nothing does.
 
+### Fixed
+
+- **The flux map no longer drifts right, clip its title, or draw its colorbar as a hairline**
+  when the GUI stretches the figure to a wide panel. `colorbar` re-anchors its parent axes to
+  the right, so every bit of the shrinkage `set_aspect("equal")` applies was taken off the left
+  edge; `tight_layout` solved the margins once at the authored size and they no longer fitted
+  once stretched. The figure now anchors centre and re-solves its layout on every draw.
+- **The schematic layout folds long chains into rows instead of collapsing them.** At 25
+  reactions the carbon backbone is one ~30-node chain, and laying it along a single row put
+  nodes at *zero* separation — markers and labels merged into a smear. Rows now use one fixed
+  node spacing, so a two-node branch no longer stretches across the whole panel either.
+
 ### Changed
 
+- **The schematic carries a colorbar** instead of an `∝ |flux|` formula in the margin, drawn
+  from the same truncated colormap span the arrows are coloured from.
+- The schematic's reaction count is capped at 25. Beyond that the cross-row arrows dominate and
+  the figure stops being readable — that is a curated map's job, not a fallback schematic's.
 - `test_data/` is removed. Its last remaining file was an unattributed copy of the same Escher
   map; the scenario harness now uses the bundled, attributed one.
 

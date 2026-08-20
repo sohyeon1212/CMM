@@ -193,7 +193,10 @@ def test_network_flux_map(ecoli_core, tmp_path):
     from cmm.core import fba
 
     fig = network_flux_map(ecoli_core, dict(fba(ecoli_core).fluxes), top_n=10)
-    assert len(fig.axes) == 1
+    # Network axes plus the flux colorbar: the arrows encode a quantity, so the figure has to
+    # carry the scale that quantity is read against rather than a formula in the margin.
+    assert len(fig.axes) == 2
+    assert "|flux|" in fig.axes[1].get_ylabel()
     path = save_figure(fig, tmp_path / "network.png")
     assert _nonblank(path)
 
@@ -263,3 +266,54 @@ def test_escher_flux_map_handles_missing_flux(tmp_path):
     # No flux for R1 -> the reaction is drawn in the zero-flux style, no error.
     fig = escher_flux_map(str(map_path), {})
     assert len(fig.axes) >= 1
+
+
+def _schematic_nodes(fig):
+    """Node positions of a network_flux_map, in axes data coordinates."""
+
+    return fig.axes[0].collections[0].get_offsets()
+
+
+def test_schematic_keeps_nodes_apart_as_the_count_grows(ecoli_core):
+    """A long carbon backbone must fold into rows rather than collapse along one.
+
+    Laid on a single row, 25 reactions put ~30 nodes across the panel and the markers and
+    labels merge into a smear. Spacing is what makes the figure readable, so it is the thing
+    to hold fixed as the count rises — not the number of rows.
+    """
+
+    import numpy as np
+
+    from cmm.core import fba
+    from cmm.visualization import network_flux_map
+
+    fluxes = dict(fba(ecoli_core).fluxes)
+    for top_n in (12, 20, 25):
+        fig = network_flux_map(ecoli_core, fluxes, top_n=top_n)
+        nodes = np.asarray(_schematic_nodes(fig))
+        gaps = [
+            np.hypot(*(a - b))
+            for i, a in enumerate(nodes)
+            for b in nodes[i + 1 :]
+        ]
+        assert min(gaps) > 0.05, f"nodes collide at top_n={top_n}: {min(gaps):.3f}"
+        rows = len(set(np.round(nodes[:, 1], 3)))
+        assert rows > 1, f"everything landed on one row at top_n={top_n}"
+
+
+def test_schematic_rows_are_evenly_spaced(ecoli_core):
+    """One node spacing everywhere, so a two-node branch does not stretch panel-wide."""
+
+    import numpy as np
+
+    from cmm.core import fba
+    from cmm.visualization import network_flux_map
+
+    fig = network_flux_map(ecoli_core, dict(fba(ecoli_core).fluxes), top_n=20)
+    nodes = np.asarray(_schematic_nodes(fig))
+    steps = []
+    for y in set(np.round(nodes[:, 1], 3)):
+        xs = np.sort(nodes[np.round(nodes[:, 1], 3) == y][:, 0])
+        steps.extend(np.diff(xs))
+    assert steps, "no row held more than one node"
+    assert max(steps) - min(steps) < 1e-6, f"node spacing varies: {sorted(steps)[:3]}…"

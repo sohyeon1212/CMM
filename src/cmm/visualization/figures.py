@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from matplotlib import __version__ as matplotlib_version
 from matplotlib import cm, colormaps
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import ListedColormap, Normalize, TwoSlopeNorm
 from matplotlib.figure import Figure
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path as MplPath
@@ -746,22 +746,50 @@ def network_flux_map(
             va="bottom" if above else "top",
             color="#11243b",
         )
-    # Colour-bar proxy for flux magnitude.
+    # A formula in the margin is not a legend: the reader has to hold "∝ |flux|" in their head
+    # and guess which end of viridis is large. Draw the scale the arrows were actually coloured
+    # from — the same truncated span passed to `cmap` above, so the bar cannot lie about them.
+    bar_cmap = ListedColormap(cmap(np.linspace(0.15, 1.0, 256)))
+    mappable = cm.ScalarMappable(norm=Normalize(vmin=0.0, vmax=max_w), cmap=bar_cmap)
+    cbar = fig.colorbar(
+        mappable, ax=ax, fraction=0.035, pad=0.02, shrink=0.55, aspect=14
+    )
+    cbar.set_label("|flux| (mmol gDW$^{-1}$ h$^{-1}$)", fontsize=font["legend"])
+    cbar.ax.tick_params(labelsize=font["tick"])
     ax.text(
-        0.0,
-        -0.08,
-        f"edge width / colour ∝ |flux|  (max {max_w:.1f} mmol gDW$^{{-1}}$ h$^{{-1}}$)",
+        0.5,
+        -0.10,
+        "arrow colour and width both scale with |flux|; direction is the net direction",
         transform=ax.transAxes,
         fontsize=font["legend"],
         color="#555555",
+        ha="center",
     )
     ax.set_xlim(-0.12, 1.12)
-    ax.set_ylim(-0.18, 1.06)
+    ax.set_ylim(-0.14, 1.02)
+    # `colorbar` re-anchors its parent right; centre the network in the space that is left.
+    ax.set_anchor("C")
+    fig.set_layout_engine("constrained")
     return fig
 
 
-def _component_row_layout(n: int, edges: list[tuple[int, int]]) -> np.ndarray:
-    """Pack disconnected carbon-backbone components into compact horizontal rows."""
+#: Longest chain drawn on one row before it wraps. A single connected component can be far
+#: longer than the panel is wide — at 25 reactions the core carbon backbone is one ~30-node
+#: chain — and spreading it across one row collapses the spacing until nodes and labels
+#: overlap into a smear. Wrapping trades a fold for legible spacing.
+_MAX_NODES_PER_ROW = 10
+
+
+def _component_row_layout(
+    n: int, edges: list[tuple[int, int]], per_row: int = _MAX_NODES_PER_ROW
+) -> np.ndarray:
+    """Pack the carbon-backbone components into compact rows, folding long chains.
+
+    Rows are laid at one fixed node spacing and centred, so an arrow is the same length
+    everywhere and a two-node component no longer stretches across the whole panel. Long
+    chains fold boustrophedon — each fold reverses direction — so the node ending one row is
+    directly above the node starting the next instead of a full panel width away.
+    """
 
     adjacency = {i: set() for i in range(n)}
     for source, dest in edges:
@@ -786,18 +814,23 @@ def _component_row_layout(n: int, edges: list[tuple[int, int]]) -> np.ndarray:
         components.append(sorted(component))
 
     components.sort(key=lambda nodes: (-len(nodes), nodes[0]))
-    y_values = (
-        np.linspace(0.82, 0.22, len(components)) if len(components) > 1 else [0.55]
-    )
-    pos = np.zeros((n, 2))
-    for component, y in zip(components, y_values, strict=True):
+
+    rows: list[list[int]] = []
+    for component in components:
         ordered = _ordered_component_nodes(component, edges)
-        if len(ordered) == 1:
-            xs = [0.5]
-        else:
-            xs = np.linspace(0.08, 0.92, len(ordered))
-        for node, x in zip(ordered, xs, strict=True):
-            pos[node] = (float(x), float(y))
+        for start in range(0, len(ordered), per_row):
+            chunk = ordered[start : start + per_row]
+            if (start // per_row) % 2:
+                chunk = chunk[::-1]  # fold back, keeping the join between rows short
+            rows.append(chunk)
+
+    y_values = np.linspace(0.88, 0.14, len(rows)) if len(rows) > 1 else [0.55]
+    step = 0.84 / max(per_row - 1, 1)
+    pos = np.zeros((n, 2))
+    for chunk, y in zip(rows, y_values, strict=True):
+        x0 = 0.5 - step * (len(chunk) - 1) / 2  # centre each row on the panel
+        for offset, node in enumerate(chunk):
+            pos[node] = (x0 + offset * step, float(y))
     return pos
 
 
