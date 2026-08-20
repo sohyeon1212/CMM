@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The Flux Map tab is always available, and needs no file to get started.** It previously
+  appeared only when the window was constructed with `map_path=`, which `python -m cmm.app`
+  never passes — so the feature existed but no ordinary launch could reach it. The tab now
+  offers two layouts: a curated Escher map, and a dependency-free schematic of the highest
+  `|flux|` reactions for models no map fits. The caption states which one is on screen.
+- **Escher's *E. coli* core map is bundled** (`src/cmm/resources/`) and offered automatically
+  to any model containing at least half its reactions — `e_coli_core` (94 of 95) and also
+  genome-scale reconstructions such as iJO1366, since viewing a genome-scale model on a
+  central-metabolism map is how Escher is used. Redistributed byte-for-byte under Escher's
+  MIT license; provenance, SHA-256 and the citation to King et al. (2015) are in
+  `src/cmm/resources/ATTRIBUTION.md`, and a test asserts the digest so the attribution cannot
+  silently go stale.
+- **`File ▸ Open Escher Map…`** (and **Load map…** on the tab) loads any Escher map JSON. A map
+  whose reactions are absent from the loaded model is refused with a message instead of being
+  drawn as a blank grey network.
+- `cmm.resources.bundled_map_for(model)` returns the bundled map's path when it suits a model,
+  and `None` when nothing does.
+
+### Changed
+
+- `test_data/` is removed. Its last remaining file was an unattributed copy of the same Escher
+  map; the scenario harness now uses the bundled, attributed one.
+
 ## 0.4.0 — unreleased · **BREAKING**
 
 A fidelity release. Five independent audits compared every implemented method against its

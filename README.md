@@ -45,6 +45,10 @@ Zenodo or an equivalent long-term repository and its DOI added to this section,
 - MTA/rMTA: published MTA MIQP, published rMTA best/MOMA/worst scoring, and an explicitly
   labeled legacy continuous heuristic. Reached as `revert_targets` and `transformation_targets`
   in Python and as the *Revert Metabolism* and *Transform (A→B)* tabs in the application.
+- Visualization: flux maps on a curated Escher layout — Escher's *E. coli* core map is bundled
+  and offered automatically to any model containing at least half its reactions, including
+  genome-scale ones — or a dependency-free schematic of the highest-flux reactions for models
+  no map fits. Any Escher JSON can be loaded from the GUI.
 - Auditability: deterministic model fingerprints and solver/package/parameter provenance on
   numerical results.
 
@@ -204,6 +208,9 @@ Three points that are easy to get wrong, all detailed there:
   `straindesign` package that actually solves them, which carries no citation of its own.
 - **`transformation_targets` is not a CMM invention**; both of its paths map to published
   Yizhak et al. (2013) methods and should be cited to that paper.
+- **The bundled Escher map is Escher's, not CMM's.** `src/cmm/resources/` redistributes the
+  *E. coli* core map under Escher's MIT license; work using that layout should cite King et al.
+  (2015). Provenance, digest, and license are in `src/cmm/resources/ATTRIBUTION.md`.
 - **`flux_log_change` has no published source.** It is a CMM utility and must not be cited to
   any paper. CMM's FSEOF selection rule and FVSEOF's `robust_targets()` flag are likewise
   CMM's own and must not be attributed to Choi et al. or Park et al.

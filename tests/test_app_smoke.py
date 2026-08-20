@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -678,6 +679,7 @@ def test_tab_order_groups_related_analyses(app, ecoli_core):
         "Production",
         "Strain Design",
         "Omics",
+        "Flux Map",
         "Revert Metabolism",
         "Transform (A→B)",
     ]
@@ -933,3 +935,147 @@ def test_applying_a_medium_reports_what_was_dropped(app, ecoli_core):
     assert "Glucose minimal, aerobic" in status  # the 0.4.0 display name, not the key
     assert "dropped" in status
     assert "EX_fe2_e" in status
+
+
+# --- Flux Map tab ---------------------------------------------------------------------
+# The map is the one analysis that needs an external layout file, so the tab has to behave
+# when that file is absent, wrong, or for another model.
+
+
+def _flux_map_window(model):
+    from cmm.app.main_window import _MAP_LAYOUT_ESCHER, _MAP_LAYOUT_SCHEMATIC
+
+    window = CmmMainWindow(model)
+    window._goto_tab("Flux Map")
+    return window, _MAP_LAYOUT_ESCHER, _MAP_LAYOUT_SCHEMATIC
+
+
+def test_flux_map_tab_opens_on_the_bundled_map_without_any_setup(app, ecoli_core):
+    """The default model must show a curated map with no file to find and no flag to pass."""
+
+    window, escher, _ = _flux_map_window(ecoli_core)
+    assert window._map_path is not None
+    assert window.map_layout_combo.currentText() == escher
+    assert "95 reactions" in window.map_source_label.text()
+
+    window.render_flux_map()
+    assert window._map_canvas is not None
+    assert "Escher layout" in window.status_label.text()
+
+
+def test_flux_map_falls_back_to_the_schematic_when_no_map_fits(app):
+    """A model no bundled map describes still gets a figure — and is told what it is."""
+
+    import cobra
+
+    # Two compartments, because cobra locates the external one before listing exchanges.
+    model = cobra.Model("unmapped")
+    a_e = cobra.Metabolite("a_e", compartment="e")
+    a_c = cobra.Metabolite("a_c", compartment="c")
+    b_c = cobra.Metabolite("b_c", compartment="c")
+    b_e = cobra.Metabolite("b_e", compartment="e")
+
+    def _reaction(rid, stoichiometry, lower=0.0):
+        reaction = cobra.Reaction(rid, lower_bound=lower, upper_bound=1000.0)
+        reaction.add_metabolites(stoichiometry)
+        return reaction
+
+    model.add_reactions(
+        [
+            _reaction("EX_a_e", {a_e: -1}, lower=-10.0),
+            _reaction("A_TRANSPORT", {a_e: -1, a_c: 1}),
+            _reaction("GROW", {a_c: -1, b_c: 1}),
+            _reaction("B_TRANSPORT", {b_c: -1, b_e: 1}),
+            _reaction("EX_b_e", {b_e: -1}),
+        ]
+    )
+    model.objective = "GROW"
+
+    window, _, schematic = _flux_map_window(model)
+    assert window._map_path is None
+    assert window.map_layout_combo.currentText() == schematic
+    assert "No bundled Escher map" in window.map_source_label.text()
+
+    window.render_flux_map()
+    assert window._map_canvas is not None
+    assert "schematic" in window.status_label.text()
+
+
+def test_flux_map_switches_between_layouts(app, ecoli_core):
+    window, escher, schematic = _flux_map_window(ecoli_core)
+
+    window.map_layout_combo.setCurrentText(schematic)
+    window.map_topn_spin.setValue(8)
+    window.render_flux_map()
+    assert "top 8 reactions" in window.status_label.text()
+
+    window.map_layout_combo.setCurrentText(escher)
+    window.render_flux_map()
+    assert "Escher layout" in window.status_label.text()
+
+
+def test_loading_a_map_for_a_different_model_is_refused(app, ecoli_core, tmp_path):
+    """An all-grey map is worse than no map: say the ids do not match, draw nothing."""
+
+    from cmm.app import main_window as mw
+
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text(
+        json.dumps(
+            [
+                {"map_name": "foreign", "schema": "…1-0-0#"},
+                {
+                    "reactions": {"1": {"bigg_id": "NOT_IN_ANY_ECOLI_MODEL"}},
+                    "nodes": {},
+                },
+            ]
+        )
+    )
+    window, _, _ = _flux_map_window(ecoli_core)
+    before = window._map_path
+
+    monkey = lambda *a, **k: (str(foreign), "")  # noqa: E731 - one-line dialog stub
+    original = mw.QFileDialog.getOpenFileName
+    mw.QFileDialog.getOpenFileName = staticmethod(monkey)
+    try:
+        window.open_flux_map_dialog()
+    finally:
+        mw.QFileDialog.getOpenFileName = original
+
+    assert window._map_path == before  # the good map was not replaced by the bad one
+    assert "different model" in window.status_label.text()
+
+
+def test_loading_a_non_escher_file_is_refused(app, ecoli_core, tmp_path):
+    from cmm.app import main_window as mw
+
+    junk = tmp_path / "junk.json"
+    junk.write_text("{ not json at all")
+    window, _, _ = _flux_map_window(ecoli_core)
+    before = window._map_path
+
+    original = mw.QFileDialog.getOpenFileName
+    mw.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(junk), ""))
+    try:
+        window.open_flux_map_dialog()
+    finally:
+        mw.QFileDialog.getOpenFileName = original
+
+    assert window._map_path == before
+    assert "not a readable escher map" in window.status_label.text().lower()
+
+
+def test_map_label_describes_the_layout_actually_shown(app, ecoli_core):
+    """In schematic mode the caption must not still be describing the Escher map."""
+
+    window, escher, schematic = _flux_map_window(ecoli_core)
+    assert window.map_source_label.text().startswith("Escher map:")
+
+    window.map_layout_combo.setCurrentText(schematic)
+    caption = window.map_source_label.text()
+    assert caption.startswith("Schematic layout")
+    assert "No layout file needed" in caption
+    assert "available" in caption  # the Escher map is still offered, not hidden
+
+    window.map_layout_combo.setCurrentText(escher)
+    assert window.map_source_label.text().startswith("Escher map:")

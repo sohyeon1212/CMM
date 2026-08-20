@@ -319,6 +319,14 @@ implements no published method and **must not be cited to any paper.** Describe 
 reporting convenience, and state the pseudocount, which determines the value returned for
 switch-on and switch-off reactions.
 
+`network_flux_map`'s schematic layout is likewise **CMM's own**: it selects the highest-`|flux|`
+reactions, drops a fixed currency-metabolite list, and runs a seeded force-directed layout. It
+is a flux overview, not a curated map, and implements no published layout algorithm. The
+curated alternative is not CMM's either — `escher_flux_map` renders a map authored in Escher,
+and work using that layout should cite King et al. (2015); the bundled map's provenance,
+SHA-256 and license are recorded in `src/cmm/resources/ATTRIBUTION.md` and asserted by
+`tests/test_resources.py`.
+
 ## Run provenance
 
 Numerical result metadata includes:
