@@ -1232,3 +1232,71 @@ def test_display_controls_do_not_solve_before_anything_is_drawn(app, ecoli_core)
     assert not window._map_redraw_timer.isActive()
     assert not window._fluxes
     assert window._flux_source == ""
+
+
+def test_map_background_loads_toggles_and_is_dropped_with_its_map(
+    app, ecoli_core, tmp_path
+):
+    """A drawing describes one map, so it must not survive that map being replaced."""
+
+    from cmm.app.svg_background import svg_background
+
+    drawing = tmp_path / "drawing.svg"
+    drawing.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" '
+        'viewBox="0 0 100 100"><rect width="100" height="100" fill="#8ab"/></svg>'
+    )
+
+    window, _, _ = _flux_map_window(ecoli_core)
+    window._draw_simulation_on_map(window.run_fba)
+    assert window._map_background is None
+    assert not window.map_background_check.isVisible()
+
+    window._map_background = svg_background(drawing)
+    window.map_background_check.setVisible(True)
+    window.map_background_check.setChecked(True)
+    window.render_flux_map()
+    assert len(window._map_canvas.figure.axes[0].images) == 1
+    assert "over the loaded drawing" in window.status_label.text()
+
+    # Unchecking hides it without unloading — the array is still there.
+    window.map_background_check.setChecked(False)
+    window.render_flux_map()
+    assert not window._map_canvas.figure.axes[0].images
+    assert window._map_background is not None
+
+    # A different model drops the drawing along with the map it described.
+    window.load_model(build_demo_model())
+    assert window._map_background is None
+
+
+def test_omics_condition_chooser_says_how_many_it_holds(app, tmp_path):
+    """A closed combo shows one item while the checklist above shows every condition.
+
+    Reported as a bug — two conditions computed, one visible. The box was right; nothing said
+    the other was one click away. The label now counts them and tracks the selection.
+    """
+
+    from cmm.omics.conditions import read_expression_table
+
+    path = tmp_path / "conditions.csv"
+    path.write_text(
+        "gene,condA,condB\ng1,50,50\ng2,100,1\ng3,1,100\ng5,1,100\ngb,50,50\n"
+    )
+
+    window = CmmMainWindow(build_demo_model())
+    window._set_omics_source(read_expression_table(str(path)), "conditions.csv")
+    window.omics_method_combo.setCurrentText("lad")
+    window.compute_omics()
+
+    assert window.omics_map_combo.count() == 2
+    assert window.omics_map_label.text() == "Draw (1 of 2):"
+
+    window.omics_map_combo.setCurrentIndex(1)
+    assert window.omics_map_label.text() == "Draw (2 of 2):"
+    assert window.omics_map_combo.currentText() == "condB"
+
+    # One condition needs no count, and reloading the source resets the label with the box.
+    window._set_omics_source(read_expression_table(str(path)), "conditions.csv")
+    assert window.omics_map_combo.count() == 0
+    assert window.omics_map_label.text() == "Draw:"

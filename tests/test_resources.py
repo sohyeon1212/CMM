@@ -7,6 +7,7 @@ import json
 import re
 
 import cobra
+import pytest
 from cmm.resources import (
     BUNDLED_MAPS,
     bundled_map_for,
@@ -136,3 +137,141 @@ def test_flux_map_layout_is_stable_across_panel_sizes(ecoli_core):
 
     assert max(centres) - min(centres) < 0.08, f"map centre drifts: {centres}"
     assert max(bars) - min(bars) < 4, f"colorbar aspect drifts: {bars}"
+
+
+# --- map background -------------------------------------------------------------------
+# The JSON gives the layout; a drawing exported from that same map gives Escher's rendering
+# of it, which this renderer does not reproduce. Laying one under the other is optional.
+
+
+def _probe_svg(tmp_path, width=400, height=200):
+    path = tmp_path / "probe.svg"
+    path.write_text(
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}"><rect width="{width}" height="{height}" '
+        'fill="#204080"/></svg>'
+    )
+    return path
+
+
+def test_svg_background_rasterises_at_the_svg_aspect_ratio(tmp_path):
+    from cmm.app.svg_background import svg_background
+
+    image = svg_background(_probe_svg(tmp_path, 400, 200))
+    assert (
+        image.shape[2] == 4
+    )  # RGBA: the drawing must not paint over the figure's paper
+    assert image.shape[1] / image.shape[0] == 2.0
+    assert tuple(image[image.shape[0] // 2, image.shape[1] // 2][:3]) == (
+        0x20,
+        0x40,
+        0x80,
+    )
+
+
+def test_svg_background_caps_its_own_size(tmp_path):
+    from cmm.app.svg_background import MAX_BACKGROUND_PIXELS, svg_background
+
+    image = svg_background(_probe_svg(tmp_path, 20000, 10000))
+    assert max(image.shape[:2]) == MAX_BACKGROUND_PIXELS
+
+
+def test_svg_background_refuses_a_file_that_is_not_an_svg(tmp_path):
+    """A blank image would look like a map with nothing drawn on it — say so instead."""
+
+    from cmm.app.svg_background import svg_background
+
+    junk = tmp_path / "not.svg"
+    junk.write_text("this is not markup")
+    with pytest.raises(ValueError, match="Not a readable SVG"):
+        svg_background(junk)
+
+
+def test_flux_map_places_a_background_in_the_maps_own_coordinates(ecoli_core):
+    """The canvas the layout was drawn on is what a drawing of it lines up with."""
+
+    import json
+
+    import numpy as np
+
+    from cmm.core import fba
+    from cmm.visualization import escher_flux_map
+
+    canvas = json.loads(CORE_MAP.read_text(encoding="utf-8"))[1]["canvas"]
+    # A drawing with the canvas's own proportions — an export of this map is exactly that.
+    height = 400
+    width = round(height * canvas["width"] / canvas["height"])
+    drawing = np.zeros((height, width, 4), dtype=np.uint8)
+
+    fig = escher_flux_map(
+        str(CORE_MAP), dict(fba(ecoli_core).fluxes), background=drawing
+    )
+    images = fig.axes[0].images
+    assert len(images) == 1
+    left, right, bottom, top = images[0].get_extent()
+    assert left == pytest.approx(canvas["x"], abs=1.0)
+    assert right == pytest.approx(canvas["x"] + canvas["width"], abs=1.0)
+    # Escher's y grows downward, matching how the axes are inverted.
+    assert top == pytest.approx(canvas["y"], abs=1.0)
+    assert bottom == pytest.approx(canvas["y"] + canvas["height"], abs=1.0)
+    assert images[0].zorder < 1  # under the flux strokes, not over them
+    assert images[0].axes.get_aspect() == 1.0  # imshow must not undo the equal aspect
+
+
+def test_a_background_is_never_stretched_out_of_proportion(ecoli_core):
+    """Any picture keeps its own proportions; a mismatch shows as margin, not as distortion."""
+
+    import numpy as np
+
+    from cmm.core import fba
+    from cmm.visualization import escher_flux_map
+
+    fluxes = dict(fba(ecoli_core).fluxes)
+    for height, width in [(400, 400), (100, 900), (900, 100)]:
+        fig = escher_flux_map(
+            str(CORE_MAP),
+            fluxes,
+            background=np.zeros((height, width, 4), dtype=np.uint8),
+        )
+        left, right, bottom, top = fig.axes[0].images[0].get_extent()
+        drawn = abs(right - left) / abs(bottom - top)
+        assert drawn == pytest.approx(width / height, rel=1e-6), (
+            f"{width}x{height} drawn at aspect {drawn:.4f}"
+        )
+
+
+def test_flux_map_says_it_cannot_rasterise_svg_itself(ecoli_core, tmp_path):
+    """cmm.visualization stays free of Qt, so it must not pretend to render SVG."""
+
+    from cmm.core import fba
+    from cmm.visualization import escher_flux_map
+
+    with pytest.raises(ValueError, match="cannot rasterise SVG"):
+        escher_flux_map(
+            str(CORE_MAP), dict(fba(ecoli_core).fluxes), background=_probe_svg(tmp_path)
+        )
+
+
+def test_a_background_silences_the_labels_it_already_carries(ecoli_core):
+    """Escher's drawing has the labels; drawing CMM's on top turns the text to mush."""
+
+    import numpy as np
+
+    from cmm.core import fba
+    from cmm.visualization import escher_flux_map
+
+    fluxes = dict(fba(ecoli_core).fluxes)
+    drawing = np.zeros((10, 10, 4), dtype=np.uint8)
+
+    plain = escher_flux_map(str(CORE_MAP), fluxes)
+    assert plain.axes[0].texts, "without a background the map labels itself"
+
+    over = escher_flux_map(str(CORE_MAP), fluxes, background=drawing)
+    assert not over.axes[0].texts  # only the title, which lives outside axes.texts
+    assert not over.axes[0].lines  # nor the metabolite dots the drawing already shows
+
+    # An explicit request still wins over the default.
+    forced = escher_flux_map(
+        str(CORE_MAP), fluxes, background=drawing, label_reactions=True
+    )
+    assert forced.axes[0].texts

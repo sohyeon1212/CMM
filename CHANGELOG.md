@@ -33,6 +33,12 @@ is now a working part of it. Additive: nothing is removed and no result changes.
 - **The figure title names the method behind the numbers** (`e_coli_core — LAD · condB`). The
   map previously drew whichever of FBA or pFBA had run last while its title said only "flux
   map", so a pFBA map was indistinguishable from an FBA one.
+- **A map drawing can be laid under the flux colouring** (**Background…** on the Flux Map tab).
+  CMM reuses an Escher map's layout but not Escher's rendering, so a picture exported from the
+  same map — SVG, PNG or JPEG — supplies the drawing while CMM supplies the flux. It is placed
+  in the map's canvas coordinates, so an export of the loaded map needs no adjustment, and CMM
+  drops its own labels and node markers while one is shown rather than doubling them. SVG is
+  rasterised with Qt in `cmm.app`; `cmm.visualization` takes an array and stays free of Qt.
 - **`File ▸ Open Escher Map…`** (and **Load map…** on the tab) loads any Escher map JSON. A map
   whose reactions are absent from the loaded model is refused with a message instead of being
   drawn as a blank grey network.

@@ -11,6 +11,7 @@ import html
 import math
 import warnings
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 from pathlib import Path
 
 from cobra import Model
@@ -89,7 +90,12 @@ from cmm.omics.conditions import (
 )
 from cmm.omics.differential import differential_expression
 from cmm.omics.expression import integrate_expression
+from cmm.app.svg_background import svg_background
 from cmm.resources import bundled_map_for, map_reaction_ids
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import numpy as np
+
 from cmm.visualization import (
     escher_flux_map,
     flux_response_figure,
@@ -371,6 +377,10 @@ class CmmMainWindow(QMainWindow):
         # An explicit map wins; otherwise offer a bundled curated map if one suits this
         # model. Either way the Flux Map tab exists — without a map it draws the schematic.
         self._map_path = map_path or bundled_map_for(model)
+        # An optional drawing of the same map, laid under the flux strokes. CMM's renderer
+        # reuses the layout but not Escher's drawing conventions, so a picture exported from
+        # the map itself is the way to get those without embedding a browser.
+        self._map_background: "np.ndarray | None" = None
         self._revert_source_expression: dict[str, float] | None = None
         self._revert_target_expression: dict[str, float] | None = None
         # Real gene expression loaded from a CSV on the Omics tab, reused as the LAD/E-Flux2
@@ -441,7 +451,8 @@ class CmmMainWindow(QMainWindow):
 
         file_menu = bar.addMenu("&File")
         file_menu.addAction("Open Model…", self.open_model_dialog)
-        file_menu.addAction("Open Escher Map…", self.open_flux_map_dialog)
+        file_menu.addAction("Open Escher Map (JSON)…", self.open_flux_map_dialog)
+        file_menu.addAction("Open Map Image…", self.open_map_background_dialog)
         file_menu.addSeparator()
         file_menu.addAction("Export Table to CSV…", self.export_table_csv)
         file_menu.addAction("Save Figure…", self.save_active_figure)
@@ -625,6 +636,8 @@ class CmmMainWindow(QMainWindow):
         self._omics_fluxes_by_condition = None
         self.omics_map_btn.setEnabled(False)
         self.omics_map_combo.clear()
+        if hasattr(self, "omics_map_label"):
+            self._refresh_omics_map_label()
         self._omics_conditions_order = []
         self.revert_source_label.setText("not loaded")
         self.revert_target_label.setText("not loaded")
@@ -863,10 +876,16 @@ class CmmMainWindow(QMainWindow):
         # Row 3: send one computed condition to the flux map. An expression-derived flux state
         # is a distribution over the whole network; a 95-row table is the wrong way to read it.
         map_row = QHBoxLayout()
-        map_row.addWidget(QLabel("Condition:"))
+        # The label carries the count. A closed combo shows one item, and directly above it a
+        # "Conditions:" checklist shows every condition — so a two-condition run reads as though
+        # one went missing. Saying how many are in the box answers that before it is asked, and
+        # "Draw" separates this row from the checklist that decides what gets computed.
+        self.omics_map_label = QLabel("Draw:")
+        map_row.addWidget(self.omics_map_label)
         self.omics_map_combo = QComboBox()
         self.omics_map_combo.setMinimumWidth(160)
         self.omics_map_combo.setToolTip("Which computed condition to draw")
+        self.omics_map_combo.currentIndexChanged.connect(self._refresh_omics_map_label)
         map_row.addWidget(self.omics_map_combo)
         self.omics_map_btn = QPushButton("Show on flux map")
         self.omics_map_btn.setEnabled(False)
@@ -962,9 +981,42 @@ class CmmMainWindow(QMainWindow):
         self.map_topn_spin.valueChanged.connect(self._schedule_map_redraw)
         controls.addWidget(self.map_topn_spin)
 
-        load_btn = QPushButton("Load map…")
+        # Named for the file each one takes. "Load map" and "Background" were both true of
+        # both buttons — one loads the map's geometry, the other a picture of it — and neither
+        # name said which was which.
+        load_btn = QPushButton("Map JSON…")
+        load_btn.setToolTip(
+            "The Escher map file: node coordinates and reaction segments. This is what the "
+            "flux is drawn on."
+        )
         load_btn.clicked.connect(self.open_flux_map_dialog)
         controls.addWidget(load_btn)
+
+        background_btn = QPushButton("Map image…")
+        background_btn.setToolTip(
+            "An optional picture of the same map, laid underneath — SVG or PNG exported from "
+            "Escher, which draws the network the way Escher does. It changes nothing that is "
+            "computed."
+        )
+        background_btn.clicked.connect(self.open_map_background_dialog)
+        controls.addWidget(background_btn)
+
+        self.map_width_check = QCheckBox("width ∝ flux")
+        self.map_width_check.setChecked(True)
+        self.map_width_check.setToolTip(
+            "Scale stroke width with |flux| as well as colour.\n"
+            "Turn off for one constant width — colour still carries the magnitude, and a "
+            "loaded map image stays visible underneath."
+        )
+        self.map_width_check.toggled.connect(self._schedule_map_redraw)
+        controls.addWidget(self.map_width_check)
+
+        self.map_background_check = QCheckBox("show")
+        self.map_background_check.setChecked(True)
+        self.map_background_check.setVisible(False)
+        self.map_background_check.setToolTip("Hide the background without unloading it")
+        self.map_background_check.toggled.connect(self._schedule_map_redraw)
+        controls.addWidget(self.map_background_check)
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -1041,7 +1093,7 @@ class CmmMainWindow(QMainWindow):
             self.map_source_label.setText(
                 f"No bundled Escher map fits <b>{html.escape(self.model.id)}</b>, so the "
                 "schematic is drawing the highest-|flux| reactions. Load a map for this "
-                "model with <i>Load map…</i> (Escher JSON, from escher.github.io or BiGG)."
+                "model with <i>Map JSON…</i> (from escher.github.io or BiGG)."
             )
 
     def open_flux_map_dialog(self) -> None:
@@ -1073,6 +1125,8 @@ class CmmMainWindow(QMainWindow):
             )
             return
         self._map_path = path
+        # The drawing belonged to the previous map, so it no longer describes what is drawn.
+        self._clear_map_background()
         self._refresh_map_source()
         self._goto_tab("Flux Map")
         self.render_flux_map()
@@ -2753,6 +2807,7 @@ class CmmMainWindow(QMainWindow):
             map_reaction_ids(self._map_path) & {rxn.id for rxn in model.reactions}
         ):
             self._map_path = bundled_map_for(model)
+            self._clear_map_background()
         self._refresh_map_source()
         solver = active_solver(model)
         self.subtitle.setText(
@@ -3108,12 +3163,67 @@ class CmmMainWindow(QMainWindow):
             self.sd_anaerobic_combo.currentText() == "aerobic"
         )
 
+    def _clear_map_background(self) -> None:
+        """Drop the loaded drawing and hide its toggle."""
+
+        self._map_background = None
+        if hasattr(self, "map_background_check"):
+            self.map_background_check.setVisible(False)
+
+    def open_map_background_dialog(self) -> None:
+        """Load a drawing of the current map to lay under the flux colouring."""
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open a drawing of this map",
+            "",
+            "Map drawings (*.svg *.png *.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".svg"):
+                background = svg_background(path)
+            else:
+                import matplotlib.image as mpimg
+
+                background = mpimg.imread(path)
+        except Exception as exc:
+            self.status_label.setText(
+                f"Could not read that drawing: {html.escape(str(exc))}"
+            )
+            return
+        self._map_background = background
+        self.map_background_check.setVisible(True)
+        self.map_background_check.setChecked(True)
+        self.status_label.setText(
+            f"Background loaded from {html.escape(Path(path).name)}."
+        )
+        if self._map_canvas is not None:
+            self.render_flux_map()
+
+    def _map_line_width(self) -> float | None:
+        """``None`` to scale stroke width with flux, or the one width to draw everything at."""
+
+        return None if self.map_width_check.isChecked() else 2.0
+
     def _draw_simulation_on_map(self, solve) -> None:
         """Run a simulation and draw it, so the map is one click from either method."""
 
         solve()
         if self._fluxes:  # a failed solve has already reported why
             self.render_flux_map()
+
+    def _refresh_omics_map_label(self) -> None:
+        """Say which of the computed conditions the box is showing."""
+
+        total = self.omics_map_combo.count()
+        if total > 1:
+            self.omics_map_label.setText(
+                f"Draw ({self.omics_map_combo.currentIndex() + 1} of {total}):"
+            )
+        else:
+            self.omics_map_label.setText("Draw:")
 
     def show_omics_on_flux_map(self) -> None:
         """Draw one computed condition's expression-derived flux state."""
@@ -3171,12 +3281,20 @@ class CmmMainWindow(QMainWindow):
         try:
             source = self._flux_source or "flux"
             if escher:
+                show_background = (
+                    self._map_background is not None
+                    and self.map_background_check.isChecked()
+                )
                 fig = escher_flux_map(
                     self._map_path,
                     self._fluxes,
                     title=f"{self.model.id} — {source}",
+                    background=self._map_background if show_background else None,
+                    line_width=self._map_line_width(),
                 )
                 note = f"Escher layout, {Path(self._map_path).stem}"
+                if show_background:
+                    note += ", over the loaded drawing"
             else:
                 top_n = self.map_topn_spin.value()
                 fig = network_flux_map(
@@ -3184,6 +3302,7 @@ class CmmMainWindow(QMainWindow):
                     self._fluxes,
                     top_n=top_n,
                     title=f"{self.model.id} — {source}, top {top_n} reactions by |flux|",
+                    line_width=self._map_line_width(),
                 )
                 note = f"schematic, top {top_n} reactions"
         except Exception as exc:
@@ -3524,6 +3643,8 @@ class CmmMainWindow(QMainWindow):
         self._omics_fluxes_by_condition = None
         self.omics_map_btn.setEnabled(False)
         self.omics_map_combo.clear()
+        if hasattr(self, "omics_map_label"):
+            self._refresh_omics_map_label()
         self._omics_conditions_order = []
         self._omics_expression = None
         self._omics_computed_methods = set()
@@ -3665,6 +3786,7 @@ class CmmMainWindow(QMainWindow):
         self.omics_map_combo.clear()
         self.omics_map_combo.addItems(ok)
         self._loading = False
+        self._refresh_omics_map_label()
         self.omics_map_btn.setEnabled(True)
         self.omics_map_btn.setToolTip(
             f"Draw the {method.upper()} flux state of the chosen condition on the flux map."

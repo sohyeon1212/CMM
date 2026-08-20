@@ -382,9 +382,19 @@ central-metabolism map is how Escher itself is used. The caption above the figur
 map is loaded and how much of it this model can fill. Provenance and license are in
 `src/cmm/resources/ATTRIBUTION.md`; cite King *et al.* (2015) for the layout.
 
-**Your own map.** **Load map…** on the tab, or **File ▸ Open Escher Map…**, takes any Escher
+**Your own map.** **Map JSON…** on the tab, or **File ▸ Open Escher Map (JSON)…**, takes any Escher
 map JSON (escher.github.io or BiGG). A file whose reactions do not appear in the loaded model
 is refused with a message rather than drawn as a blank grey map.
+
+**A drawing under the flux.** CMM reuses a map's layout but not Escher's drawing conventions —
+its arrowheads, node sizes and typography. **Map image…** loads a picture of the same map and
+lays it beneath the flux colouring, so the network is drawn the way Escher draws it and CMM
+contributes only the colour and width. Export one from escher.github.io with *Map ▸ Export as
+SVG*; PNG and JPEG work too. The picture is placed in the map's own canvas coordinates, so an
+export of the map you loaded lines up without adjustment. While a background is shown CMM
+leaves out its own labels and metabolite dots — the drawing already has them — and **show**
+hides the drawing again without unloading it. A background belongs to one map, so loading a
+different map or model drops it.
 
 Both layouts are in the Python API as `escher_flux_map` and `network_flux_map`
 (`cmm.visualization`), and `cmm.resources.bundled_map_for(model)` returns the bundled map's
