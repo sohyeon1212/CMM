@@ -39,7 +39,19 @@ the methods your scenario needs.
   step 3) → the design search cannot run. `SC-01` defines the single-deletion fallback and the
   three disclosures the report must then carry; decide this here, not mid-run.
 
-**Artifact.** `model_id`, `model_sha256`, solver name and capabilities → `00_provenance.json`.
+**Pin the model.** Copy the model file into the run directory as `model/<model-id>.xml` (or
+write it there with `cobra.io.write_sbml_model`) before anything else runs. A model *name* does
+not identify a model: `load_model("textbook")` and `load_model("e_coli_core")` both return 95
+reactions called `e_coli_core`, but they differ — one calls formate transport `FORti` and its
+biomass reaction `Biomass_Ecoli_core`, the other `FORt` and `BIOMASS_Ecoli_core_w_GAM` — and
+their fingerprints differ accordingly. Two runs of the same scenario that name the same model
+are not comparable unless the file is the same file, and a design naming `FORti` cannot be
+built by someone holding the other variant.
+
+**Artifact.** `model/<model-id>.xml`, plus `model_id`, `model_sha256`, solver name and
+capabilities → `00_provenance.json`. The fingerprint is recorded again after the medium is
+applied (step P2), because it changes with the medium and is therefore evidence of the
+condition as well as of the model.
 
 ---
 
