@@ -41,6 +41,7 @@ the folder cannot otherwise tell where it came from.
 ```
 <run directory>/
   00_provenance.json
+  00_summary.json
   model/
       <model-id>.xml                  the exact file the run used, not just its name
   01_preflight/
@@ -61,6 +62,8 @@ the folder cannot otherwise tell where it came from.
       consensus.csv
   figures/
       *.png
+  scripts/
+      *.py                            the scripts that produced this run, copied verbatim
   report.html
   report_standalone.html
 ```
@@ -68,11 +71,51 @@ the folder cannot otherwise tell where it came from.
 Step directories are numbered by the scenario's own steps; skip numbers a scenario does not
 have rather than renumbering. One CSV per analysis, named for what it holds.
 
+**The layout above is exhaustive.** Nothing else belongs at the top of the run directory: every
+file is either `00_provenance.json`, the pinned model, or inside a numbered step directory,
+`figures/` or `scripts/`. A run that leaves scripts and intermediate JSON loose at the root is
+still correct science and still unreadable as a deliverable — two runs of the same scenario
+should be diffable folder against folder, and they are not if each one invents its own
+arrangement.
+
+Where things go when it is not obvious:
+
+- **The scripts that produced the run** → `scripts/`. §7 requires the report to name them, so
+  they have to be somewhere findable, and a path into a session's temporary directory is not a
+  provenance record.
+- **A summary of one step** → that step's directory, not the root.
+- **A summary of the whole run** → `00_summary.json`, described below. This is the one summary
+  that belongs at the top, because it is about the run rather than about any step in it.
+- **A result that spans steps** — a coupling scan across growth floors, a consensus table —
+  → the directory of the step that consumed it, which is usually the verification step. If two
+  steps consume it, put it with the one that produced it.
+- **Anything you would not hand to a reader** — scratch files, caches, half-written attempts —
+  → outside the run directory entirely. The run directory is the deliverable, not the workspace.
+
 ---
 
-## Provenance
+## Provenance and summary
 
-`00_provenance.json` is written once at preflight and holds what makes the run repeatable:
+Two files at the root, with two jobs. `00_provenance.json` answers *how would someone repeat
+this*; `00_summary.json` answers *what happened*. Keeping them apart is what lets the first be
+compared between runs mechanically — a provenance record that also carried results would differ
+on every run for reasons that have nothing to do with reproducibility.
+
+### `00_summary.json`
+
+Written at the end, holding the run's own account of itself: the headline number from each
+step, the model fingerprint **before and after** the medium was applied (the pair is the
+evidence that the condition was actually applied, not merely declared), any warning the medium
+raised, and the result of every cross-check the scenario specifies. It is what a later reader
+greps when they want a number without opening six CSVs, and what a second run is diffed against
+when its conclusion disagrees with the first.
+
+It is a convenience, not a source. Every number in it must also be in a CSV — see Rules — and
+the report cites the CSV, never this file.
+
+### `00_provenance.json`
+
+Written once at preflight and holds what makes the run repeatable:
 
 ```python
 import json
