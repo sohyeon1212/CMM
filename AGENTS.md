@@ -146,11 +146,13 @@ Every scenario writes one self-contained directory. Full specification in
 `docs/scenarios/_reporting.md`; the shape is:
 
 ```
-results/<SC-id>_<model>_<timestamp>/
+<run directory>/            CMM_RESULTS_DIR, else ./results — see _reporting.md
   00_provenance.json      model fingerprint, solver, versions, every parameter
+  model/<model-id>.xml    the exact model file used — a name does not identify one
   01_<step>/…             raw CSV per step, one table per analysis
   figures/                300 DPI PNG (+ PDF/SVG when asked)
   report.html             the narrative, with figures placed inline
+  report_standalone.html  the same, figures embedded, for sending to someone
 ```
 
 Units are CMM's throughout: fluxes in mmol gDW⁻¹ h⁻¹, growth in h⁻¹, molar yield in mol/mol.

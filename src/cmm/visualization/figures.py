@@ -18,7 +18,8 @@ from pathlib import Path
 import numpy as np
 from matplotlib import __version__ as matplotlib_version
 from matplotlib import cm, colormaps
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib import image as plt_image
+from matplotlib.colors import ListedColormap, Normalize, TwoSlopeNorm
 from matplotlib.figure import Figure
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path as MplPath
@@ -648,6 +649,7 @@ def network_flux_map(
     top_n: int = 12,
     title: str = "Flux network (top reactions)",
     seed: int = 0,
+    line_width: float | None = None,
 ) -> Figure:
     """Schematic carbon-backbone flux network: top-|flux| reactions as edges, width ∝ |flux|.
 
@@ -658,7 +660,9 @@ def network_flux_map(
 
     fig, ax, font = _new_figure(width=8.0, height=4.8)
     ax.set_axis_off()
-    ax.set_title(title, fontsize=font["title"], fontweight="bold")
+    # The network is drawn edge-to-edge with no axes frame, so a title set tight against it
+    # reads as a label stuck on the drawing rather than a caption above it.
+    ax.set_title(title, fontsize=font["title"], fontweight="bold", pad=14)
 
     met_ids: list[str] = []
     edges: list[tuple[int, int, float, str]] = []
@@ -713,7 +717,7 @@ def network_flux_map(
             arrowprops=dict(
                 arrowstyle="-|>",
                 color=cmap(0.15 + 0.85 * w / max_w),
-                lw=1.2 + 5.0 * w / max_w,
+                lw=line_width if line_width is not None else 1.2 + 5.0 * w / max_w,
                 alpha=0.9,
                 shrinkA=14,
                 shrinkB=14,
@@ -746,22 +750,55 @@ def network_flux_map(
             va="bottom" if above else "top",
             color="#11243b",
         )
-    # Colour-bar proxy for flux magnitude.
+    # A formula in the margin is not a legend: the reader has to hold "∝ |flux|" in their head
+    # and guess which end of viridis is large. Draw the scale the arrows were actually coloured
+    # from — the same truncated span passed to `cmap` above, so the bar cannot lie about them.
+    bar_cmap = ListedColormap(cmap(np.linspace(0.15, 1.0, 256)))
+    mappable = cm.ScalarMappable(norm=Normalize(vmin=0.0, vmax=max_w), cmap=bar_cmap)
+    cbar = fig.colorbar(
+        mappable, ax=ax, fraction=0.035, pad=0.02, shrink=0.55, aspect=14
+    )
+    cbar.set_label("|flux| (mmol gDW$^{-1}$ h$^{-1}$)", fontsize=font["legend"])
+    cbar.ax.tick_params(labelsize=font["tick"])
     ax.text(
-        0.0,
-        -0.08,
-        f"edge width / colour ∝ |flux|  (max {max_w:.1f} mmol gDW$^{{-1}}$ h$^{{-1}}$)",
+        0.5,
+        -0.10,
+        (
+            "arrow colour scales with |flux|; direction is the net direction"
+            if line_width is not None
+            else "arrow colour and width both scale with |flux|; "
+            "direction is the net direction"
+        ),
         transform=ax.transAxes,
         fontsize=font["legend"],
         color="#555555",
+        ha="center",
     )
     ax.set_xlim(-0.12, 1.12)
-    ax.set_ylim(-0.18, 1.06)
+    ax.set_ylim(-0.14, 1.02)
+    # `colorbar` re-anchors its parent right; centre the network in the space that is left.
+    ax.set_anchor("C")
+    fig.set_layout_engine("constrained")
     return fig
 
 
-def _component_row_layout(n: int, edges: list[tuple[int, int]]) -> np.ndarray:
-    """Pack disconnected carbon-backbone components into compact horizontal rows."""
+#: Longest chain drawn on one row before it wraps. A single connected component can be far
+#: longer than the panel is wide — at 25 reactions the core carbon backbone is one ~30-node
+#: chain — and spreading it across one row collapses the spacing until nodes and labels
+#: overlap into a smear. Wrapping trades a fold for legible spacing.
+_MAX_NODES_PER_ROW = 10
+
+
+def _component_row_layout(
+    n: int, edges: list[tuple[int, int]], per_row: int = _MAX_NODES_PER_ROW
+) -> np.ndarray:
+    """Pack the carbon-backbone components into compact rows, folding long chains.
+
+    Rows are laid at one fixed node spacing and centred, so an arrow is the same length
+    everywhere and a two-node component no longer stretches across the whole panel. Long
+    chains fold boustrophedon — each fold reverses direction — so the node ending one row is
+    directly above the node starting the next instead of a full panel width away.
+    """
 
     adjacency = {i: set() for i in range(n)}
     for source, dest in edges:
@@ -786,18 +823,23 @@ def _component_row_layout(n: int, edges: list[tuple[int, int]]) -> np.ndarray:
         components.append(sorted(component))
 
     components.sort(key=lambda nodes: (-len(nodes), nodes[0]))
-    y_values = (
-        np.linspace(0.82, 0.22, len(components)) if len(components) > 1 else [0.55]
-    )
-    pos = np.zeros((n, 2))
-    for component, y in zip(components, y_values, strict=True):
+
+    rows: list[list[int]] = []
+    for component in components:
         ordered = _ordered_component_nodes(component, edges)
-        if len(ordered) == 1:
-            xs = [0.5]
-        else:
-            xs = np.linspace(0.08, 0.92, len(ordered))
-        for node, x in zip(ordered, xs, strict=True):
-            pos[node] = (float(x), float(y))
+        for start in range(0, len(ordered), per_row):
+            chunk = ordered[start : start + per_row]
+            if (start // per_row) % 2:
+                chunk = chunk[::-1]  # fold back, keeping the join between rows short
+            rows.append(chunk)
+
+    y_values = np.linspace(0.88, 0.14, len(rows)) if len(rows) > 1 else [0.55]
+    step = 0.84 / max(per_row - 1, 1)
+    pos = np.zeros((n, 2))
+    for chunk, y in zip(rows, y_values, strict=True):
+        x0 = 0.5 - step * (len(chunk) - 1) / 2  # centre each row on the panel
+        for offset, node in enumerate(chunk):
+            pos[node] = (x0 + offset * step, float(y))
     return pos
 
 
@@ -837,15 +879,64 @@ def _display_metabolite_id(mid: str) -> str:
     return _base_id(mid).replace("__", "-")
 
 
+def _map_canvas_extent(body: dict) -> tuple[float, float, float, float]:
+    """Where a drawing of this map belongs, in the map's coordinates.
+
+    An Escher map records the canvas its layout was drawn on, so a picture exported from that
+    same map lines up with the node coordinates without the caller nudging it. Escher's y grows
+    downward, which is also how the axes are set below, so the extent is given top-edge-last.
+    """
+
+    canvas = body.get("canvas")
+    if canvas:
+        x, y = float(canvas["x"]), float(canvas["y"])
+        return (x, x + float(canvas["width"]), y + float(canvas["height"]), y)
+    xs = [float(n["x"]) for n in body["nodes"].values()]
+    ys = [float(n["y"]) for n in body["nodes"].values()]
+    return (min(xs), max(xs), max(ys), min(ys))
+
+
+def _fit_extent(
+    box: tuple[float, float, float, float], width: int, height: int
+) -> tuple[float, float, float, float]:
+    """Largest sub-box of ``box`` with the image's own proportions, centred in it.
+
+    A picture placed on an extent is stretched to fill it, so a drawing whose proportions do
+    not match the map's canvas would be distorted — circles into ellipses, a map skewed out of
+    true. Fitting inside and centring leaves margin instead, which is honest about the
+    mismatch; an export of this very map matches exactly and is unaffected.
+    """
+
+    left, right, bottom, top = box
+    box_w, box_h = abs(right - left), abs(bottom - top)
+    if not (box_w and box_h and width and height):
+        return box
+    scale = min(box_w / width, box_h / height)
+    half_w, half_h = width * scale / 2, height * scale / 2
+    cx, cy = (left + right) / 2, (top + bottom) / 2
+    # Preserve the caller's y direction: Escher's y grows downward, so bottom > top here.
+    down = bottom > top
+    return (
+        cx - half_w,
+        cx + half_w,
+        cy + half_h if down else cy - half_h,
+        cy - half_h if down else cy + half_h,
+    )
+
+
 def escher_flux_map(
     map_path: str | Path,
     fluxes: dict[str, float],
     *,
     title: str | None = None,
     abs_max: float | None = None,
-    label_metabolites: bool = True,
-    label_reactions: bool = True,
+    label_metabolites: bool | None = None,
+    label_reactions: bool | None = None,
     width: float = 12.0,
+    background: "np.ndarray | str | Path | None" = None,
+    background_extent: tuple[float, float, float, float] | None = None,
+    background_alpha: float = 1.0,
+    line_width: float | None = None,
 ) -> Figure:
     """Render an Escher map (curated node/segment layout) coloured by flux.
 
@@ -854,7 +945,21 @@ def escher_flux_map(
     instead of an invented force layout. Reaction edge width and colour encode flux
     (diverging: blue = negative/reverse, red = positive/forward). ``map_path`` is supplied by
     the caller (CMM bundles no maps).
+        ``line_width`` overrides the flux-proportional stroke width with one constant width, so
+    colour alone encodes magnitude. Useful over a ``background``, where a wide stroke covers
+    the drawing underneath it.
+
     """
+
+    # A background drawing of this map already carries the labels and the metabolite circles,
+    # so drawing CMM's on top of them doubles every one and the text turns to mush. Unless the
+    # caller asks for them explicitly, the background is left to say what things are called and
+    # this function contributes only the flux.
+    if label_metabolites is None:
+        label_metabolites = background is None
+    if label_reactions is None:
+        label_reactions = background is None
+    draw_nodes = background is None
 
     with open(map_path) as handle:
         data = json.load(handle)
@@ -869,6 +974,35 @@ def escher_flux_map(
     ax.set_axis_off()
     ax.set_aspect("equal")
 
+    if background is not None:
+        # A drawing of the same map, laid underneath in the map's own coordinates. An Escher
+        # export renders the network the way Escher draws it — arrowheads, node sizes, the
+        # lot — which this function does not attempt; the flux strokes then go on top, so the
+        # picture is Escher's and the colouring is CMM's. Rasterisation belongs to the caller
+        # (SVG needs a renderer, and this module stays free of Qt), so an array is accepted
+        # directly and a path only for formats matplotlib itself reads.
+        image = background
+        if isinstance(image, (str, Path)):
+            if str(image).lower().endswith(".svg"):
+                raise ValueError(
+                    "escher_flux_map cannot rasterise SVG. Render it to an RGBA array first "
+                    "and pass that (cmm.app.svg_background does this with Qt)."
+                )
+            image = plt_image.imread(str(image))
+        extent = background_extent or _fit_extent(
+            _map_canvas_extent(body), image.shape[1], image.shape[0]
+        )
+        ax.imshow(
+            image,
+            extent=extent,
+            alpha=background_alpha,
+            interpolation="antialiased",
+            zorder=0,
+            # Not aspect="auto": imshow writes its aspect onto the axes, and "auto" would
+            # discard the equal aspect set above, stretching the whole map to the panel.
+            aspect="equal",
+        )
+
     signed = [fluxes.get(r["bigg_id"], 0.0) for r in reactions.values()]
     amax = abs_max or max((abs(v) for v in signed), default=1.0) or 1.0
     norm = TwoSlopeNorm(vmin=-amax, vcenter=0.0, vmax=amax)
@@ -878,9 +1012,17 @@ def escher_flux_map(
         flux = fluxes.get(r["bigg_id"], 0.0)
         mag = abs(flux)
         if mag <= 1e-9:
-            color, lw, alpha = "#d7dbe0", 0.7, 0.7
+            color = "#d7dbe0"
+            lw = line_width if line_width is not None else 0.7
+            alpha = 0.7
         else:
-            color, lw, alpha = cmap(norm(flux)), 0.8 + 5.5 * mag / amax, 0.95
+            color = cmap(norm(flux))
+            # Width and colour carry the same number. Doubling it up makes a large flux
+            # unmissable, which is the point on a bare layout; over a drawing of the network it
+            # is a thick band hiding the very lines it is drawn on, so the caller can ask for
+            # one constant width and let colour alone carry the magnitude.
+            lw = line_width if line_width is not None else 0.8 + 5.5 * mag / amax
+            alpha = 0.95
         for seg in r["segments"].values():
             a = node_xy.get(seg["from_node_id"])
             b = node_xy.get(seg["to_node_id"])
@@ -908,7 +1050,8 @@ def escher_flux_map(
     xs, ys = [], []
     for n in nodes.values():
         if n.get("node_type") == "metabolite":
-            ax.plot(n["x"], n["y"], "o", ms=2.2, color="#2b3a4a", zorder=3)
+            if draw_nodes:
+                ax.plot(n["x"], n["y"], "o", ms=2.2, color="#2b3a4a", zorder=3)
             xs.append(n["x"])
             ys.append(n["y"])
             if label_metabolites:
@@ -942,9 +1085,24 @@ def escher_flux_map(
         ax.set_xlim(min(xs) - mx, max(xs) + mx)
         ax.set_ylim(max(ys) + my, min(ys) - my)  # Escher y grows downward
     mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
-    cbar = fig.colorbar(mappable, ax=ax, fraction=0.025, pad=0.01)
+    # shrink/aspect keep this a legible bar. Left to its defaults against a tall map axes it
+    # is drawn as a ~1:23 hairline, which reads as a rule rather than a scale.
+    cbar = fig.colorbar(
+        mappable, ax=ax, fraction=0.035, pad=0.02, shrink=0.55, aspect=14
+    )
     cbar.set_label("flux (mmol gDW$^{-1}$ h$^{-1}$)", fontsize=9)
+    # `colorbar` re-anchors its parent to (1.0, 0.5) so the axes hugs the bar. With
+    # `set_aspect("equal")` the axes box shrinks whenever the canvas is wider than the map,
+    # and a right anchor takes every bit of that shrinkage off the left edge — the map and its
+    # title drift right inside the panel. The map should sit in the middle of the space it has.
+    ax.set_anchor("C")
     if title:
-        ax.set_title(title, fontsize=14, fontweight="bold")
-    fig.tight_layout()
+        # Smaller and further off the drawing than the default: an Escher map fills its axes
+        # completely, so a large title sitting on the top edge crowds the network it names.
+        ax.set_title(title, fontsize=12, fontweight="bold", pad=16)
+    # `tight_layout` solves the margins once, at the size the figure was authored. The GUI
+    # canvas then stretches the figure to whatever the panel is, the solved margins no longer
+    # fit, and the title is clipped against the top edge. A constrained layout re-solves on
+    # every draw, so the figure stays correct at any panel size and at 300 DPI on export.
+    fig.set_layout_engine("constrained")
     return fig

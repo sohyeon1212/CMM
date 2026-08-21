@@ -57,8 +57,8 @@ GUI captures (e_coli_core in the workbench):
 | `ecoli_04_succinate_bound_edits.png` | Simulation tab — anaerobic + byproduct KOs force succinate 0 → 9.885 (growth ≈ 0.02 h⁻¹, growth-coupled) |
 | `ecoli_05_flux_map.png` | Flux Map tab — live Escher map coloured by the engineered flux |
 
-The Escher map data is `test_data/e_coli_core.Core metabolism.json` (inside `CMM/`); the scenario
-now resolves it from the package root, not a parent folder.
+The Escher map is the one CMM bundles (`cmm.resources.BUNDLED_MAPS[0]`), so the scenario needs
+no external data file. Its provenance and license are in `src/cmm/resources/ATTRIBUTION.md`.
 
 ## Scenario 3 — genome-scale GUI walkthrough (`cmm.app.genome_scale_scenario`)
 

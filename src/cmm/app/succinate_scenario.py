@@ -21,7 +21,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from cobra.io import load_model  # noqa: E402
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
-from cmm.app.main_window import CmmMainWindow  # noqa: E402
+from cmm.app.main_window import CmmMainWindow
+from cmm.resources import BUNDLED_MAPS  # noqa: E402
 from cmm.core import Condition, ReactionBound, fba  # noqa: E402
 from cmm.features.production import (  # noqa: E402
     fseof,
@@ -40,11 +41,9 @@ from cmm.visualization import (  # noqa: E402
 
 SUCC = "EX_succ_e"
 BIOMASS_ID = "Biomass_Ecoli_core"
-# Project root is the CMM package root (src/cmm/app -> CMM): parents[3]. Keep all data
-# under CMM/test_data so the scenario is self-contained and never reaches a parent folder.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-# Curated Escher map for e_coli_core (user data in test_data; CMM bundles no maps).
-ESCHER_MAP = _REPO_ROOT / "test_data" / "e_coli_core.Core metabolism.json"
+# The curated Escher map CMM bundles for e_coli_core. Held as a Path (rather than the string
+# bundled_map_for returns) because this module tests it with .exists() before rendering.
+ESCHER_MAP = Path(BUNDLED_MAPS[0])
 
 # Growth-coupled succinate design: go anaerobic and block the competing fermentation
 # secretions (upper bound 0), leaving succinate (via FRD7) as the only NADH sink. Under

@@ -11,6 +11,7 @@ import html
 import math
 import warnings
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 from pathlib import Path
 
 from cobra import Model
@@ -89,11 +90,18 @@ from cmm.omics.conditions import (
 )
 from cmm.omics.differential import differential_expression
 from cmm.omics.expression import integrate_expression
+from cmm.app.svg_background import svg_background
+from cmm.resources import bundled_map_for, map_reaction_ids
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import numpy as np
+
 from cmm.visualization import (
     escher_flux_map,
     flux_response_figure,
     fseof_figure,
     fvseof_figure,
+    network_flux_map,
     production_envelope_figure,
     sampling_figure,
 )
@@ -337,6 +345,10 @@ class _DisabledHoverCursor(QObject):
         return False
 
 
+_MAP_LAYOUT_ESCHER = "Escher map (curated)"
+_MAP_LAYOUT_SCHEMATIC = "Schematic (top reactions)"
+
+
 class CmmMainWindow(QMainWindow):
     """Main platform window over a single cobra model."""
 
@@ -353,12 +365,22 @@ class CmmMainWindow(QMainWindow):
         self._fluxes: dict[
             str, float
         ] = {}  # the last-run distribution (drives left panel/FVA/map)
+        # What produced `_fluxes`. Every view of a flux distribution has to be able to name
+        # the method behind it — a pFBA map read as an FBA map is a wrong figure, not a
+        # cosmetic one — so the label travels with the numbers.
+        self._flux_source: str = ""
         self._fba_fluxes: dict[str, float] = {}  # FBA column of the simulation table
         self._pfba_fluxes: dict[str, float] = {}  # pFBA column of the simulation table
         self._loading = False
         self._fluxes_stale = False
         self._default_product = default_product
-        self._map_path = map_path
+        # An explicit map wins; otherwise offer a bundled curated map if one suits this
+        # model. Either way the Flux Map tab exists — without a map it draws the schematic.
+        self._map_path = map_path or bundled_map_for(model)
+        # An optional drawing of the same map, laid under the flux strokes. CMM's renderer
+        # reuses the layout but not Escher's drawing conventions, so a picture exported from
+        # the map itself is the way to get those without embedding a browser.
+        self._map_background: "np.ndarray | None" = None
         self._revert_source_expression: dict[str, float] | None = None
         self._revert_target_expression: dict[str, float] | None = None
         # Real gene expression loaded from a CSV on the Omics tab, reused as the LAD/E-Flux2
@@ -384,6 +406,7 @@ class CmmMainWindow(QMainWindow):
         # Last computed per-condition fluxes (condition -> {reaction: flux}), kept so the
         # active-only / show-all toggle can re-render without recomputing.
         self._omics_fluxes_by_condition: dict[str, dict[str, float]] | None = None
+        self._omics_method_label = ""
         self._omics_conditions_order: list[str] = []
         # Guards re-entrant background runs (see _run_in_background).
         self._busy = False
@@ -428,6 +451,8 @@ class CmmMainWindow(QMainWindow):
 
         file_menu = bar.addMenu("&File")
         file_menu.addAction("Open Model…", self.open_model_dialog)
+        file_menu.addAction("Open Escher Map (JSON)…", self.open_flux_map_dialog)
+        file_menu.addAction("Open Map Image…", self.open_map_background_dialog)
         file_menu.addSeparator()
         file_menu.addAction("Export Table to CSV…", self.export_table_csv)
         file_menu.addAction("Save Figure…", self.save_active_figure)
@@ -463,12 +488,11 @@ class CmmMainWindow(QMainWindow):
         analysis.addAction(
             "Transformation Targets (A→B)…", lambda: self._goto_tab("Transform (A→B)")
         )
-        if self._map_path:
-            analysis.addSeparator()
-            analysis.addAction(
-                "Render Flux Map",
-                lambda: self._in_tab("Flux Map", self.render_flux_map),
-            )
+        analysis.addSeparator()
+        analysis.addAction(
+            "Render Flux Map",
+            lambda: self._in_tab("Flux Map", self.render_flux_map),
+        )
 
         model_menu = bar.addMenu("&Model")
         model_menu.addAction("Model Info…", self._show_model_info)
@@ -610,6 +634,10 @@ class CmmMainWindow(QMainWindow):
         self._transform_target_expression = None
         self._omics_table_df = None
         self._omics_fluxes_by_condition = None
+        self.omics_map_btn.setEnabled(False)
+        self.omics_map_combo.clear()
+        if hasattr(self, "omics_map_label"):
+            self._refresh_omics_map_label()
         self._omics_conditions_order = []
         self.revert_source_label.setText("not loaded")
         self.revert_target_label.setText("not loaded")
@@ -786,8 +814,7 @@ class CmmMainWindow(QMainWindow):
         self.tabs.addTab(self._build_production_tab(), "Production")
         self.tabs.addTab(self._build_strain_design_tab(), "Strain Design")
         self.tabs.addTab(self._build_omics_tab(), "Omics")
-        if self._map_path:
-            self.tabs.addTab(self._build_fluxmap_tab(), "Flux Map")
+        self.tabs.addTab(self._build_fluxmap_tab(), "Flux Map")
         self.tabs.addTab(self._build_revert_tab(), "Revert Metabolism")
         self.tabs.addTab(self._build_transformation_tab(), "Transform (A→B)")
         return self.tabs
@@ -845,6 +872,30 @@ class CmmMainWindow(QMainWindow):
         )
         cond_row.addWidget(self.omics_cond_list, 1)
         cbox.addLayout(cond_row)
+
+        # Row 3: send one computed condition to the flux map. An expression-derived flux state
+        # is a distribution over the whole network; a 95-row table is the wrong way to read it.
+        map_row = QHBoxLayout()
+        # The label carries the count. A closed combo shows one item, and directly above it a
+        # "Conditions:" checklist shows every condition — so a two-condition run reads as though
+        # one went missing. Saying how many are in the box answers that before it is asked, and
+        # "Draw" separates this row from the checklist that decides what gets computed.
+        self.omics_map_label = QLabel("Draw:")
+        map_row.addWidget(self.omics_map_label)
+        self.omics_map_combo = QComboBox()
+        self.omics_map_combo.setMinimumWidth(160)
+        self.omics_map_combo.setToolTip("Which computed condition to draw")
+        self.omics_map_combo.currentIndexChanged.connect(self._refresh_omics_map_label)
+        map_row.addWidget(self.omics_map_combo)
+        self.omics_map_btn = QPushButton("Show on flux map")
+        self.omics_map_btn.setEnabled(False)
+        self.omics_map_btn.setToolTip(
+            "Compute a condition first, then draw it on the map."
+        )
+        self.omics_map_btn.clicked.connect(self.show_omics_on_flux_map)
+        map_row.addWidget(self.omics_map_btn)
+        map_row.addStretch(1)
+        cbox.addLayout(map_row)
         layout.addWidget(controls)
 
         self.omics_summary = QLabel(
@@ -876,22 +927,209 @@ class CmmMainWindow(QMainWindow):
         return tab
 
     def _build_fluxmap_tab(self) -> QWidget:
+        """The flux map: a curated Escher layout when one is available, else a schematic.
+
+        CMM never invents a map layout. A readable metabolic map is hand-drawn, so the Escher
+        mode reuses a published layout, and the schematic mode is the honest fallback for a
+        model no bundled map fits — it draws only the highest-flux reactions and says so.
+        """
+
         tab = QWidget()
         layout = QVBoxLayout(tab)
+
         controls = QHBoxLayout()
-        render_btn = QPushButton("Render flux map")
-        render_btn.clicked.connect(self.render_flux_map)
-        controls.addWidget(render_btn)
-        controls.addWidget(QLabel("Escher layout coloured by the current FBA flux."))
+
+        # Solve and draw in one click. Without these the tab silently drew FBA and there was
+        # nothing to suggest pFBA was equally available — it had to be run from another tab
+        # first, which no one would guess. There is no separate "render" button: changing the
+        # layout or the reaction count redraws by itself, which is all that button ever did
+        # that these two do not, and it invited pressing "FBA" to redraw — quietly replacing
+        # an omics or knockout flux state with a fresh FBA solve.
+        controls.addWidget(QLabel("draw:"))
+        fba_btn = QPushButton("FBA")
+        fba_btn.setToolTip("Run FBA and draw it")
+        fba_btn.clicked.connect(lambda: self._draw_simulation_on_map(self.run_fba))
+        controls.addWidget(fba_btn)
+        pfba_btn = QPushButton("pFBA")
+        pfba_btn.setToolTip("Run pFBA (minimal total flux) and draw it")
+        pfba_btn.clicked.connect(lambda: self._draw_simulation_on_map(self.run_pfba))
+        controls.addWidget(pfba_btn)
+
+        controls.addWidget(QLabel("layout:"))
+        self.map_layout_combo = QComboBox()
+        self.map_layout_combo.addItems([_MAP_LAYOUT_ESCHER, _MAP_LAYOUT_SCHEMATIC])
+        self.map_layout_combo.setToolTip(
+            "Escher: a curated, publication-style layout covering the reactions it draws.\n"
+            "Schematic: no layout file needed — the highest-flux reactions only."
+        )
+        self.map_layout_combo.currentTextChanged.connect(self._on_map_layout_changed)
+        controls.addWidget(self.map_layout_combo)
+
+        self.map_topn_label = QLabel("reactions:")
+        controls.addWidget(self.map_topn_label)
+        self.map_topn_spin = QSpinBox()
+        # Capped low on purpose. The schematic folds the carbon backbone into rows, and a
+        # metabolic network branches — past roughly this many reactions the cross-row arrows
+        # dominate and the figure stops being readable. That is a curated map's job.
+        self.map_topn_spin.setRange(4, 25)
+        self.map_topn_spin.setValue(12)
+        self.map_topn_spin.setToolTip(
+            "How many of the highest-|flux| reactions to draw.\n"
+            "Capped at 25 — beyond that the schematic cannot stay readable; "
+            "use a curated Escher map instead."
+        )
+        self.map_topn_spin.valueChanged.connect(self._schedule_map_redraw)
+        controls.addWidget(self.map_topn_spin)
+
+        # Named for the file each one takes. "Load map" and "Background" were both true of
+        # both buttons — one loads the map's geometry, the other a picture of it — and neither
+        # name said which was which.
+        load_btn = QPushButton("Map JSON…")
+        load_btn.setToolTip(
+            "The Escher map file: node coordinates and reaction segments. This is what the "
+            "flux is drawn on."
+        )
+        load_btn.clicked.connect(self.open_flux_map_dialog)
+        controls.addWidget(load_btn)
+
+        background_btn = QPushButton("Map image…")
+        background_btn.setToolTip(
+            "An optional picture of the same map, laid underneath — SVG or PNG exported from "
+            "Escher, which draws the network the way Escher does. It changes nothing that is "
+            "computed."
+        )
+        background_btn.clicked.connect(self.open_map_background_dialog)
+        controls.addWidget(background_btn)
+
+        self.map_width_check = QCheckBox("width ∝ flux")
+        self.map_width_check.setChecked(True)
+        self.map_width_check.setToolTip(
+            "Scale stroke width with |flux| as well as colour.\n"
+            "Turn off for one constant width — colour still carries the magnitude, and a "
+            "loaded map image stays visible underneath."
+        )
+        self.map_width_check.toggled.connect(self._schedule_map_redraw)
+        controls.addWidget(self.map_width_check)
+
+        self.map_background_check = QCheckBox("show")
+        self.map_background_check.setChecked(True)
+        self.map_background_check.setVisible(False)
+        self.map_background_check.setToolTip("Hide the background without unloading it")
+        self.map_background_check.toggled.connect(self._schedule_map_redraw)
+        controls.addWidget(self.map_background_check)
         controls.addStretch(1)
         layout.addLayout(controls)
+
+        self.map_source_label = QLabel()
+        self.map_source_label.setWordWrap(True)
+        layout.addWidget(self.map_source_label)
+
         self.map_canvas_holder = QVBoxLayout()
         holder = QWidget()
         holder.setLayout(self.map_canvas_holder)
         layout.addWidget(holder, 1)
         self._map_canvas = None
         self._map_toolbar = None
+        # Coalesces a burst of changes — holding the spin arrow steps the value many times a
+        # second — into one redraw once the user stops.
+        self._map_redraw_timer = QTimer(self)
+        self._map_redraw_timer.setSingleShot(True)
+        self._map_redraw_timer.setInterval(150)
+        self._map_redraw_timer.timeout.connect(self.render_flux_map)
+        self._refresh_map_source()
         return tab
+
+    def _schedule_map_redraw(self) -> None:
+        """Redraw the loaded flux state after a display change — never solve for one."""
+
+        if self._loading or self._map_canvas is None:
+            return  # nothing drawn yet; the draw buttons are the way in
+        self._map_redraw_timer.start()
+
+    def _on_map_layout_changed(self, _text: str = "") -> None:
+        """Only the schematic has a reaction count to choose, and it says something else."""
+
+        schematic = self.map_layout_combo.currentText() == _MAP_LAYOUT_SCHEMATIC
+        self.map_topn_label.setVisible(schematic)
+        self.map_topn_spin.setVisible(schematic)
+        self._refresh_map_label()
+        self._schedule_map_redraw()
+
+    def _refresh_map_label(self) -> None:
+        """Describe the layout that is actually on screen, not the one merely available."""
+
+        model_id = html.escape(self.model.id)
+        if self.map_layout_combo.currentText() == _MAP_LAYOUT_SCHEMATIC:
+            offer = ""
+            if self._map_path is not None:
+                offer = (
+                    " A curated Escher map is available for this model: "
+                    f"<b>{html.escape(Path(self._map_path).stem)}</b>."
+                )
+            self.map_source_label.setText(
+                "Schematic layout — the highest-|flux| reactions, currency metabolites "
+                f"dropped. No layout file needed.{offer}"
+            )
+        elif self._map_path is not None:
+            drawn = map_reaction_ids(self._map_path)
+            present = len(drawn & {rxn.id for rxn in self.model.reactions})
+            self.map_source_label.setText(
+                f"Escher map: <b>{html.escape(Path(self._map_path).stem)}</b> — "
+                f"{present} of its {len(drawn)} reactions are in {model_id}."
+            )
+        else:  # pragma: no cover - the Escher entry is disabled without a map
+            self.map_source_label.setText(f"No Escher map loaded for {model_id}.")
+
+    def _refresh_map_source(self) -> None:
+        """Reconcile the layout selector with whether a map suits the current model."""
+
+        combo = self.map_layout_combo
+        escher_item = combo.model().item(combo.findText(_MAP_LAYOUT_ESCHER))
+        has_map = self._map_path is not None
+        escher_item.setEnabled(has_map)
+        combo.setCurrentText(_MAP_LAYOUT_ESCHER if has_map else _MAP_LAYOUT_SCHEMATIC)
+        self._on_map_layout_changed()
+        if not has_map:
+            self.map_source_label.setText(
+                f"No bundled Escher map fits <b>{html.escape(self.model.id)}</b>, so the "
+                "schematic is drawing the highest-|flux| reactions. Load a map for this "
+                "model with <i>Map JSON…</i> (from escher.github.io or BiGG)."
+            )
+
+    def open_flux_map_dialog(self) -> None:
+        """Load a user-supplied Escher map JSON and switch the tab to it."""
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Escher map", "", "Escher maps (*.json);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            drawn = map_reaction_ids(path)
+        except Exception as exc:
+            self.status_label.setText(
+                f"Not a readable Escher map: {html.escape(str(exc))}"
+            )
+            return
+        if not drawn:
+            self.status_label.setText(
+                "That file draws no reactions — not an Escher map."
+            )
+            return
+        present = len(drawn & {rxn.id for rxn in self.model.reactions})
+        if present == 0:
+            # Rendering would produce an all-grey map; say why rather than draw nothing.
+            self.status_label.setText(
+                f"None of that map's {len(drawn)} reactions are in {self.model.id} — "
+                "it is a map for a different model."
+            )
+            return
+        self._map_path = path
+        # The drawing belonged to the previous map, so it no longer describes what is drawn.
+        self._clear_map_background()
+        self._refresh_map_source()
+        self._goto_tab("Flux Map")
+        self.render_flux_map()
 
     def _build_production_tab(self) -> QWidget:
         tab = QWidget()
@@ -1864,8 +2102,15 @@ class CmmMainWindow(QMainWindow):
             "targets, or all targets of this level when none are selected."
         )
         batch_btn.clicked.connect(self.run_batch_comparison)
+        self.cmp_map_btn = QPushButton("Show on flux map")
+        self.cmp_map_btn.setEnabled(False)
+        self.cmp_map_btn.setToolTip(
+            "Draw the perturbed flux distribution from the last single run on the map."
+        )
+        self.cmp_map_btn.clicked.connect(self.show_comparison_on_flux_map)
         row2.addWidget(run_btn)
         row2.addWidget(batch_btn)
+        row2.addWidget(self.cmp_map_btn)
         row2.addStretch(1)
         controls_layout.addLayout(row2)
 
@@ -2135,6 +2380,7 @@ class CmmMainWindow(QMainWindow):
 
     def run_comparison(self) -> None:
         self._comparison_cache = None  # drop any prior result until this run succeeds
+        self.cmp_map_btn.setEnabled(False)
         method_label = self.comparison_method_combo.currentText()
         template = self.template_combo.currentText()
         level = self.ko_level_combo.currentText()
@@ -2220,6 +2466,7 @@ class CmmMainWindow(QMainWindow):
             "quantity": self._comparison_quantity(result),
             "synthetic_note": synthetic_note,
         }
+        self.cmp_map_btn.setEnabled(True)
         self._render_comparison_table()
 
     @staticmethod
@@ -2308,6 +2555,7 @@ class CmmMainWindow(QMainWindow):
         # The batch reshapes the table; drop the single-run cache so the change-threshold
         # spinbox can't re-render a stale single-run over the batch table.
         self._comparison_cache = None
+        self.cmp_map_btn.setEnabled(False)
 
         method_label = self.comparison_method_combo.currentText()
         template = self.template_combo.currentText()
@@ -2553,6 +2801,14 @@ class CmmMainWindow(QMainWindow):
 
     def load_model(self, model: Model) -> None:
         self.model = model
+        # A map belongs to a model, so re-choose one; a user-loaded map that still fits is
+        # kept, and one that no longer draws anything is dropped rather than left stale.
+        if self._map_path is None or not (
+            map_reaction_ids(self._map_path) & {rxn.id for rxn in model.reactions}
+        ):
+            self._map_path = bundled_map_for(model)
+            self._clear_map_background()
+        self._refresh_map_source()
         solver = active_solver(model)
         self.subtitle.setText(
             f"{model.id}   ·   {len(model.reactions)} reactions   ·   "
@@ -2634,6 +2890,7 @@ class CmmMainWindow(QMainWindow):
         self._fluxes = {}
         self._fba_fluxes = {}
         self._pfba_fluxes = {}
+        self._flux_source = ""
         self._fluxes_stale = False
         if getattr(self, "pfba_total_label", None) is not None:
             self.pfba_total_label.setText("")
@@ -2712,6 +2969,7 @@ class CmmMainWindow(QMainWindow):
             return
         self._fluxes = dict(solution.fluxes)
         self._fba_fluxes = dict(solution.fluxes)
+        self._flux_source = "FBA"
         self._fluxes_stale = False
         obj = solution.objective_value
         obj_text = f"{obj:.4g}" if obj is not None else "infeasible"
@@ -2735,6 +2993,7 @@ class CmmMainWindow(QMainWindow):
             return
         self._fluxes = dict(solution.fluxes)
         self._pfba_fluxes = dict(solution.fluxes)
+        self._flux_source = "pFBA"
         self._fluxes_stale = False
         # pFBA's objective value is the minimal total flux; show the growth (objective rxn).
         growth = next(
@@ -2904,35 +3163,153 @@ class CmmMainWindow(QMainWindow):
             self.sd_anaerobic_combo.currentText() == "aerobic"
         )
 
-    def render_flux_map(self) -> None:
-        """Render the Escher-layout flux map coloured by the current FBA flux."""
+    def _clear_map_background(self) -> None:
+        """Drop the loaded drawing and hide its toggle."""
 
-        if self._map_path is None:
+        self._map_background = None
+        if hasattr(self, "map_background_check"):
+            self.map_background_check.setVisible(False)
+
+    def open_map_background_dialog(self) -> None:
+        """Load a drawing of the current map to lay under the flux colouring."""
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open a drawing of this map",
+            "",
+            "Map drawings (*.svg *.png *.jpg *.jpeg);;All files (*)",
+        )
+        if not path:
             return
+        try:
+            if path.lower().endswith(".svg"):
+                background = svg_background(path)
+            else:
+                import matplotlib.image as mpimg
+
+                background = mpimg.imread(path)
+        except Exception as exc:
+            self.status_label.setText(
+                f"Could not read that drawing: {html.escape(str(exc))}"
+            )
+            return
+        self._map_background = background
+        self.map_background_check.setVisible(True)
+        self.map_background_check.setChecked(True)
+        self.status_label.setText(
+            f"Background loaded from {html.escape(Path(path).name)}."
+        )
+        if self._map_canvas is not None:
+            self.render_flux_map()
+
+    def _map_line_width(self) -> float | None:
+        """``None`` to scale stroke width with flux, or the one width to draw everything at."""
+
+        return None if self.map_width_check.isChecked() else 2.0
+
+    def _draw_simulation_on_map(self, solve) -> None:
+        """Run a simulation and draw it, so the map is one click from either method."""
+
+        solve()
+        if self._fluxes:  # a failed solve has already reported why
+            self.render_flux_map()
+
+    def _refresh_omics_map_label(self) -> None:
+        """Say which of the computed conditions the box is showing."""
+
+        total = self.omics_map_combo.count()
+        if total > 1:
+            self.omics_map_label.setText(
+                f"Draw ({self.omics_map_combo.currentIndex() + 1} of {total}):"
+            )
+        else:
+            self.omics_map_label.setText("Draw:")
+
+    def show_omics_on_flux_map(self) -> None:
+        """Draw one computed condition's expression-derived flux state."""
+
+        if not self._omics_fluxes_by_condition:
+            self.status_label.setText("Compute a condition on the Omics tab first.")
+            return
+        condition = self.omics_map_combo.currentText()
+        fluxes = self._omics_fluxes_by_condition.get(condition)
+        if not fluxes:
+            self.status_label.setText(f"No computed flux state for '{condition}'.")
+            return
+        self.show_on_flux_map(fluxes, f"{self._omics_method_label} · {condition}")
+
+    def show_comparison_on_flux_map(self) -> None:
+        """Draw the perturbed flux distribution from the last MOMA/ROOM run."""
+
+        cache = self._comparison_cache
+        if not cache:
+            self.status_label.setText("Run a single MOMA/ROOM comparison first.")
+            return
+        self.show_on_flux_map(
+            cache["fluxes"], f"{cache['method_label']} · {cache['ko_label']}"
+        )
+
+    def show_on_flux_map(self, fluxes: dict[str, float], source: str) -> None:
+        """Make ``fluxes`` the window's current distribution and draw it on the map.
+
+        The map used to be reachable only from FBA and pFBA, which left out the two results it
+        is most useful for — an expression-derived flux state and a knockout's redistribution.
+        Those are exactly the cases where a picture beats a table of 95 numbers.
+        """
+
+        if not fluxes:
+            self.status_label.setText("Nothing to show on the flux map.")
+            return
+        self._fluxes = dict(fluxes)
+        self._flux_source = source
+        self._fluxes_stale = False
+        self._populate_flux_column()  # the reaction table shows this distribution too
+        self._goto_tab("Flux Map")
+        self.render_flux_map()
+
+    def render_flux_map(self) -> None:
+        """Draw the current flux distribution on the selected layout."""
+
         if not self._fluxes or self._fluxes_stale:
             self.run_fba()
-        try:
-            fig = escher_flux_map(
-                self._map_path, self._fluxes, title=f"{self.model.id} — flux map"
-            )
-        except Exception as exc:
-            self.status_label.setText(f"Flux map failed: {exc}")
+        if not self._fluxes:  # FBA itself failed; run_fba already reported why
             return
-        if self._map_canvas is not None:
-            old = self._map_canvas.figure
-            self.map_canvas_holder.removeWidget(self._map_canvas)
-            self._map_canvas.setParent(None)
-            if self._map_toolbar is not None:
-                self.map_canvas_holder.removeWidget(self._map_toolbar)
-                self._map_toolbar.setParent(None)
-            old.clf()
-        fig.set_dpi(110)
-        self._map_canvas = FigureCanvas(fig)
-        self._map_toolbar = NavigationToolbar(self._map_canvas, self)
-        self.map_canvas_holder.addWidget(self._map_toolbar)
-        self.map_canvas_holder.addWidget(self._map_canvas)
-        self._map_canvas.draw()
-        self.status_label.setText("Flux map rendered (Escher layout).")
+        escher = (
+            self.map_layout_combo.currentText() == _MAP_LAYOUT_ESCHER
+            and self._map_path is not None
+        )
+        try:
+            source = self._flux_source or "flux"
+            if escher:
+                show_background = (
+                    self._map_background is not None
+                    and self.map_background_check.isChecked()
+                )
+                fig = escher_flux_map(
+                    self._map_path,
+                    self._fluxes,
+                    title=f"{self.model.id} — {source}",
+                    background=self._map_background if show_background else None,
+                    line_width=self._map_line_width(),
+                )
+                note = f"Escher layout, {Path(self._map_path).stem}"
+                if show_background:
+                    note += ", over the loaded drawing"
+            else:
+                top_n = self.map_topn_spin.value()
+                fig = network_flux_map(
+                    self.model,
+                    self._fluxes,
+                    top_n=top_n,
+                    title=f"{self.model.id} — {source}, top {top_n} reactions by |flux|",
+                    line_width=self._map_line_width(),
+                )
+                note = f"schematic, top {top_n} reactions"
+        except Exception as exc:
+            self.status_label.setText(f"Flux map failed: {html.escape(str(exc))}")
+            return
+        self._set_figure(self.map_canvas_holder, "map", fig)
+        self.status_label.setText(f"Flux map rendered — {source} ({note}).")
 
     def _on_product_changed(self, product: str) -> None:
         if not self._loading and product:
@@ -3264,6 +3641,10 @@ class CmmMainWindow(QMainWindow):
         # Discard any previous result so the show-all toggle can't re-render stale data, and
         # so a new source's methods must be recomputed before they back a Comparison template.
         self._omics_fluxes_by_condition = None
+        self.omics_map_btn.setEnabled(False)
+        self.omics_map_combo.clear()
+        if hasattr(self, "omics_map_label"):
+            self._refresh_omics_map_label()
         self._omics_conditions_order = []
         self._omics_expression = None
         self._omics_computed_methods = set()
@@ -3386,6 +3767,8 @@ class CmmMainWindow(QMainWindow):
         ok = [c for c in conditions if c in per_condition]
         if not ok:
             self._omics_fluxes_by_condition = None
+            self.omics_map_btn.setEnabled(False)
+            self.omics_map_combo.clear()
             self._omics_conditions_order = []
             self.omics_table.setColumnCount(1)
             self.omics_table.setHorizontalHeaderLabels(["Reaction"])
@@ -3398,6 +3781,16 @@ class CmmMainWindow(QMainWindow):
         # Cache the result so the show-all toggle can re-render without recomputing.
         self._omics_fluxes_by_condition = per_condition
         self._omics_conditions_order = ok
+        self._omics_method_label = method.upper()
+        self._loading = True
+        self.omics_map_combo.clear()
+        self.omics_map_combo.addItems(ok)
+        self._loading = False
+        self._refresh_omics_map_label()
+        self.omics_map_btn.setEnabled(True)
+        self.omics_map_btn.setToolTip(
+            f"Draw the {method.upper()} flux state of the chosen condition on the flux map."
+        )
         n_active = len(
             {
                 rid

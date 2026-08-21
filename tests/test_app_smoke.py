@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -678,6 +679,7 @@ def test_tab_order_groups_related_analyses(app, ecoli_core):
         "Production",
         "Strain Design",
         "Omics",
+        "Flux Map",
         "Revert Metabolism",
         "Transform (A→B)",
     ]
@@ -933,3 +935,368 @@ def test_applying_a_medium_reports_what_was_dropped(app, ecoli_core):
     assert "Glucose minimal, aerobic" in status  # the 0.4.0 display name, not the key
     assert "dropped" in status
     assert "EX_fe2_e" in status
+
+
+# --- Flux Map tab ---------------------------------------------------------------------
+# The map is the one analysis that needs an external layout file, so the tab has to behave
+# when that file is absent, wrong, or for another model.
+
+
+def _flux_map_window(model):
+    from cmm.app.main_window import _MAP_LAYOUT_ESCHER, _MAP_LAYOUT_SCHEMATIC
+
+    window = CmmMainWindow(model)
+    window._goto_tab("Flux Map")
+    return window, _MAP_LAYOUT_ESCHER, _MAP_LAYOUT_SCHEMATIC
+
+
+def test_flux_map_tab_opens_on_the_bundled_map_without_any_setup(app, ecoli_core):
+    """The default model must show a curated map with no file to find and no flag to pass."""
+
+    window, escher, _ = _flux_map_window(ecoli_core)
+    assert window._map_path is not None
+    assert window.map_layout_combo.currentText() == escher
+    assert "95 reactions" in window.map_source_label.text()
+
+    window.render_flux_map()
+    assert window._map_canvas is not None
+    assert "Escher layout" in window.status_label.text()
+
+
+def test_flux_map_falls_back_to_the_schematic_when_no_map_fits(app):
+    """A model no bundled map describes still gets a figure — and is told what it is."""
+
+    import cobra
+
+    # Two compartments, because cobra locates the external one before listing exchanges.
+    model = cobra.Model("unmapped")
+    a_e = cobra.Metabolite("a_e", compartment="e")
+    a_c = cobra.Metabolite("a_c", compartment="c")
+    b_c = cobra.Metabolite("b_c", compartment="c")
+    b_e = cobra.Metabolite("b_e", compartment="e")
+
+    def _reaction(rid, stoichiometry, lower=0.0):
+        reaction = cobra.Reaction(rid, lower_bound=lower, upper_bound=1000.0)
+        reaction.add_metabolites(stoichiometry)
+        return reaction
+
+    model.add_reactions(
+        [
+            _reaction("EX_a_e", {a_e: -1}, lower=-10.0),
+            _reaction("A_TRANSPORT", {a_e: -1, a_c: 1}),
+            _reaction("GROW", {a_c: -1, b_c: 1}),
+            _reaction("B_TRANSPORT", {b_c: -1, b_e: 1}),
+            _reaction("EX_b_e", {b_e: -1}),
+        ]
+    )
+    model.objective = "GROW"
+
+    window, _, schematic = _flux_map_window(model)
+    assert window._map_path is None
+    assert window.map_layout_combo.currentText() == schematic
+    assert "No bundled Escher map" in window.map_source_label.text()
+
+    window.render_flux_map()
+    assert window._map_canvas is not None
+    assert "schematic" in window.status_label.text()
+
+
+def test_flux_map_switches_between_layouts(app, ecoli_core):
+    window, escher, schematic = _flux_map_window(ecoli_core)
+
+    window.map_layout_combo.setCurrentText(schematic)
+    window.map_topn_spin.setValue(8)
+    window.render_flux_map()
+    assert "top 8 reactions" in window.status_label.text()
+
+    window.map_layout_combo.setCurrentText(escher)
+    window.render_flux_map()
+    assert "Escher layout" in window.status_label.text()
+
+
+def test_loading_a_map_for_a_different_model_is_refused(app, ecoli_core, tmp_path):
+    """An all-grey map is worse than no map: say the ids do not match, draw nothing."""
+
+    from cmm.app import main_window as mw
+
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text(
+        json.dumps(
+            [
+                {"map_name": "foreign", "schema": "…1-0-0#"},
+                {
+                    "reactions": {"1": {"bigg_id": "NOT_IN_ANY_ECOLI_MODEL"}},
+                    "nodes": {},
+                },
+            ]
+        )
+    )
+    window, _, _ = _flux_map_window(ecoli_core)
+    before = window._map_path
+
+    monkey = lambda *a, **k: (str(foreign), "")  # noqa: E731 - one-line dialog stub
+    original = mw.QFileDialog.getOpenFileName
+    mw.QFileDialog.getOpenFileName = staticmethod(monkey)
+    try:
+        window.open_flux_map_dialog()
+    finally:
+        mw.QFileDialog.getOpenFileName = original
+
+    assert window._map_path == before  # the good map was not replaced by the bad one
+    assert "different model" in window.status_label.text()
+
+
+def test_loading_a_non_escher_file_is_refused(app, ecoli_core, tmp_path):
+    from cmm.app import main_window as mw
+
+    junk = tmp_path / "junk.json"
+    junk.write_text("{ not json at all")
+    window, _, _ = _flux_map_window(ecoli_core)
+    before = window._map_path
+
+    original = mw.QFileDialog.getOpenFileName
+    mw.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(junk), ""))
+    try:
+        window.open_flux_map_dialog()
+    finally:
+        mw.QFileDialog.getOpenFileName = original
+
+    assert window._map_path == before
+    assert "not a readable escher map" in window.status_label.text().lower()
+
+
+def test_map_label_describes_the_layout_actually_shown(app, ecoli_core):
+    """In schematic mode the caption must not still be describing the Escher map."""
+
+    window, escher, schematic = _flux_map_window(ecoli_core)
+    assert window.map_source_label.text().startswith("Escher map:")
+
+    window.map_layout_combo.setCurrentText(schematic)
+    caption = window.map_source_label.text()
+    assert caption.startswith("Schematic layout")
+    assert "No layout file needed" in caption
+    assert "available" in caption  # the Escher map is still offered, not hidden
+
+    window.map_layout_combo.setCurrentText(escher)
+    assert window.map_source_label.text().startswith("Escher map:")
+
+
+def test_flux_map_title_names_the_method_behind_the_numbers(app, ecoli_core):
+    """A pFBA map read as an FBA map is a wrong figure, so the title has to say which."""
+
+    window, _, _ = _flux_map_window(ecoli_core)
+
+    window.run_fba()
+    window.render_flux_map()
+    assert window._flux_source == "FBA"
+    assert "FBA" in window._map_canvas.figure.axes[0].get_title()
+
+    window.run_pfba()
+    window.render_flux_map()
+    assert window._flux_source == "pFBA"
+    title = window._map_canvas.figure.axes[0].get_title()
+    assert "pFBA" in title and "FBA," not in title
+
+
+def test_omics_flux_state_can_be_drawn_on_the_map(app, tmp_path):
+    """The expression-derived distribution is what the map is most useful for."""
+
+    from cmm.omics.conditions import read_expression_table
+
+    path = tmp_path / "conditions.csv"
+    path.write_text(
+        "gene,condA,condB\ng1,50,50\ng2,100,1\ng3,1,100\ng5,1,100\ngb,50,50\n"
+    )
+
+    window = CmmMainWindow(build_demo_model())
+    assert not window.omics_map_btn.isEnabled()  # nothing computed yet
+
+    window._set_omics_source(read_expression_table(str(path)), "conditions.csv")
+    window.omics_method_combo.setCurrentText("lad")  # an LP, so no QP solver needed
+    window.compute_omics()
+
+    assert window.omics_map_btn.isEnabled()
+    assert [
+        window.omics_map_combo.itemText(i)
+        for i in range(window.omics_map_combo.count())
+    ] == ["condA", "condB"]
+
+    window.omics_map_combo.setCurrentText("condB")
+    window.show_omics_on_flux_map()
+
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Flux Map"
+    assert window._flux_source == "LAD · condB"
+    assert "LAD" in window._map_canvas.figure.axes[0].get_title()
+    # The distribution drawn is the omics one, not a quietly re-run FBA.
+    assert window._fluxes == dict(window._omics_fluxes_by_condition["condB"])
+
+
+def test_knockout_redistribution_can_be_drawn_on_the_map(app, ecoli_core):
+    window = CmmMainWindow(ecoli_core)
+    assert not window.cmp_map_btn.isEnabled()
+
+    window.medium_combo.setCurrentText("glucose_aerobic")
+    window.apply_selected_medium()
+    window.comparison_method_combo.setCurrentText("MOMA (L1)")
+    window.template_combo.setCurrentText("pfba")
+    window.ko_level_combo.setCurrentText("reaction")
+    _select_ko(window, ["PFK"])
+    window.run_comparison()
+
+    assert window.cmp_map_btn.isEnabled()
+    window.show_comparison_on_flux_map()
+
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Flux Map"
+    assert "MOMA" in window._flux_source and "PFK" in window._flux_source
+    assert window._fluxes == dict(window._comparison_cache["fluxes"])
+    assert "MOMA" in window._map_canvas.figure.axes[0].get_title()
+
+
+def test_a_new_model_forgets_which_flux_state_was_drawn(app, ecoli_core):
+    window, _, _ = _flux_map_window(ecoli_core)
+    window.run_fba()
+    assert window._flux_source == "FBA"
+
+    window.load_model(build_demo_model())
+    assert window._flux_source == ""
+    assert not window._fluxes
+
+
+def test_flux_map_tab_can_run_either_simulation_itself(app, ecoli_core):
+    """pFBA was unreachable from the map: it had to be run on another tab first."""
+
+    window, _, _ = _flux_map_window(ecoli_core)
+    assert not window._fluxes  # nothing solved yet
+
+    window._draw_simulation_on_map(window.run_pfba)
+    assert window._flux_source == "pFBA"
+    assert "pFBA" in window._map_canvas.figure.axes[0].get_title()
+    pfba = dict(window._fluxes)
+
+    window._draw_simulation_on_map(window.run_fba)
+    assert window._flux_source == "FBA"
+    assert "FBA" in window._map_canvas.figure.axes[0].get_title()
+    # pFBA minimises total flux subject to the same optimum, so it can never exceed FBA's.
+    # It can equal it — on this medium the FBA vertex is already parsimonious — which is
+    # exactly why the title has to name the method rather than leave it to the numbers.
+    assert (
+        sum(abs(v) for v in pfba.values())
+        <= sum(abs(v) for v in window._fluxes.values()) + 1e-6
+    )
+
+
+def test_both_tabs_offer_the_map_under_the_same_name(app, ecoli_core):
+    """One action, one label — 'Draw' on one tab and 'Show on flux map' on another is two."""
+
+    window = CmmMainWindow(ecoli_core)
+    assert (
+        window.omics_map_btn.text() == window.cmp_map_btn.text() == "Show on flux map"
+    )
+
+
+def test_changing_the_layout_redraws_without_re_solving(app, ecoli_core):
+    """The reason there is no render button: a display change must not touch the numbers.
+
+    Removing it would be wrong if switching layout meant pressing "FBA" to redraw — that
+    quietly replaces an omics or knockout flux state with a fresh FBA solve. The display
+    controls redraw what is loaded and never solve.
+    """
+
+    window, escher, schematic = _flux_map_window(ecoli_core)
+    window._draw_simulation_on_map(window.run_pfba)
+    loaded = dict(window._fluxes)
+    assert window._flux_source == "pFBA"
+
+    window.map_layout_combo.setCurrentText(schematic)
+    assert window._map_redraw_timer.isActive(), "layout change scheduled no redraw"
+    window._map_redraw_timer.stop()
+    window.render_flux_map()
+    assert window._flux_source == "pFBA"  # not silently re-solved as FBA
+    assert window._fluxes == loaded
+
+    window.map_topn_spin.setValue(18)
+    assert window._map_redraw_timer.isActive(), "reaction count changed nothing"
+    window._map_redraw_timer.stop()
+    window.render_flux_map()
+    assert window._fluxes == loaded
+    assert "top 18" in window._map_canvas.figure.axes[0].get_title()
+
+
+def test_display_controls_do_not_solve_before_anything_is_drawn(app, ecoli_core):
+    """With no figure yet, a layout change must not quietly run FBA to have something to draw."""
+
+    window, _, schematic = _flux_map_window(ecoli_core)
+    assert window._map_canvas is None
+
+    window.map_layout_combo.setCurrentText(schematic)
+    assert not window._map_redraw_timer.isActive()
+    assert not window._fluxes
+    assert window._flux_source == ""
+
+
+def test_map_background_loads_toggles_and_is_dropped_with_its_map(
+    app, ecoli_core, tmp_path
+):
+    """A drawing describes one map, so it must not survive that map being replaced."""
+
+    from cmm.app.svg_background import svg_background
+
+    drawing = tmp_path / "drawing.svg"
+    drawing.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" '
+        'viewBox="0 0 100 100"><rect width="100" height="100" fill="#8ab"/></svg>'
+    )
+
+    window, _, _ = _flux_map_window(ecoli_core)
+    window._draw_simulation_on_map(window.run_fba)
+    assert window._map_background is None
+    assert not window.map_background_check.isVisible()
+
+    window._map_background = svg_background(drawing)
+    window.map_background_check.setVisible(True)
+    window.map_background_check.setChecked(True)
+    window.render_flux_map()
+    assert len(window._map_canvas.figure.axes[0].images) == 1
+    assert "over the loaded drawing" in window.status_label.text()
+
+    # Unchecking hides it without unloading — the array is still there.
+    window.map_background_check.setChecked(False)
+    window.render_flux_map()
+    assert not window._map_canvas.figure.axes[0].images
+    assert window._map_background is not None
+
+    # A different model drops the drawing along with the map it described.
+    window.load_model(build_demo_model())
+    assert window._map_background is None
+
+
+def test_omics_condition_chooser_says_how_many_it_holds(app, tmp_path):
+    """A closed combo shows one item while the checklist above shows every condition.
+
+    Reported as a bug — two conditions computed, one visible. The box was right; nothing said
+    the other was one click away. The label now counts them and tracks the selection.
+    """
+
+    from cmm.omics.conditions import read_expression_table
+
+    path = tmp_path / "conditions.csv"
+    path.write_text(
+        "gene,condA,condB\ng1,50,50\ng2,100,1\ng3,1,100\ng5,1,100\ngb,50,50\n"
+    )
+
+    window = CmmMainWindow(build_demo_model())
+    window._set_omics_source(read_expression_table(str(path)), "conditions.csv")
+    window.omics_method_combo.setCurrentText("lad")
+    window.compute_omics()
+
+    assert window.omics_map_combo.count() == 2
+    assert window.omics_map_label.text() == "Draw (1 of 2):"
+
+    window.omics_map_combo.setCurrentIndex(1)
+    assert window.omics_map_label.text() == "Draw (2 of 2):"
+    assert window.omics_map_combo.currentText() == "condB"
+
+    # One condition needs no count, and reloading the source resets the label with the box.
+    window._set_omics_source(read_expression_table(str(path)), "conditions.csv")
+    assert window.omics_map_combo.count() == 0
+    assert window.omics_map_label.text() == "Draw:"

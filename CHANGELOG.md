@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.5.0 — unreleased
+
+The flux map, which shipped in 0.4.0 but could not be reached from the application,
+is now a working part of it. Additive: nothing is removed and no result changes.
+
+### Added
+
+- **The Flux Map tab is always available, and needs no file to get started.** It previously
+  appeared only when the window was constructed with `map_path=`, which `python -m cmm.app`
+  never passes — so the feature existed but no ordinary launch could reach it. The tab now
+  offers two layouts: a curated Escher map, and a dependency-free schematic of the highest
+  `|flux|` reactions for models no map fits. The caption states which one is on screen.
+- **Escher's *E. coli* core map is bundled** (`src/cmm/resources/`) and offered automatically
+  to any model containing at least half its reactions — `e_coli_core` (94 of 95) and also
+  genome-scale reconstructions such as iJO1366, since viewing a genome-scale model on a
+  central-metabolism map is how Escher is used. Redistributed byte-for-byte under Escher's
+  MIT license; provenance, SHA-256 and the citation to King et al. (2015) are in
+  `src/cmm/resources/ATTRIBUTION.md`, and a test asserts the digest so the attribution cannot
+  silently go stale.
+- **The flux map draws expression-derived and knockout flux states, not just FBA/pFBA.** The
+  Omics tab gained a condition selector, and both it and the Comparison tab gained a **Show on
+  flux map** button. These are the two results a map is most useful for — a distribution
+  over the whole network is not something to read as a 95-row table — and they were the two it
+  could not show.
+- **The Flux Map tab runs FBA or pFBA itself** (`draw: FBA | pFBA`), and has no separate
+  render button: changing the layout or the reaction count redraws the loaded flux state, and
+  those controls never solve. A render button invited pressing **FBA** to redraw, which
+  silently replaced a drawn omics or knockout flux state with a fresh FBA solve. pFBA was reachable only by
+  running it on the Simulation tab first, which nothing on the map suggested; the tab silently
+  drew FBA and looked like that was all it could do.
+- **The figure title names the method behind the numbers** (`e_coli_core — LAD · condB`). The
+  map previously drew whichever of FBA or pFBA had run last while its title said only "flux
+  map", so a pFBA map was indistinguishable from an FBA one.
+- **A map drawing can be laid under the flux colouring** (**Background…** on the Flux Map tab).
+  CMM reuses an Escher map's layout but not Escher's rendering, so a picture exported from the
+  same map — SVG, PNG or JPEG — supplies the drawing while CMM supplies the flux. It is placed
+  in the map's canvas coordinates, so an export of the loaded map needs no adjustment, and CMM
+  drops its own labels and node markers while one is shown rather than doubling them. SVG is
+  rasterised with Qt in `cmm.app`; `cmm.visualization` takes an array and stays free of Qt.
+- **`File ▸ Open Escher Map…`** (and **Load map…** on the tab) loads any Escher map JSON. A map
+  whose reactions are absent from the loaded model is refused with a message instead of being
+  drawn as a blank grey network.
+- `cmm.resources.bundled_map_for(model)` returns the bundled map's path when it suits a model,
+  and `None` when nothing does.
+
+### Fixed
+
+- **The flux map no longer drifts right, clip its title, or draw its colorbar as a hairline**
+  when the GUI stretches the figure to a wide panel. `colorbar` re-anchors its parent axes to
+  the right, so every bit of the shrinkage `set_aspect("equal")` applies was taken off the left
+  edge; `tight_layout` solved the margins once at the authored size and they no longer fitted
+  once stretched. The figure now anchors centre and re-solves its layout on every draw.
+- **The schematic layout folds long chains into rows instead of collapsing them.** At 25
+  reactions the carbon backbone is one ~30-node chain, and laying it along a single row put
+  nodes at *zero* separation — markers and labels merged into a smear. Rows now use one fixed
+  node spacing, so a two-node branch no longer stretches across the whole panel either.
+
+### Changed
+
+- **The schematic carries a colorbar** instead of an `∝ |flux|` formula in the margin, drawn
+  from the same truncated colormap span the arrows are coloured from.
+- The schematic's reaction count is capped at 25. Beyond that the cross-row arrows dominate and
+  the figure stops being readable — that is a curated map's job, not a fallback schematic's.
+- `test_data/` is removed. Its last remaining file was an unattributed copy of the same Escher
+  map; the scenario harness now uses the bundled, attributed one.
+
 ## 0.4.0 — unreleased · **BREAKING**
 
 A fidelity release. Five independent audits compared every implemented method against its

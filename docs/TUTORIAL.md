@@ -59,7 +59,7 @@ the active capabilities under **Config → Solver status…**.
 ├──────────────────────┬────────────────────────────────────────────────────┤
 │ MODEL PANEL          │ TABS                                               │
 │ - objective          │ Simulation | Comparison | Production | Strain Des. │
-│ - flux-range slider  │ Omics | Multi-condition | [Flux Map] |             │
+│ - flux-range slider  │ Omics | Multi-condition | Flux Map |               │
 │ - reaction table     │ Revert Metabolism | Transform (A→B)                │
 │   (edit Lower/Upper) │   (active analysis + result table / figure)        │
 ├──────────────────────┴────────────────────────────────────────────────────┤
@@ -332,15 +332,73 @@ works from two explicit predicted flux **states**.
 
 ## 9. Flux Map tab — Escher-layout flux maps
 
-The **Flux Map** tab appears only when the window is constructed with a curated Escher map
-JSON (`map_path`). It reuses the map's hand-laid coordinates and bezier segments and colours
-each reaction by the current FBA flux (diverging: blue = reverse/negative, red =
-forward/positive; width ∝ `|flux|`). Click **Render flux map** after running FBA. A textbook
-map for `e_coli_core` is bundled under `test_data/`.
+The **Flux Map** tab draws the current flux distribution on the network. Click **draw: FBA**
+or **pFBA** to solve and draw in one step; colour and width encode flux (diverging: blue = reverse/negative, red =
+forward/positive; width ∝ `|flux|`).
 
-To launch with the map wired in, the scenario harnesses pass `map_path=` to
-`CmmMainWindow` (see §11). A dependency-free schematic `network_flux_map` is also available in
-the Python API when you don't have a curated map.
+**Which flux state is drawn.** The map draws the window's current distribution, and the figure
+title names the method that produced it — `e_coli_core — pFBA`, `e_coli_core — LAD · condB`.
+Rendering with no distribution loaded runs FBA first; editing a bound marks the distribution
+stale, so the next render re-solves. Four things can put a distribution on the map:
+
+| From | How |
+|---|---|
+| FBA, pFBA | **draw: FBA** / **pFBA** on this tab — solves and draws in one click |
+| E-Flux2 / LAD | Omics tab → pick the condition → **Show on flux map** |
+| MOMA / ROOM | Comparison tab → run a single knockout → **Show on flux map** |
+
+Switching the layout, or changing the reaction count, redraws the loaded flux state by itself.
+Those controls never solve — that is the point of keeping them separate from **draw:**, which
+always does. Pressing **FBA** merely to see the schematic would replace an omics or knockout
+flux state you had drawn with a fresh FBA solve.
+
+Batch comparison is not on this list: it produces one distribution per target, so there is no
+single "the" flux state to draw. Run the target you care about as a single knockout.
+
+The reaction table on the left switches to the same distribution, so the map and the numbers
+never disagree.
+
+Two layouts, chosen with the **layout** selector:
+
+| Layout | What it draws | Needs |
+|---|---|---|
+| **Escher map (curated)** | A published Escher map's hand-laid coordinates and bezier segments — every reaction the map covers | an Escher map JSON |
+| **Schematic (top reactions)** | The *n* highest-`|flux|` reactions (4–25), currency metabolites (ATP, H₂O, CO₂, NAD(P)H…) dropped so the layout follows the carbon skeleton. Arrow colour *and* width scale with `|flux|`, read against the colorbar; the arrow points the net direction | nothing |
+
+CMM never invents a map layout. A readable metabolic map is hand-drawn, and an automatic
+layout of a genome-scale network is a hairball rather than a figure — which is why the
+schematic draws a handful of reactions and says so in its title rather than pretending to
+show the whole network.
+
+The reaction count is capped at 25 for the same reason. The schematic folds the carbon
+backbone into evenly spaced rows, but a metabolic network branches, and past roughly that many
+reactions the arrows between rows dominate the picture. Reading more of the network at once is
+what a curated map is for.
+
+**The bundled map.** CMM ships Escher's *E. coli* core map and offers it automatically to any
+model containing at least half its reactions. That covers `e_coli_core` (94 of 95) and also
+genome-scale reconstructions such as iJO1366 — viewing a genome-scale model on a
+central-metabolism map is how Escher itself is used. The caption above the figure says which
+map is loaded and how much of it this model can fill. Provenance and license are in
+`src/cmm/resources/ATTRIBUTION.md`; cite King *et al.* (2015) for the layout.
+
+**Your own map.** **Map JSON…** on the tab, or **File ▸ Open Escher Map (JSON)…**, takes any Escher
+map JSON (escher.github.io or BiGG). A file whose reactions do not appear in the loaded model
+is refused with a message rather than drawn as a blank grey map.
+
+**A drawing under the flux.** CMM reuses a map's layout but not Escher's drawing conventions —
+its arrowheads, node sizes and typography. **Map image…** loads a picture of the same map and
+lays it beneath the flux colouring, so the network is drawn the way Escher draws it and CMM
+contributes only the colour and width. Export one from escher.github.io with *Map ▸ Export as
+SVG*; PNG and JPEG work too. The picture is placed in the map's own canvas coordinates, so an
+export of the map you loaded lines up without adjustment. While a background is shown CMM
+leaves out its own labels and metabolite dots — the drawing already has them — and **show**
+hides the drawing again without unloading it. A background belongs to one map, so loading a
+different map or model drops it.
+
+Both layouts are in the Python API as `escher_flux_map` and `network_flux_map`
+(`cmm.visualization`), and `cmm.resources.bundled_map_for(model)` returns the bundled map's
+path when it suits a model.
 
 ---
 

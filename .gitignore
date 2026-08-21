@@ -29,3 +29,8 @@ test_data/log_tpm_qc.csv
 
 # Generated scenario figure outputs written via CMM_OUTPUT_DIR (see docs/scenario-figures.md)
 temp_figures_new/
+
+# Scenario run directories written via CMM_RESULTS_DIR, or ./results when it is unset (see
+# docs/scenarios/_reporting.md). These are the user's own analyses: raw CSVs, 300 DPI figures
+# and the report. A single SC-01 run is several megabytes and belongs to whoever ran it.
+results/

@@ -75,3 +75,22 @@ def test_genome_scale_production_scan_returns_actionable_targets(ijo1366):
     assert scan.metadata["n_failed_levels"] == 0
     assert product not in scan.amplification_targets()
     assert biomass not in scan.amplification_targets()
+
+
+@pytest.mark.genome_scale
+def test_central_metabolism_map_still_suits_a_genome_scale_model(ijo1366):
+    """Viewing a genome-scale model on a central-metabolism map is how Escher is used.
+
+    No one hand-draws all 2,583 reactions, and an automatic layout of them is a hairball, so
+    the bundled core map must remain on offer for a reconstruction this size.
+    """
+
+    from cmm.resources import (
+        BUNDLED_MAPS,
+        MAP_COVERAGE_MIN,
+        bundled_map_for,
+        map_coverage,
+    )
+
+    assert map_coverage(BUNDLED_MAPS[0], ijo1366) >= MAP_COVERAGE_MIN
+    assert bundled_map_for(ijo1366) == str(BUNDLED_MAPS[0])
