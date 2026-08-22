@@ -59,6 +59,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "cmm.app" = ["assets/*.svg"]
+"cmm.reporting" = ["*.R"]
 # The bundled Escher map and its provenance/license record ship with the wheel; the map is
 # useless to an installed CMM if it stays behind in the source tree.
 "cmm.resources" = ["*.json", "ATTRIBUTION.md"]

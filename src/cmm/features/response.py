@@ -155,6 +155,38 @@ class FluxResponseResult:
             ],
         )
 
+    def summary_frame(self) -> pd.DataFrame:
+        """One-row export of the domain, reference state and response limit.
+
+        The curve and phase tables deliberately stay separate; this frame carries every
+        scalar a report may quote so none has to be reconstructed from plotted pixels.
+        """
+
+        domain_low, domain_high = self.feasible_domain or (None, None)
+        return pd.DataFrame(
+            [
+                {
+                    "target": self.target,
+                    "response": self.response,
+                    "biomass": self.biomass,
+                    "feasible_domain_low": domain_low,
+                    "feasible_domain_high": domain_high,
+                    "wild_type_target_flux": self.wild_type.get("target_flux"),
+                    "wild_type_response_flux": self.wild_type.get("response_flux"),
+                    "wild_type_biomass_flux": self.wild_type.get("biomass_flux"),
+                    "limit_found": self.limit.found,
+                    "limit_message": self.limit.message,
+                    "limit_target_flux": self.limit.target_flux,
+                    "limit_response_flux": self.limit.response_flux,
+                    "limit_shadow_price_before": self.limit.shadow_price_before,
+                    "limit_shadow_price_after": self.limit.shadow_price_after,
+                    "limit_threshold": self.limit.threshold,
+                    "n_points": len(self.points),
+                    "n_phases": len(self.phases),
+                }
+            ]
+        )
+
     def feasible_points(self) -> tuple[ResponsePoint, ...]:
         return tuple(p for p in self.points if p.feasible)
 

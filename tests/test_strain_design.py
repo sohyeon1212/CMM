@@ -29,6 +29,9 @@ def test_optknock_finds_growth_coupled_succinate_design(anaerobic_ecoli):
     assert 1 <= len(best.knockouts) <= 3
     assert best.max_product > 5.0  # succinate is forced to a high flux
     assert best.growth > 0.0
+    guaranteed = [design.guaranteed_product for design in result.designs]
+    assert guaranteed == sorted(guaranteed, reverse=True)
+    assert result.to_frame()["guaranteed_product"].tolist() == guaranteed
 
 
 def test_robustknock_returns_only_guaranteed_designs(anaerobic_ecoli):
@@ -41,6 +44,12 @@ def test_robustknock_returns_only_guaranteed_designs(anaerobic_ecoli):
     # Ranked by guaranteed product (descending).
     guaranteed = [d.guaranteed_product for d in result.designs]
     assert guaranteed == sorted(guaranteed, reverse=True)
+
+    exported = result.to_frame()
+    assert exported["rank"].tolist() == list(range(1, len(result.designs) + 1))
+    assert exported["guaranteed_product"].tolist() == guaranteed
+    assert exported["growth_coupled"].all()
+    assert exported.loc[0, "knockouts"] == ";".join(result.designs[0].knockouts)
 
 
 def test_optknock_and_robustknock_use_distinct_nested_searches(
@@ -58,12 +67,37 @@ def test_optknock_and_robustknock_use_distinct_nested_searches(
         return real_module(model, module_type, *args, **kwargs)
 
     monkeypatch.setattr(sd, "SDModule", recording_module)
-    monkeypatch.setattr(sd, "compute_strain_designs", lambda *args, **kwargs: None)
+    search_kwargs: list[dict[str, object]] = []
 
-    optknock(anaerobic_ecoli, SUCC, max_knockouts=1, max_solutions=1)
-    robustknock(anaerobic_ecoli, SUCC, max_knockouts=1, max_solutions=1)
+    def no_solutions(*args, **kwargs):
+        del args
+        search_kwargs.append(kwargs)
+        return None
+
+    monkeypatch.setattr(sd, "compute_strain_designs", no_solutions)
+
+    opt_result = optknock(
+        anaerobic_ecoli,
+        SUCC,
+        max_knockouts=1,
+        max_solutions=1,
+        seed=17,
+    )
+    robust_result = robustknock(
+        anaerobic_ecoli,
+        SUCC,
+        max_knockouts=1,
+        max_solutions=1,
+        seed=23,
+    )
 
     assert seen == [sd.OPTKNOCK, sd.ROBUSTKNOCK]
+    assert [kwargs["compress"] for kwargs in search_kwargs] == [True, True]
+    assert [kwargs["seed"] for kwargs in search_kwargs] == [17, 23]
+    assert opt_result.metadata["seed"] == 17
+    assert opt_result.metadata["parameters"]["strain_design_seed"] == 17
+    assert robust_result.metadata["seed"] == 23
+    assert robust_result.metadata["parameters"]["strain_design_seed"] == 23
 
 
 @pytest.mark.parametrize(
@@ -72,6 +106,9 @@ def test_optknock_and_robustknock_use_distinct_nested_searches(
         ({"max_knockouts": 0}, "max_knockouts"),
         ({"max_solutions": 0}, "max_solutions"),
         ({"min_growth": -0.1}, "min_growth"),
+        ({"seed": -1}, "seed"),
+        ({"seed": 2_000_000_001}, "seed"),
+        ({"seed": 1.5}, "seed"),
     ],
 )
 def test_strain_design_validates_search_parameters(anaerobic_ecoli, kwargs, message):
@@ -152,6 +189,22 @@ def test_optknock_designs_are_deduplicated_by_knockout_set(anaerobic_ecoli):
     parameters = result.metadata["parameters"]
     assert parameters["n_designs_after_deduplication"] == len(result.designs)
     assert parameters["n_milp_designs"] >= parameters["n_designs_after_deduplication"]
+    assert parameters["strain_design_backend"] == "straindesign"
+    assert parameters["straindesign_version"]
+    assert parameters["straindesign_search_status"] in {"optimal", "time_limit"}
+    assert parameters["straindesign_search_complete"] is (
+        parameters["straindesign_search_status"] == "optimal"
+    )
+    assert parameters["straindesign_compress"] is True
+    assert parameters["max_compressed_milp_solutions_requested"] == 5
+    assert "compressed MILP solutions" in parameters["max_solutions_semantics"]
+    assert parameters["n_compressed_milp_solutions"] is None
+    assert parameters["n_decompressed_designs"] >= len(result.designs)
+    assert parameters["n_unique_decompressed_designs"] >= len(result.designs)
+    assert parameters["n_returned_designs_after_deduplication"] == len(result.designs)
+    assert parameters["n_milp_designs_semantics"].startswith("legacy alias")
+    assert parameters["intervention_level"] == "reaction"
+    assert parameters["requires_gpr_resolution"] is True
 
 
 def test_strain_design_accepts_and_records_a_condition(ecoli_core):

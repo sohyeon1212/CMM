@@ -54,7 +54,10 @@ jobs:
 
       - name: Type check scientific services
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
-        run: uv run mypy src/cmm/core src/cmm/features src/cmm/omics
+        run: >-
+          uv run mypy
+          src/cmm/core src/cmm/features src/cmm/omics
+          src/cmm/workflows src/cmm/reporting
 
       - name: Validate citation and audit locked dependencies
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
@@ -72,3 +75,161 @@ jobs:
           --durations=10
           --cov=cmm --cov-branch --cov-report=term-missing
           --cov-fail-under=80
+
+      - name: Build and verify publication renderer package data
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        run: |
+          uv build
+          uv run python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one wheel, found {wheels}")
+          with ZipFile(wheels[0]) as archive:
+              member = "cmm/reporting/render_publication_figures.R"
+              if member not in archive.namelist():
+                  raise SystemExit(f"wheel is missing {member}")
+              if not archive.read(member).strip():
+                  raise SystemExit(f"wheel contains an empty {member}")
+          PY
+
+  publication-report:
+    name: R publication report / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: renv
+          # Linux/Windows use Posit binaries by default. `always` opts macOS into its binary
+          # repository as well; archived packages may still compile when no R 4.3 binary exists.
+          use-public-rspm: always
+          # On Windows setup-r derives and installs the suitable Rtools release from R 4.3.
+          windows-path-include-rtools: true
+
+      - name: Install R graphics system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype-dev \
+            libharfbuzz-dev libfribidi-dev \
+            libpng-dev libtiff-dev libjpeg-dev libwebp-dev pkg-config
+
+      - name: Install R graphics system libraries (macOS)
+        if: runner.os == 'macOS'
+        run: >-
+          brew install
+          freetype harfbuzz fribidi libpng jpeg-turbo libtiff webp pkg-config
+
+      - name: Restore the locked R publication environment
+        uses: r-lib/actions/setup-renv@v2
+
+      # The renderer intentionally invokes `Rscript --vanilla`. Export the restored project
+      # library explicitly so that subprocess cannot fall back to an unrelated user library.
+      - name: Expose the restored renv library to vanilla R subprocesses
+        shell: Rscript {0}
+        run: |
+          renv::load()
+          cat(
+            "R_LIBS_USER=", normalizePath(.libPaths()[[1]], winslash = "/"), "\n",
+            sep = "", file = Sys.getenv("GITHUB_ENV"), append = TRUE
+          )
+
+      - name: Install focused Python test dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Smoke-test the locked R renderer packages
+        shell: Rscript --vanilla {0}
+        run: |
+          packages <- c("jsonlite", "ggplot2", "ggrepel", "patchwork", "svglite", "ragg")
+          available <- vapply(packages, requireNamespace, logical(1), quietly = TRUE)
+          if (!all(available)) {
+            stop(
+              sprintf(
+                "missing required renderer package(s): %s",
+                paste(packages[!available], collapse = ", ")
+              ),
+              call. = FALSE
+            )
+          }
+          lock <- jsonlite::read_json("renv.lock", simplifyVector = FALSE)
+          locked_packages <- names(lock$Packages)
+          locked_available <- vapply(
+            locked_packages, requireNamespace, logical(1), quietly = TRUE
+          )
+          if (!all(locked_available)) {
+            stop(
+              sprintf(
+                "renv restore omitted locked package(s): %s",
+                paste(locked_packages[!locked_available], collapse = ", ")
+              ),
+              call. = FALSE
+            )
+          }
+          actual <- vapply(locked_packages, function(package) {
+            as.character(utils::packageVersion(package))
+          }, character(1))
+          expected <- vapply(locked_packages, function(package) {
+            lock$Packages[[package]]$Version
+          }, character(1))
+          matches <- mapply(
+            function(expected_version, actual_version) {
+              utils::compareVersion(expected_version, actual_version) == 0L
+            },
+            expected,
+            actual,
+            USE.NAMES = FALSE
+          )
+          comparison <- data.frame(
+            package = locked_packages,
+            expected = unname(expected),
+            actual = unname(actual),
+            matches = matches,
+            check.names = FALSE
+          )
+          print(comparison, row.names = FALSE)
+          actual_r <- as.character(getRversion())
+          expected_r <- lock$R$Version
+          cat(sprintf("R expected=%s actual=%s\n", expected_r, actual_r))
+          if (actual_r != expected_r || any(!comparison$matches)) {
+            mismatches <- comparison[!comparison$matches, , drop = FALSE]
+            details <- character()
+            if (nrow(mismatches) > 0L) {
+              details <- apply(mismatches, 1L, function(row) {
+                sprintf(
+                  "%s expected=%s actual=%s",
+                  row[["package"]], row[["expected"]], row[["actual"]]
+                )
+              })
+            }
+            if (actual_r != expected_r) {
+              details <- c(details, sprintf("R expected=%s actual=%s", expected_r, actual_r))
+            }
+            stop(
+              sprintf("locked R environment version mismatch: %s", paste(details, collapse = "; ")),
+              call. = FALSE
+            )
+          }
+          if (utils::packageDescription("ggplot2")$NeedsCompilation != "no") {
+            stop("ggplot2 unexpectedly declares native compilation", call. = FALSE)
+          }
+
+      - name: Test schema validation and R publication rendering
+        run: uv run pytest -q -ra tests/test_publication_reporting.py

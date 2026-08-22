@@ -1,0 +1,6 @@
+interface:
+  display_name: "CMM Production Engineering"
+  short_description: "Run reproducible metabolic production workflows"
+  default_prompt: "Use $cmm-production-engineering to run a verified production-engineering workflow for my metabolic model."
+policy:
+  allow_implicit_invocation: true

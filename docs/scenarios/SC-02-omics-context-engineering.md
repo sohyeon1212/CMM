@@ -196,7 +196,7 @@ result the user asked about.
 
 **Failure → action.** If the top changes are scattered across unrelated subsystems with no
 exchange changes, the difference may be alternate-optima noise rather than biology. Verify with
-`random_flux_sampling` (SC-01 step 5b) before building a story on it.
+`random_flux_sampling` (SC-01 step 6) before building a story on it.
 
 ---
 

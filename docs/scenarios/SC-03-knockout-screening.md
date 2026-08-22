@@ -11,6 +11,7 @@ optional_next:
   - "SC-01: when the goal is production, hand it the beneficial-deletion candidates"
 requires:
   model: cobra model
+  condition: explicit medium, substrate uptake, and oxygen/aeration bounds
 optional:
   product: exchange reaction id (adds the production column)
   expression: enables LAD / E-Flux2 baselines
@@ -33,9 +34,11 @@ is named.
 which merely impair growth — is a finished answer, and the usual reason to run it (checking a
 new reconstruction, planning a deletion library) has nothing to do with production.
 
-It happens to be `SC-01` step 3 run exhaustively, so when the goal *is* production the two
-compose: hand the beneficial-deletion candidates to [`SC-01`](SC-01-production-target-discovery.md)
-for verification. That is an option, not an obligation — neither scenario requires the other.
+When the goal *is* production, the canonical
+[`SC-01`](SC-01-production-target-discovery.md) workflow already runs a matched MOMA-L2 and
+ROOM single-knockout stage and validates its shortlist. Run SC-03 as well only when the user
+wants an exhaustive essentiality/classification study; hand its full table to SC-01 as context,
+not as a replacement for OptKnock/RobustKnock or forward validation.
 
 **Success criteria.** A complete table covering every perturbation including the lethal ones,
 with an explicit essentiality threshold, and a stated reference and method.
@@ -48,15 +51,16 @@ with an explicit essentiality threshold, and a stated reference and method.
 | 1 | Compared against what? | `reference_flux` | baseline flux state |
 | 2 | What does each deletion do? | `batch_comparison` | full screen table |
 | 3 | Which class is each? | thresholds on growth and product | classified table |
-| 4 | Are the interesting ones real? | `flux_response`, sampling | verified subset |
+| 4 | Are the interesting ones real? | `flux_response`, paired wild-type/knockout sampling | verified subset |
 | 5 | Write it up | `_reporting.md` | report + figures + raw data |
 
 ---
 
 ## Step 0 — Preflight
 
-**Call.** `_preflight.md` P1–P3; P4 only if a product is named; P5 only if using an omics
-baseline.
+**Call.** First confirm one condition — medium, substrate uptake, oxygen/aeration bounds and
+other changed bounds — then run `_preflight.md` P1–P3; P4 only if a product is named; P5 only
+if using an omics baseline.
 
 **Branch.** Genome-scale model → decide the method now, not after a failed overnight run: a
 `moma_l1` (LP) screen is the practical default, with `moma_l2` re-checks on the survivors.
@@ -205,18 +209,30 @@ for target in beneficial_targets:
             model.reactions.get_by_id(rid).knock_out()
         after = flux_response(model, PRODUCT, biomass_fraction=0.3, n_steps=15)
 
-ensemble = random_flux_sampling(model, n=1000, seed=0)
+wild_type_ensemble = random_flux_sampling(model, n=1000, seed=0)
+
+knockout_ensembles = {}
+for target in beneficial_targets:
+    blocked = blocked_reactions_for_genes(model, [target])
+    with model:
+        for rid in blocked:
+            model.reactions.get_by_id(rid).knock_out()
+        knockout_ensembles[target] = random_flux_sampling(model, n=1000, seed=0)
 ```
 
 **Decision rule.**
 - The knocked-out model's product response should exceed the wild-type value across a usable
   growth range, not only at a single point.
-- Check the deleted reaction's sampled distribution: a reaction whose wild-type flux was
-  already near zero across the ensemble cannot have been doing much, so a large predicted
-  benefit from deleting it deserves scepticism.
+- Compare matched wild-type and knockout ensembles using the same condition, objective
+  conditioning, sampler, seed policy, count, thinning, and reaction set. Report medians and
+  intervals for product, biomass, blocked reactions and mechanistically relevant reactions.
+  Correlated sampler draws are not biological replicates, so do not headline an unqualified
+  p-value.
+- A reaction whose wild-type flux was already near zero across the ensemble cannot have been
+  doing much; a large predicted deletion benefit then deserves scepticism.
 
 **Artifacts.** `05_verification/flux_response_<target>.csv`,
-`05_verification/sampling_statistics.csv`.
+`05_verification/sampling_index.csv`, and target-specific wild-type/knockout sampling summaries.
 
 **Solver.** LP.
 
@@ -232,7 +248,8 @@ Follow `_reporting.md`. Scenario-specific requirements:
 - Mark the `n_reactions == 0` genes as uninformative rather than neutral.
 - **Limitations** must include: essentiality here is *in silico* under one medium and changes
   with it; MOMA/ROOM assume minimal adjustment from wild type; and single-deletion screens
-  cannot find synthetic-lethal pairs or the multi-knockout designs of `SC-01` step 3.
+  cannot find synthetic-lethal pairs or the multi-knockout designs in SC-01's strain-design
+  step.
 
 ## Cross-checks
 
@@ -247,4 +264,4 @@ Follow `_reporting.md`. Scenario-specific requirements:
 - Do not report essentiality without the medium and threshold.
 - Do not silently screen a subset; a partial screen states its coverage.
 - Do not read a beneficial single deletion as growth-coupled — coupling is proven by
-  `SC-01` step 3's `guaranteed_product`, not by a screen.
+  SC-01's OptKnock/RobustKnock `guaranteed_product`, not by a screen.

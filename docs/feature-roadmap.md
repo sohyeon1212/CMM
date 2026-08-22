@@ -1,6 +1,6 @@
 # Feature roadmap
 
-This roadmap starts from the validated CMM 0.4.0 surface. Implemented features are also
+This roadmap starts from the validated CMM 0.5.0 surface. Implemented features are also
 enumerated by `cmm.features.INCLUDED_FEATURES`; this document does not advertise planned work
 as shipped functionality.
 
@@ -15,7 +15,11 @@ as shipped functionality.
 - Omics: GPR mapping, LAD, E-Flux2, multi-condition prediction, differential directions.
 - Transformation: MOMA A→B ranking, published MTA, published rMTA, explicit continuous
   heuristic.
-- Product: Qt desktop workflows, CSV/table export, publication figures, offscreen tests.
+- Product: Qt desktop workflows, CSV/table export, publication figures, offscreen tests; the
+  concrete SC-01 `production_target_workflow` and R-backed `publication_reporting` service.
+
+The concrete SC-01 workflow does not ship a generic scenario-template or scenario-file-format
+engine; those remain explicitly excluded in `cmm.features.EXCLUDED_FEATURES`.
 
 The reference tests and scientific limitations are defined in `docs/VALIDATION.md`.
 

@@ -4,761 +4,386 @@ title: Production target discovery
 goal: Find and verify genetic interventions that increase production of a target metabolite
 when_to_use:
   - "increase production of X"
-  - "which genes should I over-express / knock out to make more X"
+  - "which genes should I over-express or knock out to make more X"
   - "design a strain where production is guaranteed, not merely possible"
   - "생산 증대 표적을 찾아줘"
   - "성장 공역 균주 설계"
-role: spine                 # the backbone of a production goal; complete on its own
-entry_points:
-  - "step 0 — the usual start, when no targets are known yet"
-  - "step 3 — when only a growth-coupled knockout design is wanted"
-optional_inputs_from:
-  - "SC-02: a condition-specific flux state, used as a reference in step 2"
-  - "SC-03: an exhaustive single-deletion screen, used as context for step 3"
+role: spine
 requires:
-  model: "cobra model"
-  product: "exchange reaction id (e.g. EX_succ_e)"
-optional:
-  expression: "gene expression table (enables LAD / E-Flux2 reference states)"
-  substrate: "exchange reaction id; default: auto-detected from the medium"
-  condition: "cmm.core.Condition — medium and aeration, set once in step 0 and passed to every step"
+  model: "path to the exact COBRA model"
+  product: "exchange reaction id, for example EX_succ_e"
+  condition: "explicit medium, substrate uptake, oxygen/aeration bounds, and other changed bounds"
+optional_inputs_from:
+  - "SC-02: a condition-specific reference state"
+  - "SC-03: an exhaustive essentiality study"
 solver:
-  minimum: "LP — step 3 falls back to a single-deletion screen and proves no coupling"
-  full: "MILP + straindesign + Java (step 3 design); QP (E-Flux2, L2 MOMA)"
-steps: [preflight, yield, reference, design, amplification, validation, report]
-runtime: "minutes on a core model; the step 3 MILP search dominates on genome scale"
+  canonical_workflow: "QP for MOMA-L2; MILP for ROOM and strain design"
+  strain_design: "importable straindesign; any additional backend requirement is surfaced"
+renderer: "Rscript plus loadable renderer packages; renv.lock and CI supply exact versions"
+steps: [preflight, yield, reference, single_knockout, strain_design, amplification, validation, report]
+runtime: "minutes on a core model; hours on a genome-scale model"
 ---
 
 # SC-01 — Production target discovery
 
 ## Objective
 
-Produce a strain proposal for a target product: a knockout design whose production is
-*guaranteed* at maximum growth, the reactions to over-express alongside it, the predicted
-product and growth for each, and evidence that every part survived independent verification.
+Produce a reproducible *in silico* strain-engineering report that keeps four claims distinct:
 
-**Success criteria.**
-1. Theoretical yield is known and non-zero, with its carbon balance disclosed.
-2. Each proposed knockout design either has `guaranteed_product > 0` — coupling proven — or
-   the report states plainly that coupling was **not** established and why.
-3. Every recommended intervention passed step 5 verification, not just a step 3 or 4 ranking.
-4. The run directory satisfies `_reporting.md`.
+1. MOMA and ROOM predict the phenotype of individual deletions.
+2. OptKnock and RobustKnock search multi-reaction designs that couple product to growth.
+3. FSEOF and FVSEOF nominate flux-amplification targets.
+4. Flux-response indexes cover every canonical knockout and amplification candidate; numeric
+   scans cover every amplification and every single-reaction knockout signature, while
+   knockout-conditioned sampling covers every canonical single-knockout candidate. Each result
+   may support, contradict, or leave the nomination inconclusive.
 
-## Pipeline at a glance
+Predictions prioritize experiments; they do not establish a wet-lab phenotype.
 
-| Step | Question | Method | Output |
-|---|---|---|---|
-| 0 | Is this model usable at all? | `_preflight.md` | viability, solver, yield |
-| 1 | What is the ceiling, and what does it cost? | `theoretical_yield`, `production_envelope` | yield, trade-off curve |
-| 2 | What is the cell doing now? | `reference_flux` | reference flux state(s) |
-| 3 | Which knockout set forces production? | `optknock`, `robustknock` | designs with guaranteed product |
-| 4 | Which reactions should carry more flux? | `fseof`, `fvseof` | amplification candidates |
-| 5 | Do design and candidates survive scrutiny? | MOMA/ROOM, `flux_response`, sampling | verified strain proposal |
-| 6 | Write it up | `_reporting.md` | report + figures + raw data |
+## Canonical execution boundary
 
-Steps 3 and 4 are independent and may run in either order. Step 5 needs both.
+Use `.agents/skills/cmm-production-engineering/` for a complete production request. The
+checked-in config and thin CLI are the reproducible boundary:
 
-## The condition is set once, in step 0, and every step inherits it
-
-**This is the single most important procedural rule in this scenario, and the one this
-document itself previously broke.** A run that applies an aerobic medium and then asks a later
-step for an anaerobic answer produces numbers that are individually valid and collectively
-meaningless. Only two things fix that: choose the medium and aeration *before* step 0's first
-solve, and make every subsequent call state which condition it is running under.
-
-```python
-from cmm.core import Condition, ReactionBound, apply_medium
-
-MEDIUM      = "glucose_anaerobic"        # or "glucose_aerobic"; keys in PRESET_MEDIA
-PRODUCT     = "EX_succ_e"
-OXYGEN      = "EX_o2_e"
-
-apply_medium(model, MEDIUM)              # constrains the model itself
-
-CONDITION = Condition(                   # restates the aeration explicitly, so every
-    name=MEDIUM,                         # call below carries it in its own provenance
-    bounds=(ReactionBound(reaction_id=OXYGEN, lower_bound=0.0, upper_bound=0.0),),
-    notes="anaerobic: oxygen uptake closed",
-)
+```bash
+cmm production-targets --config CONFIG
+cmm production-targets --config CONFIG --analysis-only
+cmm report render RUN_DIR
+cmm report validate RUN_DIR --json
 ```
 
-For an aerobic run, use the aerobic preset and drop the `bounds=` entry — do not leave an
-oxygen bound behind that contradicts the medium.
+The equivalent Python API is:
 
-**From here on, `CONDITION` is passed to every call that accepts it**, and the calls below show
-it explicitly rather than leaving it to be inferred. As of 0.4.0 that covers
-`fba`/`pfba`/`fva`, `theoretical_yield`, `production_envelope`, `fseof`, `fvseof`, `optknock`,
-`robustknock`, `flux_response`, `random_flux_sampling` and `reference_constrained_sampling`.
-**The `aerobic=True|False` parameter no longer exists** — it was a second, redundant way of
-saying what the medium already says, and because `optknock`/`robustknock` never accepted it,
-passing `aerobic=False` alongside an aerobic medium silently produced an aerobic design inside
-an anaerobic report. That is exactly how the wrong answer recorded in earlier versions of this
-document was produced.
+```python
+from cmm.workflows.production import (
+    ProductionWorkflowConfig,
+    ProductionWorkflowResult,
+    run_production_target_discovery,
+)
+from cmm.reporting import render_production_report, validate_production_run
 
-The remaining calls in this scenario — `reference_flux`, `knockout_comparison`,
-`batch_comparison` — take no `condition=`. **They inherit the condition from the model state
-`apply_medium` established in step 0**, which is why the medium is applied to the model rather
-than only expressed as a `Condition`. Do not open a `with model:` block that changes the medium
-around any of them.
+config = ProductionWorkflowConfig(...)  # use the public fields in agent-reference.md
+result: ProductionWorkflowResult = run_production_target_discovery(config)
+assert result.run_directory is not None  # set when config.output_dir is supplied
+render_production_report(result.run_directory, renderer="nature-r")
+validation = validate_production_run(result.run_directory)
+```
 
-Record `MEDIUM`, the oxygen bounds, the substrate and its uptake rate in `00_provenance.json`,
-and re-record the model fingerprint *after* `apply_medium` — the fingerprint changes with the
-medium, so it is itself evidence of which condition the run used.
+Do not replace this with a bespoke script that re-ranks CSVs or invents private thresholds.
+Direct `cmm.features` calls remain appropriate for a request explicitly limited to one method.
 
-**Two method families, two jobs.** Step 3 is *inverse* — you give a goal, CMM searches for the
-intervention, and the bilevel MILP proves the cell cannot grow without producing. Step 5 is
-*forward* — you give the intervention, CMM predicts what follows. They assume different cell
-behaviour (growth-maximizing vs minimal-adjustment), which is exactly why one designs and the
-other checks. Do not rank their outputs in a single list; see §Do not.
+## Resolve one biological condition before running
 
-**Entering at step 3.** If the user only wants a growth-coupled knockout design and has no
-interest in over-expression targets, run steps 0–1, then 3, then 5a, then report. Steps 2, 4
-and 5b exist to serve the amplification half of the answer.
+The run definition contains:
 
----
+- exact model path; preflight-computed model id and fingerprint;
+- product exchange reaction id;
+- medium and every applied exchange bound;
+- substrate exchange and uptake bound;
+- oxygen exchange and aeration bound.
+
+If the prompt or config already makes these values explicit and consistent, continue without
+asking for redundant confirmation. Ask only when a value is missing or ambiguous. Do not infer
+conditions from a filename or prior run. Aerobic and anaerobic analyses are different runs,
+not panels silently mixed into one run. Save the exact input model and resolved config.
+
+## Pipeline and artifacts
+
+| Step | Question | Required methods | Primary artifacts |
+|---|---|---|---|
+| 0 | Is the request and environment valid? | model/condition/solver/R preflight | `01_preflight/` |
+| 1 | What is the production ceiling and growth trade-off? | theoretical yield, envelope | `02_yield/` |
+| 2 | What is the wild-type reference state? | pFBA reference | `03_reference/` |
+| 3 | Which single deletions improve product while retaining growth? | GPR mapping, MOMA-L2 and ROOM | `04_single_knockout/` |
+| 4 | Which knockout sets couple product to growth? | OptKnock and RobustKnock | `05_strain_design/` |
+| 5 | Which fluxes rise as product is enforced? | FSEOF and FVSEOF | `06_amplification/` |
+| 6 | Do forward analyses support the candidates? | loopless FVA diagnostic, flux response and paired sampling | `07_validation/` |
+| 7 | Can a reader audit every claim? | R rendering and run validation | `figures/`, reports, manifest |
+
+The numbered directories are fixed. A skipped or unavailable method is recorded explicitly;
+directories and tables are not silently renamed to hide it.
 
 ## Step 0 — Preflight
 
-**Goal.** Establish that the model grows, the product is reachable, and the solver is capable —
-**under the condition fixed above, not under the model's shipped defaults.**
+Run [`_preflight.md`](_preflight.md) under the confirmed condition before any search.
 
-**Call.** Apply the medium and build `CONDITION` first (see above), then follow `_preflight.md`
-(P1–P4; P5 only if you have expression data), then check what step 3 will be able to do:
+The complete workflow stops when:
 
-```python
-import importlib.util
-from cmm.core import supports
+- the model cannot grow under that condition;
+- the product is not an exchange reaction or has zero theoretical yield;
+- MOMA-L2 lacks QP support or ROOM lacks MILP support;
+- OptKnock/RobustKnock were requested but MILP or importable `straindesign` is unavailable;
+- the selected strain-design backend reports an unmet additional requirement;
+- `renderer="nature-r"` was requested but `Rscript` or a required package is unavailable.
 
-can_design = (
-    supports("MILP", model.solver.interface)
-    and importlib.util.find_spec("straindesign") is not None
-)
-print("step 3 mode:", "design (OptKnock)" if can_design else "screen (MOMA/ROOM fallback)")
-```
+There is no silent MOMA-L1 substitution in the canonical workflow. A narrower, explicitly
+approved run may use a different method, but its report must name the substitution and the
+scientific claim that was lost.
 
-**Branch.**
-- Theoretical yield zero → stop and report; the product cannot be made in this medium.
-  Everything below assumes a non-zero ceiling.
-- The preflight growth number is the wild-type growth **in this condition**. On anaerobic
-  `e_coli_core` that is 0.211663 h⁻¹, not the 0.873922 h⁻¹ of the aerobic model. Quoting the
-  aerobic figure inside an anaerobic run is the first symptom of a mixed-condition report.
-- `can_design` false → step 3 runs its LP fallback. Decide this now, not mid-run, and carry the
-  fact into the report: the run will produce candidates rather than a coupled design.
-  `straindesign` also needs Java, so a missing `java` on `PATH` has the same effect.
+Save preflight results, capabilities, package versions, model fingerprints before and after
+condition application, and the fully resolved condition.
 
----
+## Step 1 — Yield and production envelope
 
-## Step 1 — Theoretical yield and the growth/production trade-off
+`theoretical_yield` establishes reachability and the molar ceiling. `production_envelope`
+shows the feasible growth/product trade-off. Report carbon uptake, CO2 uptake, substrate
+uptake, and whether the carbon-balance diagnostic raises a warning; a large product flux is
+not interpretable without these quantities.
 
-**Goal.** Bound the problem. No intervention can exceed the theoretical yield, and the
-envelope shows what growth must be given up to approach it.
+Do not continue when yield is zero. Infeasible envelope points remain in the source table.
+Use the same condition object and resolved model state that every later step uses.
 
-**Preconditions.** Step 0 passed.
+## Step 2 — Wild-type reference
 
-**Call.**
+Use a deterministic pFBA reference unless an explicitly justified condition-specific
+reference is supplied by SC-02. Record wild-type growth and product flux and export the full
+reference state. MOMA, ROOM, and paired sampling must all refer to this same state and model
+fingerprint.
 
-```python
-from cmm.features import production_envelope, theoretical_yield
-from cmm.visualization import production_envelope_figure, save_figure, yield_figure
+An expression-derived reference changes the biological question. Do not mix pFBA, LAD, and
+E-Flux2 rows in one ranking as though they were replicate measurements.
 
-result = theoretical_yield(model, PRODUCT, condition=CONDITION)
-print(result.molar_yield, result.carbon_ceiling,
-      result.exceeds_carbon_ceiling, result.co2_fixed)
+## Step 3 — Single-knockout predictions
 
-envelope = production_envelope(model, PRODUCT, condition=CONDITION, points=20)
-frame = envelope.to_frame()
-```
+Evaluate the same single-deletion universe independently with:
 
-**Outputs.** `ProductionYield`, `ProductionEnvelope`.
+- MOMA-L2, which minimizes squared adjustment from the wild-type flux state; and
+- exact ROOM with the documented flux-prediction tolerance pair, which minimizes the number
+  of substantial flux changes.
 
-**Artifacts.**
-`02_yield/theoretical_yield.csv`, `02_yield/production_envelope.csv`,
-`figures/yield.png` (`yield_figure([result])`),
-`figures/production_envelope.png` (`production_envelope_figure(envelope)`).
+Keep method-specific tables separate. Every row includes target id and kind, solver status,
+growth, product flux, the method-specific objective, and coverage/GPR information. Preserve
+lethal and infeasible deletions. A gene with no blocked reaction is *uninformative*, not a
+validated neutral knockout.
 
-**Decision rule.**
-- `molar_yield > 1e-6` — otherwise stop (step 0 should have caught this).
-- **Read the envelope as step 3's feasibility check.** If `growth_max` falls as product rises,
-  production and growth compete, which is the usual precondition for a coupled design. If
-  `growth_min` is 0 across the whole range, the cell can always grow without producing, so
-  coupling has to be *created* by the knockouts — possible, but a harder search. Either way
-  step 3 proceeds; this reading sets the expectation.
-- Record `exceeds_carbon_ceiling` and `co2_fixed` together. A yield above the substrate's
-  carbon ceiling is only legitimate when CO₂ is being fixed; otherwise suspect the model.
-- **`co2_fixed=True` below the carbon ceiling is not a clean bill of health.** The ceiling check
-  is the only guard, so a CO₂-inflated yield that stays under the ceiling passes it silently.
-  Measured on anaerobic `e_coli_core`/`EX_succ_e`: molar yield **1.3906** with CO₂ uptake open
-  against **1.2000** with it closed, at a CO₂ exchange of −6.9529 and a ceiling of 1.5 — 15.9%
-  high, and `exceeds_carbon_ceiling` is `False` throughout. From 0.4.0 the media presets close
-  CO₂ *uptake* (secretion stays free), so this number changes; if you are reading an older run,
-  check whether its yield was obtained by taking up CO₂ that a closed anaerobic fermentation
-  does not supply.
+The primary figure is a two-panel scatter plot with growth rate on the x-axis and target
+production on the y-axis, one panel for MOMA and one for ROOM. Use identical limits and units;
+mark wild type and the declared viability floor; label the five highest-ranked candidates in
+each method panel when five eligible rows are available. A consensus table records agreement
+and disagreement without averaging the two models into a fictitious score.
 
-**Branch.** Comparing substrates or aeration? That is more than one condition, so it is more
-than one run: build one `Condition` per case, loop `theoretical_yield` over them, pass all
-results to one `yield_figure`, then **pick one condition, rebuild the model state for it, and
-run every remaining step under that one.** Do not carry a second condition forward implicitly.
+Those method-specific display ranks define the canonical single-knockout candidate universe:
+take D1–D5 from MOMA and D1–D5 from ROOM, then deduplicate only equivalent blocked-reaction
+signatures. The result contains at most ten candidates. It is a coverage definition, not a
+benefit or recommendation filter. Equivalent model phenotypes are simulated once, while every
+represented gene id remains in the validation index provenance. Every unique candidate in this
+universe proceeds to matched wild-type/knockout sampling in step 6. A candidate with exactly one
+blocked reaction also receives a pre-deletion wild-type reaction→product scan: reference↔zero
+when reference flux is nonzero, otherwise the full feasible reaction domain as exploratory
+response. A multi-reaction signature remains explicit unavailable/skipped because it has no
+unambiguous single flux-response axis. Coverage does not depend on which method proposed a
+candidate or whether it later passes the positive evidence policy.
 
-**Failure → action.** `ValueError: no uptake capacity` means the substrate exchange is closed —
-fix the medium in step 0. `no carbon uptake exchange found` means auto-detection failed; pass
-`substrate=` explicitly.
+Reaction and gene ids are different identifier spaces. Map through the model GPR before
+presenting an experimental deletion. For `or` rules, all isozyme genes may need deletion; for
+`and` rules, deleting one required subunit may block the reaction. Preserve the rule in the
+report instead of reducing it to an unexplained gene list. The canonical export records this
+audit trail in `04_single_knockout/gene_knockout_mapping.csv`, including inert genes rather
+than quietly treating them as validated neutral deletions. The MOMA and ROOM result tables in
+the report join this mapping so each displayed gene includes blocked reaction id(s), reaction
+name(s), and the relevant GPR, not only a model-specific gene id.
 
-**Solver.** LP.
+## Step 4 — Growth-coupled strain design
 
----
+Run OptKnock and RobustKnock as inverse design methods and export their results separately.
+Each design reports knockout set, growth, maximum product, guaranteed product, coupling
+verdict, solver, condition, search limits, and the strain-design seed. Set
+`strain_design_seed` explicitly in the workflow config (default `0`); the workflow forwards the
+same value to both methods. Direct calls likewise pass `seed=` to `optknock` and `robustknock`.
+The supported range is the Gurobi-compatible integer range `0..2_000_000_000`.
 
-## Step 2 — Reference flux state
+The seed is part of the computational method, not an incidental runtime setting.
+`straindesign` otherwise creates a seed internally, which can send identical MILP formulations
+through different search paths and change runtime or the returned solution pool. Never compare
+or publish unseeded searches as though they were exact reruns. Record the seed in each method's
+metadata and the run-level config/provenance.
 
-**Goal.** Describe what the cell does *now*, and fix the wild-type numbers every later step is
-compared against.
+Rank by `guaranteed_product`, never by `max_product`. Maximum product is a cooperative upper
+bound; guaranteed product is the worst production among growth-optimal states. A design with
+zero guaranteed product is not growth-coupled even if its maximum product is large.
 
-**Scope.** The design search in step 3 does **not** use a reference state — OptKnock optimizes
-over the model directly. So this step is narrower than it looks. What it actually feeds:
+Do not treat the number of designs returned by a solver pool as a stable biological result.
+Report the configured search limits and ranked designs. Map reaction designs to GPR-resolved
+gene interventions before recommending experiments.
 
-- the wild-type product flux and growth rate that every "improvement" is measured against;
-- the reference MOMA/ROOM needs in step 5a to predict the designed strain's immediate phenotype;
-- the comparison point for the sampled ensemble in step 5b;
-- the hand-off from `SC-02`, when the question is condition-specific.
+This step and the single-knockout step answer different questions. OptKnock/RobustKnock do not
+replace MOMA/ROOM, and a beneficial MOMA/ROOM deletion does not prove growth coupling.
 
-One reference (`pfba`) is enough for all four. Build more only when you have expression data and
-the condition matters — and note that extra references no longer strengthen the *design*, only
-the interpretation.
+## Step 5 — Amplification targets
 
-**Preconditions.** Step 1 gave a non-zero yield.
+Run both FSEOF and FVSEOF under the confirmed condition. Export reaction classifications,
+ranking quantities, and tidy enforced-product trajectories. Show the top 10 actionable FSEOF
+targets and the top 10 actionable FVSEOF targets as independent method-specific lists; do not
+filter either list to their intersection. An amplification candidate is a hypothesis about
+flux direction, not a prescription for a gene-expression fold change.
 
-**Call.**
+For each method-specific candidate, report its own rank, direction, GPR actionability, loop
+diagnostic, and step 6 response. FVSEOF robustness and agreement between methods are useful
+descriptive columns, but neither substitutes for target-level forward validation and neither is
+an admission rule. Keep reversible-reaction direction and boundary flags visible; do not hide
+them inside a single opaque score.
 
-```python
-from cmm.core import supports
-from cmm.features import reference_flux
+For every candidate in the independent top-10 lists, compare standard and fastSNP loopless FVA
+capacity under the enforced product and biomass floors. Export the complete diagnostic to
+`07_validation/amplification_loop_diagnostic.csv`. The union of both lists is the canonical
+amplification candidate universe; every member receives a flux-response index row in step 6.
+Keep every method-specific top-10 candidate in its publication trajectory and visibly mark
+complete, flagged, failed, or inconclusive diagnostics. A loop-flagged or unresolved candidate
+still receives its flux-response scan and retains its diagnostic/eligibility columns, but it is
+not promoted to supported evidence or a recommendation and must not be interpreted as
+cycle-free. The raw FSEOF/FVSEOF rankings remain unchanged for auditability.
 
-                                    # inherits the condition from the model state applied in
-                                    # step 0 — see the note under **Decision rule**
-references = {"pfba": reference_flux(model, "pfba")}
+## Step 6 — Forward validation
 
-if expression is not None:                      # gene -> value, ids matching model.genes
-    references["lad"] = reference_flux(model, "lad", gene_expression=expression)
-    if supports("QP", model.solver.interface):
-        references["eflux2"] = reference_flux(model, "eflux2", gene_expression=expression)
+### Flux response
 
-wild_type_growth = references["pfba"].get(BIOMASS)
-wild_type_product = references["pfba"].get(PRODUCT)
-```
+Create flux-response coverage for the complete canonical candidate universes, with no
+downstream selection or recommendation filter:
 
-**Outputs.** `dict[str, FluxState]`.
+- every unique MOMA/ROOM D1–D5 single-knockout candidate; and
+- every unique reaction in the independent FSEOF top 10 and FVSEOF top 10.
 
-**Artifacts.** `03_reference/reference_<method>.csv` per state; wild-type product flux and
-growth in the report.
+Execute those candidates as follows:
 
-**Decision rule.** `pfba` is the reproducible default — a unique minimal-total-flux solution.
-Use an omics-derived state instead when the run is about a specific condition, and say which
-one the wild-type numbers came from, because the improvement figures are relative to it.
+- For amplification targets, force the nominated reaction across its feasible range and use
+  product exchange as the response while retaining the configured growth floor.
+- For a knockout candidate with one blocked reaction, keep the pre-deletion wild-type
+  background and use product exchange as the response under the same growth floor. Scan the
+  closed interval between nonzero reference flux and zero. If reference flux is already zero,
+  scan the full feasible target-reaction domain and label it exploratory; it is not causal
+  support for deletion. Neither scan simulates the complete gene deletion.
+- For a knockout signature with multiple blocked reactions, retain an explicit
+  unavailable/skipped index row stating that no unambiguous single x-axis exists. Never select
+  one blocked reaction silently.
 
-`reference_flux` takes no `condition=`; it reads the model exactly as step 0 constrained it.
-That is the inheritance, and it only holds if nothing has changed the medium since. Record the
-reference state's own fingerprint alongside it so the report can prove which condition produced
-it — on anaerobic `e_coli_core` the wild-type reference gives growth 0.211663 and
-`EX_succ_e` = 0.0.
+Figure 5 uses the standard response coordinates for every completed scan: enforced candidate-
+reaction flux on the x-axis (`target_flux`) and target-product flux on the y-axis
+(`response_flux`). Growth is the configured minimum-growth constraint and secondary
+`biomass_flux` output, not a Figure 5 axis. MOMA/ROOM and matched knockout sampling, rather than
+the pre-deletion reaction scan, establish the complete-knockout phenotype. Show zero-reference
+full-domain scans as exploratory, not causal deletion evidence.
 
-**Branch.**
-- No expression data → `pfba` alone. That is the normal case and costs the run nothing.
-- No QP solver → LAD instead of E-Flux2, and record the substitution (`AGENTS.md` §3.3).
-- Several conditions in one expression table → this is `SC-02`; come back here with the
-  condition of interest.
+Every candidate has a row in `flux_response_index.csv`, and loop flags do not suppress the
+numerical scan. Preserve loop status as separate eligibility evidence for later synthesis. If
+an unavailable capability, lethal/infeasible background, or analysis failure prevents a
+meaningful scan, keep the candidate as an explicit non-complete status row with a reason. It
+must not vanish from the index or be replaced by a smaller top subset.
+`max_flux_response_targets` is checked before execution as a worst-case capacity guard; it must
+never be used to slice this candidate list at runtime.
 
-**Failure → action.** Near-zero gene id overlap → stop, per preflight P5. A non-optimal
-integration status means the expression-derived bounds are infeasible; report it rather than
-falling back silently.
+Report whether the response supports, contradicts, or is inconclusive for the proposed
+direction. Preserve infeasible points and phase boundaries. A flat curve does not support an
+intervention; an optimum at an artificial bound or a loop-dominated range is a limitation,
+not a high-confidence target.
 
-**Solver.** LP for pfba/lad; **QP** for eflux2.
+### Paired random sampling for single knockouts
 
----
+Sampling answers whether a canonical deletion candidate changes the feasible flux
+distribution. For every unique MOMA/ROOM D1–D5 candidate, compare a wild-type ensemble with an
+ensemble from the knockout model using the same condition, objective conditioning, sampler,
+seed policy, sample count, thinning, and reaction set. Do not limit sampling to beneficial,
+consensus, recommended, or visually selected candidates.
 
-## Step 3 — Knockout design
+Export sample-level or auditable summary data for both states and report medians, intervals,
+and distribution shifts for product, biomass, the blocked reaction(s), and the mechanistically
+relevant reactions. Do not interpret correlated Markov-chain draws as independent biological
+replicates or headline an unqualified p-value. A sampler failure or infeasible knockout is a
+reported validation result.
 
-**Goal.** Find a small knockout set such that a cell maximizing its own growth **cannot avoid**
-making the product, and quantify the guaranteed production rate.
+Every candidate has a row in `random_sampling_index.csv`. A lethal/infeasible knockout,
+unavailable sampler, or failed sampling run remains as an explicit status row with its reason.
+Random sampling is targeted to the canonical single-knockout candidate universe in this
+workflow. It is not a generic decorative violin plot and does not replace the MOMA/ROOM
+prediction.
 
-This is the inverse half of the scenario: you supply the goal, the bilevel MILP searches the
-knockout sets. It is also where the coupling claim is either earned or explicitly forgone.
+### Evidence synthesis
 
-**Preconditions.** Step 1 gave a non-zero yield. Step 0 recorded whether MILP, `straindesign`
-and Java are available.
+The consensus table keeps claim types separate:
 
-**Call.**
+| Intervention | Proposal method | Forward check | Growth retained | Product effect | Verdict |
+|---|---|---|---|---|---|
+| single knockout | MOMA and/or ROOM | MOMA/ROOM + paired sampling; WT reaction scan when single-reaction | explicit | explicit | support / contradict / inconclusive |
+| knockout set | OptKnock/RobustKnock | perturbed response | explicit | guaranteed and maximum | coupled / uncoupled / unavailable |
+| amplification | FSEOF or FVSEOF | loopless diagnostic + target-to-product response | explicit | direction and range | support / contradict / inconclusive |
 
-```python
-import pandas as pd
-from cmm.features import optknock, robustknock
+Do not collapse these rows into a single score whose meaning changes by method.
 
-optimistic = optknock(model, PRODUCT, condition=CONDITION,
-                      max_knockouts=3, max_solutions=5, min_growth=0.05)
-guaranteed = robustknock(model, PRODUCT, condition=CONDITION,
-                         max_knockouts=3, max_solutions=8, min_growth=0.05)
+`07_validation/recommendations.csv` is a strict positive-evidence subset, not another ranking:
+a single-gene deletion needs a selected beneficial MOMA-L2/ROOM result, positive paired-
+sampling product shift, and retained growth. A nonzero-reference WT reaction titration may add
+mechanistic support but does not replace those complete-knockout analyses; a zero-reference
+full-domain scan is exploratory and never causal support for deletion. An
+amplification target may originate from either method and needs a supporting response plus a
+complete non-flagged loopless diagnostic; a multi-knockout recommendation needs a RobustKnock
+design with positive guaranteed product and retained growth. OptKnock remains a required design
+table but is not by itself worst-case evidence. Never recommend a combined
+knockout-amplification strain because this workflow has not simulated that combined
+intervention. Rejected or unvalidated hypotheses remain in their source tables.
 
-designs = pd.DataFrame([
-    {
-        "knockouts": ", ".join(d.knockouts),
-        "growth": d.growth,
-        "max_product": d.max_product,
-        "guaranteed_product": d.guaranteed_product,
-        "growth_coupled": d.growth_coupled,
-    }
-    for d in guaranteed.designs
-]).sort_values("guaranteed_product", ascending=False)
-```
+## Step 7 — Report and validation
 
-**Outputs.** `StrainDesignResult` with `.designs` and `.best()`; each `StrainDesign` carries
-`knockouts`, `growth`, `max_product`, `guaranteed_product`, `growth_coupled`.
-
-**Artifacts.** `04_design/optknock.csv`, `04_design/robustknock.csv`.
-
-**Decision rule.** **Rank by `guaranteed_product`, never `max_product`.** `max_product` is what
-the cell *could* make if it cooperated; `guaranteed_product` is what it makes at worst among
-growth-optimal states. Only `guaranteed_product > 0` is growth-coupled, and only then may a
-design be called a design rather than a possibility. `robustknock` optimizes the worst case
-directly, so prefer its output when both return results.
-
-**The number of designs is not a reproducible quantity — the top design is.** A MILP solution
-pool enumerates near-optimal alternatives in an order that depends on the solver's internal
-state, so running `fba`/`pfba` or `production_envelope` earlier in the same process can change
-how many designs come back. The reference anaerobic run returned **18 OptKnock and 41
-RobustKnock designs** (all 41 growth-coupled); another process may return a different count.
-Report the ranked top designs and their guaranteed products; **do not headline the count**, and
-if you mention it, say it is pool-dependent.
-
-**The design is a property of the condition, and the condition must be the one from step 0.**
-On `glucose_anaerobic` `e_coli_core`, both `optknock` and `robustknock` return the same top
-design:
-
-| Condition | Knockouts | Growth | Guaranteed product | Coupled |
-|---|---|---|---|---|
-| `glucose_anaerobic` | `ACALD, D_LACt2, THD2` | 0.090648 | **9.910758** | yes |
-| `glucose_aerobic` | `ACALD, D_LACt2, THD2` | 0.873922 | 0.000000 | no |
-| `glucose_anaerobic` | `CO2t, FORti, PGI` | 0.000000 | — | **does not grow** |
-| `glucose_aerobic` | `CO2t, FORti, PGI` | 0.143322 | 10.406319 | yes |
-
-Read the table as a warning, not as a menu. **Earlier versions of this document presented
-`{CO2t, FORti, PGI}` at `guaranteed_product` 10.4063 as the anaerobic answer. It is an aerobic
-result** — that deletion set does not grow anaerobically at all, so its guaranteed product is
-undefined under the condition the rest of that run used. The mistake was produced exactly as
-described above: an aerobic medium was applied while `aerobic=False` was passed to functions
-that had the parameter, and the design search, which never had it, ran with oxygen open. The
-same design ranked first under either condition and the numbers looked plausible under both,
-which is why nothing caught it. **Print the medium and the oxygen bounds next to every design
-table.**
-
-The anaerobic design's gene-level deletions, for reference:
-`ACALD` → `b0351 or b1241`; `D_LACt2` → `b2975 or b3603`; `THD2` → `b1602 and b1603`. An `or`
-rule requires deleting **all** listed genes; an `and` rule requires deleting **any one**.
-
-**Branch.**
-- **No MILP, no `straindesign`, or no Java → run the LP fallback below.** This is the only
-  supported substitution for this step.
-- No design found → raise `max_knockouts` (cost grows fast) or lower `min_growth`. Changing the
-  medium or the aeration is **not** a parameter tweak: it is a different experiment, so go back
-  to step 0, reset the condition, and re-run every step under it. If still nothing, report that
-  no coupled design exists under these constraints. That is a legitimate negative result, not a
-  failed run.
-- Designs found but every `guaranteed_product == 0` → report them as *uncoupled candidates* and
-  carry them into step 5 as hypotheses, not as strains.
-- **Map reaction knockouts back to genes** before anything experimental — a reaction is not
-  deletable:
-  ```python
-  for rid in guaranteed.best().knockouts:
-      rxn = model.reactions.get_by_id(rid)
-      print(rid, sorted(g.id for g in rxn.genes), rxn.gene_reaction_rule)
-  ```
-  An `or` rule means every listed gene must go. Step 6 requires this gene-level list.
-- Want an exhaustive single-deletion study alongside the design — essentiality classes,
-  explicit thresholds, a genome-scale strategy → run
-  [`SC-03`](SC-03-knockout-screening.md). It answers a different question and is a complete
-  study in its own right, not a precursor to this step.
-
-**Failure → action.** MILP timeouts are common at genome scale. Reduce `max_solutions` first,
-then `max_knockouts`, and record what you reduced — a silently shrunk search is a silently
-weaker claim.
-
-**Solver.** **MILP** + `straindesign` + Java.
-
-### Step 3 fallback — no MILP available
-
-Run a single-deletion screen instead. It finds candidates, not designs.
+Follow [`_reporting.md`](_reporting.md). Render with:
 
 ```python
-from cmm.features import batch_comparison, gene_perturbations
-
-result = batch_comparison(
-    model, references["pfba"], gene_perturbations(model),
-    method="moma_l1",                       # LP; moma_l2 needs QP, room needs MILP
-    product_reaction=PRODUCT,
-)
-screen = result.to_frame()                  # and save result.metadata beside the CSV
+render_production_report(run_dir, renderer="nature-r")
+validation = validate_production_run(run_dir)
 ```
 
-**Decision rule.** A candidate must satisfy all three: `status == "optimal"` (not lethal),
-`objective >= 0.1 * wild_type_growth` (state your threshold — 10% is a starting point, not a
-standard), and `product_flux > wild_type_product`. Rank by `product_flux` descending.
-
-**Artifacts.** `04_design/screen_<reference>_<method>.csv`. Keep the lethal rows — they are the
-essentiality result, and filtering them makes the table look cleaner than the biology is.
-
-**Id space.** `gene_perturbations` returns *gene* ids (`b0722`) while step 4 returns *reaction*
-ids (`PPC`). They never intersect, so a step 5c consensus built naively over both is silently
-empty. Either screen with `reaction_perturbations(model)`, or map through the GPR before
-crossing:
-
-```python
-from cmm.features._perturbation import blocked_reactions_for_genes
-
-screen_candidates = screen.loc[                 # the DataFrame built just above
-    (screen["status"] == "optimal")
-    & (screen["objective"] >= 0.1 * wild_type_growth)
-    & (screen["product_flux"] > wild_type_product),
-    "target_id",
-]
-ko_reactions = {
-    r for t in screen_candidates for r in blocked_reactions_for_genes(model, [t])
-}
-```
-
-(`screen_candidates` is named apart from step 5b's `candidates`, which is a list of *reaction*
-ids from step 4 — the whole point of this paragraph is that the two id spaces do not mix.)
-
-**What the report must say.** This substitution changes the scientific claim, so `AGENTS.md`
-§3.3 applies in full. State all three of these in **Setup** and again in **Limitations**:
-
-1. the method substituted and why (which of MILP / `straindesign` / Java was missing);
-2. that only **single** deletions were examined — no combinations were searched;
-3. that **coupling was not established**, and therefore no target in this report may be
-   described as growth-coupled.
-
-**Solver.** LP (`moma_l1`). `moma_l2` is QP, `room` is MILP — if you had MILP you would be
-running the design search instead.
-
----
-
-## Step 4 — Amplification targets
-
-**Goal.** Find reactions that must carry more flux for the product to increase — the
-over-expression candidates — and the reactions that must carry less.
-
-**Preconditions.** Step 1 gave a non-zero yield.
-
-**Call.**
-
-```python
-from cmm.features import fseof, fvseof
-from cmm.visualization import fseof_figure, fvseof_figure
-
-scan = fseof(model, PRODUCT, condition=CONDITION, n_steps=10)
-amplify = scan.amplification_targets()          # actionable_only=True by default
-knockdown = scan.knockout_targets()
-
-robust_scan = fvseof(model, PRODUCT, condition=CONDITION, n_steps=10, biomass_fraction=0.95)
-robust = robust_scan.robust_targets()
-```
-
-**Outputs.** `FseofResult`, `FvseofResult`.
-
-**Artifacts.** `05_amplification/fseof_trends.csv`, `05_amplification/fvseof_{mean,forced,
-capacity}.csv`, `figures/fseof.png`, `figures/fvseof.png`.
-
-**Decision rule.** Priority order:
-1. `set(robust) & set(amplify)` — rising mean flux **and** rising forced minimum. The reaction
-   cannot avoid carrying more flux, so it is the strongest amplification evidence CMM offers.
-2. `amplify` alone — rising mean flux only; the network *may* route around it.
-3. `knockdown` — feed to step 3's candidate list if not already there.
-
-`robust_scan.amplification_targets()` is already in Park et al.'s own priority order — types
-1–3 by the joint sign of ΔV_avg and Δl_sol, ordered by ascending mean `l_sol` — and
-`robust_scan.park_type` gives the 1–9 index per reaction. Report that order as Park's; the
-`robust` intersection in rule 1 is CMM's own extra filter on top of it, not a re-ranking by
-them.
-
-Keep `actionable_only=True`: it drops boundary, objective, and no-GPR reactions, which are not
-things anyone can engineer.
-
-**Two of these are CMM's constructs, not the source papers', and the report must say so.**
-CMM's FSEOF selection rule (endpoint difference, positive linear slope, no sign reversal,
-baselined at the 10% scan level) is deliberately stricter than the criterion in Choi et al.
-(2010), which selects on `|v_j|max > |v_j^initial|` and `v_j^max · v_j^min ≥ 0`. On anaerobic
-`e_coli_core`/succinate Choi's rule additionally admits the acetate-secretion branch
-(`ACKr`, `ACt2r`, `EX_ac_e`, `PTAr`) — reactions the design search in step 3 *deletes* — so CMM
-keeps its own rule. Likewise FVSEOF's `robust_targets()` (forced FVA minimum rising
-monotonically) is CMM's addition; it is not the variability criterion of Park et al. (2012).
-Cite Choi et al. and Park et al. for the methods, and attribute these two selection rules to
-CMM.
-
-**Branch.** Empty `robust_targets()` → fall back to `amplify`, and say the targets lack the
-robustness check. Empty `amplify` too → the product does not respond to enforced flux under
-this medium. That is a finding about this condition; report it as such, and if you then try a
-different aeration or substrate, restart from step 0 rather than swapping it in here.
-
-**Failure → action.** FSEOF on a zero-yield product returns nothing useful; step 1 gates this.
-Genome-scale scans are slow — narrow with `reactions=` to a pathway of interest rather than
-reducing `n_steps` below 10, which coarsens the trend classification and, for FVSEOF, falls
-below the resolution Park et al. specify.
-
-**Solver.** LP (FVSEOF runs an FVA per step, so it costs more wall clock, not more capability).
-
----
-
-## Step 5 — Verification
-
-**Goal.** Test what steps 3 and 4 proposed. Those steps are *inverse* — they search for
-interventions. This step is *forward*: it applies each intervention and predicts what follows.
-
-Step 3 and step 4 produce different kinds of thing, so verification runs in two tracks:
-
-| Track | Verifies | Method | Open question it answers |
-|---|---|---|---|
-| **5a** | the knockout design | MOMA/ROOM, `flux_response` on the knocked-out model | what does this strain do the day it is built? |
-| **5b** | the amplification targets | `flux_response`, sampling | does pushing flux here actually buy product? |
-| **5c** | both together | consensus table | which interventions combine into one strain? |
-
-**Preconditions.** A design (or fallback candidates) from step 3, amplification targets from
-step 4, and a reference state from step 2.
-
-### 5a — The design: what does the strain do immediately after deletion?
-
-```python
-from cmm.features import flux_response, knockout_comparison
-from cmm.visualization import flux_comparison_figure, flux_response_figure
-
-best = guaranteed.best()
-immediate = knockout_comparison(model, references["pfba"], best.knockouts, method="moma_l2")
-
-with model:                                   # design applied, then restored;
-    for rid in best.knockouts:                # the medium from step 0 is untouched
-        model.reactions.get_by_id(rid).knock_out()
-    designed_scan = flux_response(model, PRODUCT, condition=CONDITION,
-                                  biomass_fraction=0.0, n_steps=20)
-```
-
-**Decision rule.** MOMA assumes a *minimal adjustment* from wild type, so it describes the
-freshly built strain — before any adaptation. Read it against the design's own numbers:
-
-| MOMA result | Reading |
-|---|---|
-| `status != "optimal"` | The design is lethal under minimal adjustment. **Discard it.** |
-| `fluxes[PRODUCT]` ≈ `guaranteed_product` | The strain works as designed from day one. |
-| `fluxes[PRODUCT]` ≪ `guaranteed_product` | The design still holds; the strain needs adaptive evolution to reach it. Report the gap — it is an estimate of how much ALE is required. |
-
-**MOMA cannot falsify the coupling claim.** Coupling was proven in step 3 by the bilevel MILP
-at the growth optimum; MOMA answers a different question under a different cell model. A low
-MOMA product is a schedule, not a refutation. Do not drop a coupled design on this basis.
-
-The `designed_scan` shows the relationship the knockouts created, and its
-`feasible_range()` is the crispest evidence of coupling you will get from a forward method: a
-lower bound above zero means the strain **cannot** produce less than that, whatever it does. On
-anaerobic `e_coli_core` the `{ACALD, D_LACt2, THD2}` design gives `(4.794286, 13.905778)` over
-20 of 20 feasible scan points — zero succinate is simply not a solution any more. Compare that
-lower bound against the design's own `guaranteed_product` of 9.910758: the scan bounds the
-worst case over *all* feasible states, the MILP bounds it over the growth-optimal ones, so the
-scan's floor is the looser of the two and both belong in the report.
-
-**Artifacts.** `06_validation/design_moma.csv`, `06_validation/design_flux_response.csv`,
-`figures/design_flux_comparison.png`, `figures/design_flux_response.png`.
-
-**Solver.** **QP** for `moma_l2` — use `moma_l1` (LP) on an LP-only solver and say so; LP for
-the scan.
-
-### 5b — Amplification targets: does forcing flux buy product?
-
-```python
-from cmm.features import flux_response
-from cmm.visualization import flux_response_figure
-
-responses = {}
-for target in candidates:                    # amplification candidates from step 4
-    responses[target] = flux_response(
-        model, target, response=PRODUCT,
-        condition=CONDITION,                 # the same condition as every step above
-        biomass_fraction=0.3,                # keep the cell viable across the scan
-        n_steps=20,
-    )
-```
-
-**Decision rule per target**, in this order — the first two are gates, and skipping them is how
-a meaningless number becomes a recommendation:
-
-1. **Does the response vary at all?** Compare `optimum().response_flux` against the response at
-   the wild-type target flux. If the curve is essentially flat, this reaction does not drive
-   the product and the "optimum" is an arbitrary point on a plateau. Drop the target.
-   ```python
-   feasible = response.to_frame().query("status == 'optimal'")
-   spread = feasible["response_flux"].max() - feasible["response_flux"].min()
-   drives_product = spread > 0.05 * feasible["response_flux"].max()
-   ```
-2. **Is the target physically meaningful?** Check the optimum against the reaction's own
-   bounds and its sampled distribution from 5b. A reaction whose optimum sits at hundreds of
-   mmol gDW⁻¹ h⁻¹ is usually part of a thermodynamically infeasible loop (`FRD7`/`SUCDi` in
-   `e_coli_core` are the classic pair), not an engineering target. Loops show up in 5b as a
-   huge sampled standard deviation.
-3. **Which direction, and is there one?** `optimum().target_flux` versus
-   `wild_type["target_flux"]`: higher means over-express, lower means knock down, and the ratio
-   is roughly how much. Equal means **no intervention** — the cell is already at the best value
-   for this reaction, so it is not a target however it ranked in step 4.
-   **This routinely contradicts step 4.** On anaerobic `e_coli_core` succinate, **7 of the 17
-   reactions FSEOF classifies as `amplify` — `FBA`, `FUM`, `GAPD`, `MDH`, `PGI`, `PGM`, `TPI` —
-   have a forward-scan optimum *below* their wild-type flux**: the forward method says knock
-   them down. `GLCpts`'s optimum sits exactly at its wild-type flux, so it is no intervention at
-   all. FSEOF observed a correlation across enforced product levels; the response scan actually
-   tested the intervention. Trust the forward method and report the disagreement rather than
-   quoting whichever is more flattering.
-4. `feasible_range()` bounds how far the intervention can go before the cell stops solving.
-   It is computed by FVA on the scanned reaction, so it is the reaction's true range under the
-   applied growth floor and not an artefact of where the grid points happened to land. (Before
-   0.4.0 it was read off the scan grid and was inward-biased whenever a growth floor was
-   applied — on `PGI` at the documented default `n_steps=20` it returned (−37.3684, 6.8421)
-   against a true FVA range of (−38.0997, 9.9463), understating the headroom by 31%. Do not
-   quote a pre-0.4.0 `feasible_range` as a bound.)
-5. **The shadow price of the response with respect to the target** — `d(response)/d(target)`,
-   returned exactly by the LP dual — says how much product one more unit of enforced flux buys,
-   and the phase boundaries say where that rate changes. A boundary *inside* the useful range
-   means pushing past it costs product, so the intervention has a ceiling worth reporting.
-   This replaces the `bottleneck` field removed in 0.4.0: that field located the steepest
-   finite-difference decline, which for a piecewise-linear LP response curve is an artefact of
-   the grid — its reported location moved by up to 29.53 flux units as `n_steps` went 6 → 160,
-   and its `found` flag inverted on `PGI`, `TPI` and `EX_o2_e`. **No published criterion defines
-   a bottleneck as the argmin of a finite-difference slope**; regions of constant shadow price
-   and the boundaries between them are the published objects (Edwards, Ramakrishna & Palsson
-   2002). Do not cite any paper for the removed field, and do not carry its numbers forward.
-
-**`biomass_fraction` is not optional here.** With no growth floor the scan reports what a
-non-growing cell could do, which is not a strain.
-
-#### Sampling: is the predicted flux forced, or one of many optima?
-
-```python
-from cmm.features import random_flux_sampling
-from cmm.visualization import sampling_figure
-
-ensemble = random_flux_sampling(model, n=1000, condition=CONDITION, seed=0)
-statistics = ensemble.statistics()                          # method="achr" for small n
-```
-
-**Decision rule per target.** Compare the reference's predicted flux against the sampled
-distribution for that reaction:
-- narrow distribution (small `std` relative to `mean`) → the constraints pin this flux, and the
-  prediction is solid;
-- wide distribution → the reference value was one arbitrary choice among alternate optima, so a
-  target ranked on that value is weak evidence. Say so in the report rather than dropping it.
-
-`ensemble.correlation()` shows which reactions co-vary — a target strongly correlated with the
-product exchange is mechanistically plausible.
-
-Use `reference_constrained_sampling(model, references["pfba"], ...)` instead when the question
-is "how much could this *prediction* vary", rather than "what can the network do at all".
-
-Sampling also supports 5a: sample inside the same `with model:` block that applies the
-knockouts, still passing `condition=CONDITION`, to see the flux space the design creates. A
-knockout set that leaves no feasible space is lethal.
-
-### 5c — Combining the two tracks into one strain proposal
-
-**First put everything in the same id space.** Step 3's designs are *reaction* ids; step 4's
-targets are *reaction* ids; but the step 3 fallback screens *gene* ids. Crossing gene ids with
-reaction ids yields an all-`False` table that reads as "no method agreed" when nothing was ever
-compared. Map through the GPR before crossing.
-
-Then build one table per proposed strain, not per isolated target:
-
-| Design | Over-express | Knock out (rxn) | Knock out (genes) | Growth | Guaranteed product | MOMA immediate | Coupled | Evidence |
-|---|---|---|---|---|---|---|---|---|
-
-- **Over-express** — step 4 targets that passed 5b's three gates.
-- **Knock out** — the step 3 design, with its GPR-resolved gene list.
-- **MOMA immediate** — 5a's prediction for the freshly built strain.
-- **Coupled** — `guaranteed_product > 0`. On the LP fallback this column is `not established`
-  for every row; never leave it blank.
-- **Evidence** — which independent methods support each part.
-
-**Decision rule.** A design supported by the inverse method (step 3 coupling proof) *and*
-surviving the forward check (5a not lethal) is the strongest claim CMM supports. Amplification
-targets are ranked separately by how many of {FSEOF, FVSEOF-robust, 5b response} agree. Keep the
-two rankings distinct inside the row — they were produced under different cell models and a
-single merged score would hide that.
-
-**Artifacts.** `06_validation/flux_response_<target>.csv` per target,
-`06_validation/sampling_statistics.csv`, `06_validation/consensus.csv`,
-`figures/flux_response_<target>.png`, `figures/sampling.png`.
-
-**Failure → action.** Infeasible response points are data — keep them. A sampler that will not
-converge (`RuntimeError` from `_draw`) usually means the model is over-constrained; loosen the
-condition or reduce `thinning`. If `optgp` gives unstable statistics, raise `n` above 1000 or
-switch to `achr`, and record which you used.
-
-**Solver.** LP for both.
-
----
-
-## Step 6 — Report
-
-Follow `_reporting.md`. Scenario-specific requirements:
-
-- **The recommended table is per strain proposal**, in the 5c shape — over-expression targets
-  and the knockout design in one row, with growth, guaranteed product, MOMA immediate phenotype,
-  and the coupling verdict.
-- **Give the gene-level deletions** implied by every reaction knockout, including where an `or`
-  GPR requires deleting several genes. A reaction id is not something anyone can delete.
-- **Never quote `max_product` without `guaranteed_product` beside it.**
-- **State the intervention direction quantitatively** where 5b provides it ("increase PGI flux
-  from 4.9 to about 6.8 mmol gDW⁻¹ h⁻¹").
-- **If step 3 used the LP fallback**, Setup and Limitations must both carry the three
-  disclosures listed there: which capability was missing, that only single deletions were
-  examined, and that coupling was not established.
-- **State the condition once, in Setup, and never restate it differently.** Give the medium
-  preset name, the oxygen exchange bounds, the substrate and its uptake rate, and the model
-  fingerprint taken after the medium was applied. Every number in the report comes from that
-  one condition.
-- **Limitations** must include: predictions are hypotheses requiring experimental validation;
-  the medium, substrate, and aeration assumed; that coupling is a property of the model's
-  growth-maximizing assumption while MOMA predicts the immediate post-deletion phenotype, so a
-  gap between them means adaptation rather than error; and any solver capability that forced a
-  substitution.
-
----
+The run is complete only when validation reports no errors. The report must include:
+
+- the confirmed condition and solver/R capability table;
+- method-specific MOMA and ROOM results and their 2D growth/product figure;
+- separate OptKnock and RobustKnock tables ranked by guaranteed product;
+- independent top-10 FSEOF and top-10 FVSEOF trajectories and classifications;
+- loopless-capacity diagnostics, target-indexed flux-response, and paired-sampling evidence;
+- limitations, including model scope, solver/search limits, alternative optima, GPR mapping,
+  and the need for experimental validation;
+- links from every numerical claim and figure caption to source CSVs.
+
+The manuscript renderer writes English labels, 300-DPI raster files, and editable PDF/SVG
+counterparts. It fails visibly on missing R packages, a nonzero renderer exit, missing source
+data, or incomplete figures.
 
 ## Cross-checks
 
-Before writing the report, confirm the pipeline is internally consistent:
-
-- `guaranteed_product <= max_product` for every design. A violation is a reporting error.
-- No design's product and no recommended target's predicted product exceeds the step 1
-  theoretical maximum.
-- Step 5b's optimum growth is consistent with the step 1 envelope at that product flux.
-- A reaction appearing as both an amplification target and part of the knockout design is a
-  contradiction — usually a sign the two came from different aeration or substrate settings.
-  Resolve it or report it explicitly.
-- The wild-type product flux is the same number everywhere it appears.
-- Every knockout in the design is a real reaction id present in the model, and every one has a
-  gene-level mapping in the report.
-- The consensus table is not all-`False` in its cross-method columns. If it is, the tracks were
-  compared in different id spaces (genes vs reactions).
-- No recommended target is a known futile-cycle reaction. Check the sampled standard deviation:
-  a reaction ranging over hundreds of flux units in an ensemble is a loop artifact.
+- The config, provenance, pinned model, and all result metadata have the same condition and
+  model fingerprint.
+- MOMA and ROOM cover the same deletion universe; class counts include lethal/infeasible and
+  uninformative rows.
+- Every plotted point is present in a CSV, and every D1–D5 display label resolves to one row.
+- OptKnock/RobustKnock tables include both maximum and guaranteed product and are ranked by the
+  latter.
+- The resolved `strain_design_seed` is identical in config, run provenance, and both
+  OptKnock/RobustKnock result metadata records; reruns do not rely on a backend-generated seed.
+- Every canonical MOMA/ROOM D1–D5 knockout candidate has both flux-response and paired-sampling
+  index entries, independent of recommendation status. Single-reaction signatures have a
+  pre-deletion WT scan: reference↔zero when reference flux is nonzero, otherwise the full
+  feasible domain marked exploratory. Multi-reaction signatures have an explicit
+  unavailable/skipped response reason rather than a silently chosen reaction.
+- Every candidate in the independent FSEOF/FVSEOF top-10 union has a flux-response index entry;
+  loop-flagged/unresolved candidates are still scanned, and any non-runnable case carries an
+  explicit status and reason.
+- Every recommended amplification target is traceable to its own FSEOF or FVSEOF ranking, has
+  a supporting response, and has a completed loopless diagnostic with no artifact flag.
+- Paired sampling uses matched settings and the knockout is actually applied in the perturbed
+  ensemble.
+- Every authoritative analysis CSV links to its method/provenance metadata sidecar, and the
+  run-local reproduction, rendering, and validation scripts are manifest-declared.
+- Every figure has PNG and PDF/SVG output, a caption, units, and declared source data.
+- `00_manifest.json` lists every authoritative artifact and `validate_production_run` has no
+  errors.
 
 ## Do not
 
-- Do not report an FSEOF rank as a recommendation without step 5. FSEOF is a fast heuristic
-  with no coupling guarantee.
-- Do not rank or recommend a design by `max_product`.
-- Do not call a design growth-coupled without `guaranteed_product > 0` — and on the LP fallback,
-  do not call anything growth-coupled at all.
-- **Do not merge step 3 and step 5 results into a single score.** They assume different cell
-  behaviour: step 3 assumes the cell reaches its growth-maximizing state, MOMA in 5a assumes a
-  minimal adjustment from wild type. Report them side by side in the same row, never summed.
-- Do not discard a coupled design because MOMA predicts low immediate product. That is an
-  adaptation estimate, not a refutation.
-- Do not present reaction knockouts as if they were gene deletions.
-- Do not drop lethal knockouts or infeasible scan points from the exported tables.
-- **Do not change the medium, the aeration or the substrate between steps.** Set the condition
-  once in step 0 and pass it down. Every number in one report must come from one condition, or
-  the condition must be a reported variable with its own column.
-- **Do not describe a design without naming the condition it was found under.** A knockout set
-  that is growth-coupled aerobically can fail to grow at all anaerobically, and the same set
-  can rank first under both — see the table in step 3.
-- Do not quote a `bottleneck` location from a pre-0.4.0 run, and do not attribute the removed
-  bottleneck criterion to any publication.
+- Do not guess the product exchange, medium, substrate, or oxygen state.
+- Do not use MOMA/ROOM as inverse target-finding algorithms; they predict consequences of a
+  supplied deletion universe.
+- Do not describe an OptKnock maximum as guaranteed production.
+- Do not omit the strain-design seed or allow the backend to choose one implicitly.
+- Do not merge MOMA, ROOM, OptKnock, RobustKnock, FSEOF, and FVSEOF into one undifferentiated
+  ranking.
+- Do not sample only wild type and claim that it validates a knockout.
+- Do not turn a flux ratio into a wet-lab over-expression fold without an expression/control
+  model and experimental design.
+- Do not omit unavailable methods, infeasible points, lethal knockouts, or contradictory
+  validation from the report.

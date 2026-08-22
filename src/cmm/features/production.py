@@ -142,6 +142,56 @@ class ProductionYield:
 
         return self.exceeds_carbon_ceiling and not self.co2_explains_excess
 
+    def to_frame(self) -> pd.DataFrame:
+        """One-row export of the yield and its carbon-balance diagnostics."""
+
+        return pd.DataFrame(
+            [
+                {
+                    "product": self.product,
+                    "substrate": self.substrate,
+                    "status": self.status,
+                    "product_flux": self.product_flux,
+                    "substrate_uptake": self.substrate_uptake,
+                    "molar_yield": self.molar_yield,
+                    "aerobic": self.aerobic,
+                    "carbon_ceiling": self.carbon_ceiling,
+                    "co2_exchange": self.co2_exchange,
+                    "co2_uptake": self.co2_uptake,
+                    "product_carbon": self.product_carbon,
+                    "product_carbon_flux": self.product_carbon_flux,
+                    "co2_carbon_fraction": self.co2_carbon_fraction,
+                    "exceeds_carbon_ceiling": self.exceeds_carbon_ceiling,
+                    "co2_explains_excess": self.co2_explains_excess,
+                    "carbon_imbalance": self.carbon_imbalance,
+                    "n_carbon_uptakes": len(self.carbon_uptake),
+                }
+            ]
+        )
+
+    def carbon_uptake_frame(self) -> pd.DataFrame:
+        """One row per organic carbon uptake used for the carbon ceiling."""
+
+        return pd.DataFrame(
+            [
+                {
+                    "reaction_id": uptake.reaction_id,
+                    "uptake": uptake.uptake,
+                    "carbon_atoms": uptake.carbon_atoms,
+                    "carbon_flux": uptake.carbon_flux,
+                    "is_nominated_substrate": uptake.reaction_id == self.substrate,
+                }
+                for uptake in self.carbon_uptake
+            ],
+            columns=[
+                "reaction_id",
+                "uptake",
+                "carbon_atoms",
+                "carbon_flux",
+                "is_nominated_substrate",
+            ],
+        )
+
 
 @dataclass(frozen=True)
 class EnvelopePoint:
@@ -190,16 +240,85 @@ class FseofResult:
         object.__setattr__(self, "trends", self.trends.copy())
 
     def amplification_targets(self, *, actionable_only: bool = True) -> list[str]:
+        """Return amplification candidates ranked by the FSEOF trend signal.
+
+        FSEOF's CMM selection rule already requires a positive slope of flux magnitude.
+        Rank the selected reactions by that slope (largest first), with reaction id as a
+        deterministic tie-break.  Returning the model's reaction order made workflow
+        ``top-N`` selection depend on SBML serialization rather than scientific evidence.
+        """
+
         selected = self.trends["classification"] == "amplify"
         if actionable_only and "actionable" in self.trends:
             selected &= self.trends["actionable"].astype(bool)
-        return self.trends.index[selected].tolist()
+        ranked = self.trends.loc[selected, ["slope"]].copy()
+        ranked["_score"] = pd.to_numeric(ranked["slope"], errors="coerce").fillna(
+            float("-inf")
+        )
+        ranked["_reaction_id"] = ranked.index.astype(str)
+        ranked = ranked.sort_values(
+            ["_score", "_reaction_id"],
+            ascending=[False, True],
+            kind="stable",
+        )
+        return ranked.index.tolist()
 
     def knockout_targets(self, *, actionable_only: bool = True) -> list[str]:
         selected = self.trends["classification"] == "knockdown"
         if actionable_only and "actionable" in self.trends:
             selected &= self.trends["actionable"].astype(bool)
         return self.trends.index[selected].tolist()
+
+    def to_frame(self) -> pd.DataFrame:
+        """Wide reaction-level export in explicit amplification rank order."""
+
+        frame = self.trends.copy()
+        rank_by_reaction = {
+            reaction_id: rank
+            for rank, reaction_id in enumerate(self.amplification_targets(), start=1)
+        }
+        frame.insert(
+            0,
+            "amplification_rank",
+            pd.Series(rank_by_reaction, dtype="Int64"),
+        )
+        frame["_reaction_id"] = frame.index.astype(str)
+        frame = frame.sort_values(
+            ["amplification_rank", "_reaction_id"],
+            ascending=[True, True],
+            na_position="last",
+            kind="stable",
+        ).drop(columns="_reaction_id")
+        frame.index.name = "reaction_id"
+        return frame.reset_index()
+
+    def trajectory_frame(self) -> pd.DataFrame:
+        """Tidy export with one row per reaction and enforced-product level."""
+
+        records: list[dict[str, object]] = []
+        for reaction_id, row in self.trends.iterrows():
+            for level in self.enforced_levels:
+                records.append(
+                    {
+                        "reaction_id": reaction_id,
+                        "enforced_product_flux": level,
+                        "flux": float(row[level]),
+                        "slope": float(row["slope"]),
+                        "classification": str(row["classification"]),
+                        "actionable": bool(row.get("actionable", False)),
+                    }
+                )
+        return pd.DataFrame(
+            records,
+            columns=[
+                "reaction_id",
+                "enforced_product_flux",
+                "flux",
+                "slope",
+                "classification",
+                "actionable",
+            ],
+        )
 
 
 @dataclass(frozen=True)
@@ -259,10 +378,20 @@ class FvseofResult:
         return self.capacity.mean(axis=1)
 
     def amplification_targets(self) -> list[str]:
-        """Actionable type 1-3 reactions, smallest mean l_sol first (Park's priority)."""
+        """Rank actionable type 1-3 reactions by Park's mean l_sol priority.
+
+        Smaller mean ``l_sol`` ranks first; reaction id is the deterministic tie-break so
+        a workflow shortlist does not depend on the model's serialization order.
+        """
 
         selected = (self.classification == "amplify") & self.actionable.astype(bool)
-        ranked = self._mean_capacity()[selected].sort_values(kind="stable")
+        ranked = self._mean_capacity()[selected].rename("mean_capacity").to_frame()
+        ranked["reaction_id"] = ranked.index.astype(str)
+        ranked = ranked.sort_values(
+            ["mean_capacity", "reaction_id"],
+            ascending=[True, True],
+            kind="stable",
+        )
         return ranked.index.tolist()
 
     def knockout_targets(self) -> list[str]:
@@ -280,6 +409,80 @@ class FvseofResult:
 
         amp = set(self.amplification_targets())
         return [rid for rid in self.robust.index[self.robust] if rid in amp]
+
+    def to_frame(self) -> pd.DataFrame:
+        """Reaction-level classification and ranking quantities."""
+
+        reaction_ids = list(self.mean.index)
+        rank_by_reaction = {
+            reaction_id: rank
+            for rank, reaction_id in enumerate(self.amplification_targets(), start=1)
+        }
+        frame = pd.DataFrame(
+            {
+                "reaction_id": reaction_ids,
+                "amplification_rank": pd.Series(
+                    [rank_by_reaction.get(reaction_id) for reaction_id in reaction_ids],
+                    dtype="Int64",
+                ),
+                "classification": [
+                    str(self.classification.loc[r]) for r in reaction_ids
+                ],
+                "park_type": [int(self.park_type.loc[r]) for r in reaction_ids],
+                "robust": [bool(self.robust.loc[r]) for r in reaction_ids],
+                "slope": [float(self.slope.loc[r]) for r in reaction_ids],
+                "capacity_slope": [
+                    float(self.capacity_slope.loc[r]) for r in reaction_ids
+                ],
+                "mean_capacity": [
+                    float(self._mean_capacity().loc[r]) for r in reaction_ids
+                ],
+                "actionable": [bool(self.actionable.loc[r]) for r in reaction_ids],
+            }
+        )
+        return frame.sort_values(
+            ["amplification_rank", "reaction_id"],
+            ascending=[True, True],
+            na_position="last",
+            kind="stable",
+            ignore_index=True,
+        )
+
+    def trajectory_frame(self) -> pd.DataFrame:
+        """Tidy export of V_avg, forced minimum and l_sol across the scan."""
+
+        records: list[dict[str, object]] = []
+        for reaction_id in self.mean.index:
+            for level in self.enforced_levels:
+                records.append(
+                    {
+                        "reaction_id": reaction_id,
+                        "enforced_product_flux": level,
+                        "mean_flux": float(self.mean.loc[reaction_id, level]),
+                        "forced_min_abs_flux": float(
+                            self.forced.loc[reaction_id, level]
+                        ),
+                        "capacity": float(self.capacity.loc[reaction_id, level]),
+                        "classification": str(self.classification.loc[reaction_id]),
+                        "park_type": int(self.park_type.loc[reaction_id]),
+                        "robust": bool(self.robust.loc[reaction_id]),
+                        "actionable": bool(self.actionable.loc[reaction_id]),
+                    }
+                )
+        return pd.DataFrame(
+            records,
+            columns=[
+                "reaction_id",
+                "enforced_product_flux",
+                "mean_flux",
+                "forced_min_abs_flux",
+                "capacity",
+                "classification",
+                "park_type",
+                "robust",
+                "actionable",
+            ],
+        )
 
 
 def _carbon_count(rxn) -> float:

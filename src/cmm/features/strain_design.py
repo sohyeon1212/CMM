@@ -17,9 +17,12 @@ import io
 from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field
+from importlib.metadata import version as package_version
+from numbers import Integral
 from typing import Literal, cast
 
 from cobra import Model
+import pandas as pd
 
 from cmm.core import solvers
 from cmm.core.condition import Condition
@@ -32,9 +35,19 @@ from cmm.features.production import (
 )
 
 
+# Gurobi's Seed parameter accepts integers through 2,000,000,000.  Using the same
+# conservative range for the solver-neutral API also remains valid for the other
+# straindesign backends while preventing a backend error after expensive preprocessing.
+STRAIN_DESIGN_SEED_MAX = 2_000_000_000
+
+
 @dataclass(frozen=True)
 class StrainDesign:
-    """One knockout design and the product it forces at maximum growth."""
+    """One reaction-knockout design and the product it forces at maximum growth.
+
+    The reaction ids are a computational design, not a gene recipe.  Experimental use
+    requires resolving every reaction's GPR, including isoenzymes and multisubunit enzymes.
+    """
 
     knockouts: tuple[str, ...]
     growth: float
@@ -55,6 +68,41 @@ class StrainDesignResult:
 
     def best(self) -> StrainDesign | None:
         return self.designs[0] if self.designs else None
+
+    def to_frame(self) -> pd.DataFrame:
+        """One row per design, in the method's documented rank order.
+
+        ``knockouts`` is stored as a semicolon-delimited stable string for CSV portability;
+        ``n_knockouts`` makes filtering independent of parsing that display field.
+        """
+
+        return pd.DataFrame(
+            [
+                {
+                    "rank": rank,
+                    "method": self.method,
+                    "product": self.product,
+                    "knockouts": ";".join(design.knockouts),
+                    "n_knockouts": len(design.knockouts),
+                    "growth": design.growth,
+                    "max_product": design.max_product,
+                    "guaranteed_product": design.guaranteed_product,
+                    "growth_coupled": design.growth_coupled,
+                }
+                for rank, design in enumerate(self.designs, start=1)
+            ],
+            columns=[
+                "rank",
+                "method",
+                "product",
+                "knockouts",
+                "n_knockouts",
+                "growth",
+                "max_product",
+                "guaranteed_product",
+                "growth_coupled",
+            ],
+        )
 
 
 def _objective_reaction(model: Model) -> str:
@@ -110,7 +158,8 @@ def _search_designs(
     max_solutions: int,
     min_growth: float,
     actionable_only: bool,
-) -> tuple[list[tuple[str, ...]], int]:
+    seed: int,
+) -> tuple[list[tuple[str, ...]], int, int, str]:
     try:
         import straindesign as sd
     except (
@@ -124,7 +173,7 @@ def _search_designs(
         model.objective = model.reactions.get_by_id(product)
         model.objective_direction = "max"
         if (model.slim_optimize() or 0.0) < 1e-6:
-            return [], 0
+            return [], 0, 0, "not_run_product_unreachable"
 
     module_type = sd.OPTKNOCK if method == "optknock" else sd.ROBUSTKNOCK
     module = sd.SDModule(
@@ -158,15 +207,19 @@ def _search_designs(
             sd_modules=[module],
             max_cost=max_knockouts,
             max_solutions=max_solutions,
+            compress=True,
+            seed=seed,
             **search_kwargs,
         )
     reaction_sd = getattr(solutions, "reaction_sd", None) or []
+    search_status = str(getattr(solutions, "status", "unknown"))
+    n_decompressed_designs = len(reaction_sd)
     designs: list[tuple[str, ...]] = []
     for design in reaction_sd:
         kos = tuple(sorted(rid for rid, coeff in design.items() if coeff <= 0))
         if kos and kos not in designs:
             designs.append(kos)
-    return designs, n_candidates
+    return designs, n_candidates, n_decompressed_designs, search_status
 
 
 def _strain_design(
@@ -180,6 +233,7 @@ def _strain_design(
     min_growth: float,
     condition: Condition | None,
     actionable_only: bool,
+    seed: int,
 ) -> StrainDesignResult:
     if max_knockouts < 1:
         raise ValueError("max_knockouts must be at least 1")
@@ -187,10 +241,21 @@ def _strain_design(
         raise ValueError("max_solutions must be at least 1")
     if min_growth < 0:
         raise ValueError("min_growth must be non-negative")
+    if (
+        isinstance(seed, bool)
+        or not isinstance(seed, Integral)
+        or not 0 <= seed <= STRAIN_DESIGN_SEED_MAX
+    ):
+        raise ValueError(
+            "seed must be an integer in the Gurobi-compatible range "
+            f"[0, {STRAIN_DESIGN_SEED_MAX}]"
+        )
+    seed = int(seed)
     solvers.require("MILP", model.solver.interface, feature=method)
     biomass = biomass or _objective_reaction(model)
     provenance = run_provenance(
         model,
+        seed=seed,
         method=method,
         product=product,
         biomass=biomass,
@@ -199,11 +264,12 @@ def _strain_design(
         min_growth=min_growth,
         condition=condition.name if condition is not None else None,
         actionable_only=actionable_only,
+        strain_design_seed=seed,
     )
     with model:
         _apply_condition(model, condition=condition)
         _record_condition(provenance, _condition_provenance(model, condition))
-        ko_sets, n_candidates = _search_designs(
+        ko_sets, n_candidates, n_decompressed_designs, search_status = _search_designs(
             model,
             product,
             biomass,
@@ -212,22 +278,58 @@ def _strain_design(
             max_solutions=max_solutions,
             min_growth=min_growth,
             actionable_only=actionable_only,
+            seed=seed,
         )
         evaluated = [
             d
             for d in (_evaluate_design(model, kos, product, biomass) for kos in ko_sets)
             if d is not None
         ]
+    n_evaluated_designs = len(evaluated)
     if method == "robustknock":
         evaluated = [d for d in evaluated if d.growth_coupled]
-        evaluated.sort(key=lambda d: (-d.guaranteed_product, -d.growth))
-    else:
-        evaluated.sort(key=lambda d: (-d.max_product, -d.growth))
+    # A high optimistic maximum is not a coupling guarantee.  Both methods use the same
+    # publication rank: worst-case product first, then optimistic product and growth, with
+    # the reaction set as a deterministic final tie-break.
+    evaluated.sort(
+        key=lambda d: (
+            -d.guaranteed_product,
+            -d.max_product,
+            -d.growth,
+            d.knockouts,
+        )
+    )
     deduplicated = _deduplicate_designs(evaluated)
     provenance["parameters"] = {
         **cast(dict[str, object], provenance["parameters"]),
         "n_knockout_candidates": n_candidates,
+        "strain_design_backend": "straindesign",
+        "straindesign_version": package_version("straindesign"),
+        "straindesign_search_status": search_status,
+        "straindesign_search_complete": search_status == "optimal",
+        "straindesign_compress": True,
+        "max_compressed_milp_solutions_requested": max_solutions,
+        "max_solutions_semantics": (
+            "caps compressed MILP solutions before straindesign network decompression; "
+            "the returned reaction-design count can be larger"
+        ),
+        "n_compressed_milp_solutions": None,
+        "n_compressed_milp_solutions_reason": (
+            "straindesign does not expose the generated compressed-solution count"
+        ),
+        "n_decompressed_designs": n_decompressed_designs,
+        "n_unique_decompressed_designs": len(ko_sets),
+        "n_evaluated_designs": n_evaluated_designs,
+        "n_method_eligible_designs": len(evaluated),
+        "n_returned_designs_after_deduplication": len(deduplicated),
+        "intervention_level": "reaction",
+        "requires_gpr_resolution": True,
+        # Backward-compatible historical keys.  ``n_milp_designs`` was a misnomer: it
+        # counted evaluated decompressed designs, not compressed MILP solutions.
         "n_milp_designs": len(evaluated),
+        "n_milp_designs_semantics": (
+            "legacy alias for n_method_eligible_designs; not a compressed MILP count"
+        ),
         "n_designs_after_deduplication": len(deduplicated),
     }
     return StrainDesignResult(
@@ -268,6 +370,7 @@ def optknock(
     min_growth: float = 0.05,
     condition: Condition | None = None,
     actionable_only: bool = True,
+    seed: int = 0,
 ) -> StrainDesignResult:
     """OptKnock: knockout sets that maximize the product at maximum growth (optimistic).
 
@@ -286,6 +389,10 @@ def optknock(
     ``actionable_only`` restricts knockout candidates to reactions that have a GPR and are
     not boundary reactions, following Burgard et al.'s restriction to central metabolism.
     Set it to False to allow exchange knockouts, which are not realisable as gene deletions.
+
+    ``seed`` is forwarded explicitly to straindesign's MILP backend.  Keeping it fixed pins
+    the solver's search perturbation for reproducible reruns on the same solver/platform;
+    omitting it no longer lets straindesign invent a different seed on every call.
     """
 
     return _strain_design(
@@ -298,6 +405,7 @@ def optknock(
         min_growth=min_growth,
         condition=condition,
         actionable_only=actionable_only,
+        seed=seed,
     )
 
 
@@ -311,10 +419,11 @@ def robustknock(
     min_growth: float = 0.05,
     condition: Condition | None = None,
     actionable_only: bool = True,
+    seed: int = 0,
 ) -> StrainDesignResult:
     """RobustKnock: maximize guaranteed product over all growth-maximal flux states.
 
-    ``condition``, ``max_solutions`` and ``actionable_only`` behave exactly as in
+    ``condition``, ``max_solutions``, ``actionable_only`` and ``seed`` behave exactly as in
     :func:`optknock`; in particular ``max_solutions`` caps MILP solutions, not designs.
     """
 
@@ -328,4 +437,5 @@ def robustknock(
         min_growth=min_growth,
         condition=condition,
         actionable_only=actionable_only,
+        seed=seed,
     )

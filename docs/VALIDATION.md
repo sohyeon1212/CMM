@@ -1,6 +1,6 @@
 # Scientific validation and reproducibility
 
-This document defines what CMM 0.4.0 has been validated against, how to reproduce the
+This document defines what CMM 0.5.0 has been validated against, how to reproduce the
 evidence, and what the tests do not establish. A green test suite supports numerical and
 implementation correctness; it is not a substitute for experimental validation of a new
 biological target.
@@ -21,7 +21,9 @@ QT_QPA_PLATFORM=offscreen uv run pytest -q -ra --strict-markers \
   --durations=10 --cov=cmm --cov-branch --cov-report=term-missing --cov-fail-under=80
 uv run ruff check src tests
 uv run ruff format --check src tests
-uv run mypy src/cmm/core src/cmm/features src/cmm/omics
+uv run mypy src/cmm/core src/cmm/features src/cmm/omics src/cmm/workflows src/cmm/reporting
+Rscript --vanilla -e 'if (!requireNamespace("renv", quietly=TRUE)) install.packages("renv", repos="https://cloud.r-project.org"); renv::restore(prompt=FALSE)'
+R_LIBS_USER="$(Rscript --vanilla -e 'renv::load(); cat(.libPaths()[1])')" Rscript --vanilla -e 'p <- c("jsonlite","ggplot2","ggrepel","patchwork","svglite","ragg"); stopifnot(all(vapply(p, requireNamespace, logical(1), quietly=TRUE)))'
 uvx --from cffconvert==2.0.0 cffconvert --validate
 uv export --frozen --all-extras --no-emit-project -o /tmp/cmm-requirements-audit.txt
 uvx --from pip-audit==2.10.1 pip-audit \
@@ -30,13 +32,38 @@ uv build
 uvx twine check dist/*
 ```
 
-CI executes the same locked environment on Linux (Python 3.10 and 3.12), Windows 3.12, and
-macOS 3.12. QP/MIQP checks use small models that fit the bundled Gurobi restricted license
+The R commands are optional for Python-only use and assume a Git checkout or GitHub source
+archive, because the repository-root `renv.lock` is not installed by the Python wheel or
+sdist. Both Python distributions contain the R renderer itself; use the matching Git source
+and lock for a reproducible publication render.
+
+The Python matrix executes the locked `uv` environment on Linux (Python 3.10 and 3.12),
+Windows 3.12, and macOS 3.12. A separate publication-report matrix restores `renv.lock`,
+prints and checks every locked package version, and runs `test_publication_reporting.py` on
+Ubuntu, macOS, and Windows. The lock records R 4.3.2, so archived package versions may compile
+when a matching binary is unavailable: Linux and macOS jobs install the graphics build
+libraries, and the Windows job provisions matching Rtools43. `ggplot2` itself declares
+`NeedsCompilation: no`; the relevant compiled packages are `ragg`, `systemfonts`,
+`textshaping`, and `svglite`. The matrix permits both repository binaries and source builds
+and tests the restored result; it does not force a source-only installation. The build
+toolchains prepare and support source fallback without claiming that every matrix run actually
+compiled a package.
+
+The current `renv.lock` records exact versions and CRAN sources but has no per-package `Hash`
+fields. A clean renv 1.1.4 restore/snapshot audit did not provide a safe Hash-only round trip:
+the canonical snapshot omitted records that were not fully materialized in its isolated
+library. The lock therefore remains hashless rather than carrying hand-generated hashes.
+Regenerate hashes only from a complete R 4.3.2 project library and accept the result only when
+the package set and every R/package version are unchanged; until then, the three-OS complete
+version comparison is the explicit CI guard.
+
+QP/MIQP checks use small models that fit the bundled Gurobi restricted license
 (largest QP: 190 variables / 73 constraints, against that license's 200-variable limit for
 quadratic models); they are required tests, not environment-dependent skips. That 10-variable
 margin is deliberate and narrow — enlarging the E-Flux2 test model beyond 100 reactions would
-make these tests require a full license. Genome-scale LP validation uses GLPK. Pytest's ten slowest durations are retained in every CI log as a lightweight runtime
-regression record; solver/model/license details remain part of result provenance.
+make these tests require a full license. Genome-scale LP validation uses GLPK. Pytest's ten
+slowest durations are retained in every CI log as a lightweight runtime regression record;
+solver/model/license details remain part of result provenance.
 
 ## Evidence matrix
 
@@ -48,9 +75,11 @@ regression record; solver/model/license details remain part of result provenance
 | Yield and media | Direct objective/bound calculations in COBRApy | `test_validation.py`, `test_production.py`, `test_media.py` |
 | FSEOF/FVSEOF | Enforced product levels, biomass optimization/FVA, regression and boundary filtering | `test_production.py`; scan-resolution sensitivity in `test_scientific_sensitivity.py` |
 | MTA/rMTA | Official COBRA Toolbox test topology, expected score signs, published Equation 9 | `test_revert.py`; alpha sensitivity in `test_scientific_sensitivity.py` |
-| OptKnock/RobustKnock | Distinct StrainDesign module types (`OPTKNOCK` and three-level `ROBUSTKNOCK`) plus post-solve max/min product evaluation | `test_strain_design.py` |
+| OptKnock/RobustKnock | Distinct StrainDesign module types (`OPTKNOCK` and three-level `ROBUSTKNOCK`), explicit seed forwarding/provenance, plus post-solve max/min product evaluation | `test_strain_design.py` |
 | Flux response | Scanned optimum reproduces the known `e_coli_core` oxygen growth optimum; competing-branch model gives an exact −1 response gradient | `test_response.py` |
 | Flux sampling | Drawn samples satisfy `S · v = 0` and every model bound; identical seeds reproduce identical ensembles | `test_sampling.py` |
+| Production-target workflow | Nested JSON config/path resolution, deterministic unique-gene ranking, strict QP gate, complete candidate-universe response/sampling coverage, candidate-reaction response semantics with explicit multi-reaction unavailability, paired-sampling distance, and schema-v2 export | `test_production_workflow.py` |
+| Publication reporting | Schema-v2 path/column validation, path-escape rejection, deterministic standalone HTML, R-rendered PNG/PDF/SVG, and explicit optional-panel status | `test_publication_reporting.py` |
 | GUI/state | Real offscreen Qt workflows, invalid-file rejection, model reload state invalidation | `test_app_smoke.py`, `test_scenarios.py` |
 | Provenance | Deterministic SHA-256 fingerprint changes with model bounds and accompanies numerical results | `test_core_primitives.py` and feature tests |
 
@@ -177,6 +206,16 @@ designs without changing the top design or its numbers. `actionable_only=False` 
 unrestricted set. `max_solutions` caps MILP solutions, not distinct designs, and designs are
 de-duplicated by knockout set before being returned. Both functions take `condition=` as of
 0.4.0; before that they accepted no context at all.
+
+**The MILP search seed is explicit.** `optknock(..., seed=0)` and
+`robustknock(..., seed=0)` forward the integer to `straindesign`; accepted values are
+`0..2_000_000_000`, while booleans and floats are rejected. Without an explicit value,
+`straindesign` generates a new random seed, which can alter the MILP path, runtime, and returned
+solution pool between calls. CMM therefore defaults to `0` and records the value in
+`metadata["seed"]`, `metadata["parameters"]["seed"]`, and
+`metadata["parameters"]["strain_design_seed"]`. Reproduction still requires the recorded
+solver/version/platform because a seed alone does not guarantee identical behavior across
+different MILP implementations or versions.
 
 **Three citations are required together, not two.** The bilevel and three-level searches are
 solved by the `straindesign` package, which carries no literature citation of its own; citing
@@ -327,6 +366,76 @@ and work using that layout should cite King et al. (2015); the bundled map's pro
 SHA-256 and license are recorded in `src/cmm/resources/ATTRIBUTION.md` and asserted by
 `tests/test_resources.py`.
 
+### Production workflow and publication-report contract
+
+`run_production_target_discovery` is validated as orchestration, not as a new metabolic
+algorithm. Its numerical evidence comes from the method contracts above. The workflow-level
+contract is that it:
+
+- requires a file-backed SBML model, product exchange, and serializable resolved config;
+- applies one condition before every analysis and records source and conditioned model
+  fingerprints;
+- gates QP for MOMA-L2 and MILP for exact ROOM before the matched single-gene screens, with no
+  L1 or relaxed-ROOM fallback;
+- screens the same GPR-resolved gene universe with both methods, retains non-optimal rows, and
+  records separate deterministic D1–D5 display ranks and downstream positive-benefit ranks;
+- gates MILP plus importable `straindesign` for OptKnock/RobustKnock and surfaces any
+  additional requirement reported by the selected backend;
+- forwards the explicit workflow `strain_design_seed` to both design methods and records it in
+  resolved config, run provenance, and method metadata; it never permits a hidden
+  backend-generated random seed;
+- exports independent top-10 FSEOF and top-10 FVSEOF rankings and tidy trajectory tables
+  separately, without using their intersection as a selection gate;
+- compares standard and fastSNP loopless FVA capacity for publication amplification candidates,
+  preserves all independent top-10 rows in the tidy publication trajectories with visible
+  diagnostic status, runs flux response even for flagged or unresolved targets, and withholds
+  them only from forward-validation support or recommendations;
+- defines the canonical single-knockout validation universe as the unique blocked-reaction
+  signatures represented by MOMA D1–D5 and ROOM D1–D5, then applies matched wild-type/knockout
+  sampling to every candidate in that universe; a signature with one blocked reaction receives
+  a pre-deletion wild-type reference↔zero scan when reference flux is nonzero, or a full feasible-
+  domain exploratory scan when it is already zero; a multi-reaction signature remains explicit
+  unavailable/skipped because no unambiguous single response axis exists, and no blocked
+  reaction is selected silently;
+- applies flux response to every unique candidate in the independent report-visible FSEOF
+  top-10 and FVSEOF top-10 lists, with no recommendation or beneficial-selection gate;
+- uses `max_flux_response_targets` only as a preflight capacity guard for those complete
+  universes and never as a runtime slicing limit; unavailable, infeasible, skipped, and failed
+  analyses remain explicit index rows with reasons;
+- records candidate identity/scope, all equivalent knockout gene ids, loop eligibility, and
+  expected/attempted/completed/failed/skipped coverage in the exported indexes, summary, and
+  provenance so full-set validation is machine-checkable;
+- renders every completed Figure 5 scan with enforced candidate-reaction flux on x
+  (`target_flux`) and target-product flux on y (`response_flux`); amplification is a wild-type
+  candidate→product scan; a single-reaction knockout uses pre-deletion wild-type
+  reference↔zero when nonzero or the full feasible domain marked exploratory when already zero;
+  growth remains the configured minimum-growth constraint plus secondary `biomass_flux` output
+  rather than an axis;
+- writes the fixed `01_preflight`–`07_validation` schema, resolved config, byte-for-byte source
+  SBML, conditioned SBML, per-analysis metadata sidecars, replay/render/validate scripts,
+  provenance, summary, and authoritative manifest;
+- emits recommendations only under the declared evidence policy: validated beneficial
+  single-gene deletion; a method-specific FSEOF or FVSEOF hypothesis with supporting response
+  and a complete non-loop diagnostic; or RobustKnock positive guaranteed product. It does not
+  require FSEOF/FVSEOF overlap and does not invent combined knockout-amplification
+  recommendations.
+
+The publication layer has a separate contract. `validate_production_run` validates source
+artifacts, recomputes declared SHA-256/byte sizes, requires metadata sidecars for complete CSV
+artifacts, and returns all structural issues without changing data. `nature-r` is the sole
+publication backend: it invokes the checked-in R script with `--vanilla`, fails on missing R
+or a required renderer package, reads only manifest-declared CSVs, and writes non-empty 300-DPI
+PNG plus editable PDF/SVG figures. Package dependency metadata supplies compatible minimum
+versions at runtime; the exact versions are supplied by `renv.lock`, asserted in CI, and
+recorded in the figure manifest. HTML construction is deterministic; the standalone copy
+embeds every figure.
+Optional response/sampling panels must be declared as rendered, skipped, or failed, so absence
+cannot be mistaken for negative evidence.
+
+These tests establish deterministic composition and artifact integrity. They do not validate
+a predicted knockout or amplification target experimentally, and the Nature
+Genetics-inspired theme is not journal approval.
+
 ## Run provenance
 
 Numerical result metadata includes:
@@ -335,7 +444,8 @@ Numerical result metadata includes:
   stoichiometry;
 - model id and active solver, **and the solver version**;
 - the run timestamp in UTC (`timestamp_utc`, ISO-8601, never local time) and the run `seed`
-  (`null` when the method has none — a statement that this run had no seed, not an omission);
+  (`null` when the method has none — a statement that this run had no seed, not an omission;
+  OptKnock/RobustKnock record the explicit strain-design seed, default `0`);
 - the platform, machine and processor;
 - Python, CMM, COBRApy, NumPy, pandas, and SciPy versions;
 - method parameters, source-state provenance, and counts of non-optimal scan levels where

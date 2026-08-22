@@ -61,7 +61,8 @@ from cmm.omics import (
 )
 
 #: The fields the 0.4.0 provenance block promises. ``seed`` must be *present*; its value is
-#: ``None`` for a deterministic method, which states "this run had no seed".
+#: ``None`` for an unseeded deterministic method, while stochastic/search methods report the
+#: seed that was actually forwarded to their backend.
 REQUIRED_FIELDS = (
     "model_id",
     "model_sha256",
@@ -249,10 +250,15 @@ def test_every_public_service_carries_the_provenance_block(service, core):
     assert len(str(metadata["model_sha256"])) == 64
     assert isinstance(metadata["parameters"], dict)
 
-    # ``seed`` is recorded, never invented: a seeded method reports its seed, a deterministic
-    # one reports null rather than a made-up 0.
+    # ``seed`` is recorded, never invented: sampling reports the requested seed and the two
+    # strain-design searches report their explicit reproducible backend default.  An unseeded
+    # deterministic method reports null rather than a made-up value.
     if service in ("random_flux_sampling", "reference_constrained_sampling"):
         assert metadata["seed"] == 7
+    elif service in ("optknock", "robustknock"):
+        assert metadata["seed"] == 0
+        assert metadata["parameters"]["seed"] == 0
+        assert metadata["parameters"]["strain_design_seed"] == 0
     else:
         assert metadata["seed"] is None, f"{service} invented a seed"
 
@@ -270,6 +276,8 @@ def test_the_registry_covers_every_shipped_analysis_feature():
         "batch_moma_room",  # -> batch_comparison
         "revert_metabolism",  # -> revert_targets
         "flux_response_analysis",  # -> flux_response
+        "production_target_workflow",  # composed, tested orchestration
+        "publication_reporting",  # artifact validation and rendering, not a numeric solve
     }
     registered = set(SERVICES) | {
         "knockout_comparison",

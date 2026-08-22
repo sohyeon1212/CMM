@@ -75,6 +75,166 @@ run_provenance(model, method="my_run", note="...")
 Every numerical result already carries this in `result.metadata`. Never report a number
 without it — see the run contract in `AGENTS.md`.
 
+### Complete production workflow — `cmm.workflows.production`
+
+Use this boundary for an end-to-end SC-01 request; use the individual functions below when the
+request names only one analysis.
+
+```python
+from cmm.workflows.production import (
+    ProductionWorkflowConfig,
+    ProductionWorkflowResult,
+    run_production_target_discovery,
+)
+from cmm.reporting import (
+    ValidationReport,
+    render_production_report,
+    validate_production_run,
+)
+
+config = ProductionWorkflowConfig(
+    model_path="model/e_coli_core.xml",
+    product="EX_succ_e",
+    output_dir="results/succinate",
+    medium="glucose_anaerobic",
+    condition=anaerobic,
+    substrate="EX_glc__D_e",
+)
+result: ProductionWorkflowResult = run_production_target_discovery(config)
+assert result.run_directory is not None  # set when config.output_dir is supplied
+render_production_report(result.run_directory, renderer="nature-r")
+check: ValidationReport = validate_production_run(result.run_directory)
+```
+
+`ProductionWorkflowConfig(model_path, product, output_dir=None, solver=None, substrate=None,
+biomass=None, medium=None, condition=None, reference_method="pfba", envelope_points=20,
+run_single_knockout=True, single_knockout_genes=None,
+top_single_knockouts_per_method=5, viability_fraction=0.1,
+product_improvement_tolerance=1e-6, run_strain_design=True, max_knockouts=3,
+optknock_max_solutions=5, robustknock_max_solutions=8, design_min_growth=0.05,
+strain_design_seed=0, actionable_designs_only=True, run_amplification=True, fseof_steps=10,
+fvseof_steps=10,
+top_amplification_targets_per_method=10,
+scan_fraction_min=0.1, scan_fraction_max=0.9, fvseof_biomass_fraction=0.95,
+run_amplification_loop_diagnostic=True, amplification_loop_diagnostic_top_n=20,
+loopless_capacity_ratio_threshold=0.1, loopless_algorithm="fastSNP",
+validation=ValidationConfig(), overwrite=False)`.
+
+`ValidationConfig(enabled=True, max_flux_response_targets=30, flux_response_steps=20,
+flux_response_biomass_fraction=0.3, sampling_growth_fraction=0.1,
+sampling=SamplingConfig())`.
+
+`strain_design_seed` must be an integer from `0` through `2_000_000_000` (booleans and floats
+are rejected). The workflow forwards the same value to OptKnock and RobustKnock. It is distinct
+from `validation.sampling.seed`; both must remain explicit in a publication config.
+
+The two capacity limits must cover the independent candidate pools. With the defaults,
+`amplification_loop_diagnostic_top_n >= 2 * top_amplification_targets_per_method` and
+`max_flux_response_targets >= 2 * top_amplification_targets_per_method + 2 *
+top_single_knockouts_per_method` (20 and 30 respectively). These are worst-case capacity
+guards before cross-method deduplication, not permission to select the first *N* targets.
+Config validation rejects a smaller enabled capacity, and execution never silently slices the
+candidate universe.
+
+`SamplingConfig(enabled=True, n=1000, method="achr", thinning=100, processes=1, seed=0,
+store_raw_samples=True)`; `method` is `"optgp"` or `"achr"`. Keep the wild-type and knockout
+settings matched; ACHR requires `processes=1`. Sampling covers every unique blocked-reaction
+signature represented by the MOMA D1–D5 and ROOM D1–D5 display ranks. Beneficial selection and
+recommendation status do not reduce this coverage.
+
+`loopless_algorithm` is `"cycleFreeFlux"` or `"fastSNP"`; the canonical default is
+`"fastSNP"`. The capacity-ratio threshold marks diagnostic evidence; it does not alter the raw
+FSEOF/FVSEOF rankings. The workflow takes the configured top candidates independently from
+each method (10 per method by default); being present in both rankings is descriptive evidence,
+not a selection or recommendation prerequisite. Flux response covers the unique union of
+those two report-visible lists, including loop-flagged or unresolved candidates; loop status
+remains a separate support/recommendation eligibility field.
+
+`ProductionWorkflowConfig.from_json(path)` reads UTF-8 JSON; relative `model_path` and
+`output_dir` values resolve from the config file's directory. `from_mapping(...)` parses nested
+`Medium`, `Condition`, `ValidationConfig`, and `SamplingConfig` objects. `medium=None` means
+"use model bounds as loaded" and is recorded with a warning; use it only when that is the
+explicitly intended condition.
+
+`ProductionWorkflowResult` exposes the typed step results, `.gene_knockout_mapping`,
+`.single_knockout_validation_candidates` (all method-specific display-ranked rows before GPR
+deduplication), `.selected_single_knockouts` (the separate positive-benefit subset),
+`.amplification_loop_diagnostic`, `.summary()`, `.run_directory` (when `output_dir` was
+supplied), and its artifact records. Each `ArtifactRecord` carries its semantic role, stage,
+status/reason, SHA-256, byte size, and linked metadata path when applicable.
+`GeneKnockoutMappingResult`
+retains gene ids/names, inert status, blocked reactions, reaction names, and full GPRs.
+`AmplificationLoopDiagnosticResult` compares standard and loopless FVA capacity under the
+enforced product and biomass floors; each record reports the capacity ratio, configured
+threshold, `loop_artifact_flag`, status, and reason. A failed or inconclusive diagnostic is
+not treated as evidence that a target is cycle-free.
+
+Validation records one response and sampling index row per unique knockout
+`blocked_reaction_signature`; both preserve all equivalent gene ids in `candidate_target_ids`.
+A signature with exactly one blocked reaction receives a pre-deletion wild-type scan. Nonzero
+reference flux defines the closed reference↔zero interval; an already-zero reference triggers
+the full feasible target-reaction domain and is labelled exploratory, not causal support for
+deletion. A multi-reaction signature cannot define one scan coordinate and remains explicit
+unavailable/skipped with a reason; the workflow never silently selects a reaction. This is
+model-phenotype deduplication, not silent candidate removal, and the complete-knockout phenotype
+remains the responsibility of MOMA/ROOM plus paired sampling.
+
+Figure 5 preserves the standard service coordinates: `x=target_flux` is enforced candidate-
+reaction flux and `y=response_flux` is target-product flux. Amplification is a wild-type
+candidate→product scan; a representable knockout candidate is a pre-deletion wild-type blocked-
+reaction→product scan over reference↔zero when reference flux is nonzero, or over the full
+feasible domain as exploratory response when it is already zero. Growth is the configured
+minimum-growth constraint and secondary `biomass_flux` output, not a Figure 5 axis.
+
+The candidate/index audit fields are stable workflow outputs. Knockouts use
+`candidate_scope="all_display_ranked_candidates"`; amplification targets use
+`candidate_scope="all_report_selected_candidates"`. The candidate CSV also records
+`validation_target_id`, `candidate_source_methods`, and `validation_representative`. Response
+rows preserve `loop_diagnostic_status`, `loop_artifact_flag`,
+`loop_diagnostic_eligible`, and `loop_diagnostic_reason`, so response execution is not confused
+with recommendation eligibility. Both provenance and `.summary()` expose
+`validation_candidate_policy` and `validation_coverage`; coverage reports expected, attempted,
+completed, failed, and (for sampling) skipped counts for the complete universes. Its exact
+keys are `single_knockout_candidates_expected`, `amplification_candidates_expected`,
+`flux_response_expected`, `flux_response_attempted`, `flux_response_completed`,
+`flux_response_failed`, `sampling_expected`, `sampling_attempted`, `sampling_completed`,
+`sampling_failed`, and `sampling_skipped`; the shared wild-type reference is included in the
+sampling counts.
+
+Equivalent CLI:
+
+```bash
+cmm production-targets --config CONFIG
+cmm production-targets --config CONFIG --analysis-only
+cmm report render RUN_DIR
+cmm report validate RUN_DIR --json
+```
+
+The config must resolve an exact model path, a product exchange, one explicit condition
+(medium, substrate uptake, oxygen/aeration and other changed bounds), output directory, method
+parameters, search limits, strain-design seed, and sampling seed. The workflow runs preflight;
+yield/envelope;
+wild-type reference; matched MOMA-L2 and ROOM single-knockout comparisons;
+OptKnock/RobustKnock; independent FSEOF and FVSEOF top-candidate sets plus loopless-capacity
+diagnostics; response-index coverage for every unique report-visible knockout and amplification
+candidate, including a numeric scan for each amplification and single-reaction knockout
+signature; and knockout-conditioned sampling for every unique report-visible single-knockout
+candidate. Multi-reaction knockout signatures and other non-runnable cases stay in the
+validation indexes with status/reason rather than being dropped. It owns the `01_preflight`
+through `07_validation` artifact schema. Each authoritative analysis table links to a JSON
+metadata sidecar in `00_manifest.json`; the exported `scripts/production_config.json` and
+`reproduce.py`, `render.py`, and `validate.py` provide the run-local replay boundary.
+`07_validation/recommendations.csv` exports `target | type | evidence | verdict |
+proposal_methods | validation_methods | growth_retained | product_effect | artifact_flag |
+reason`; it contains only supported single-knockout/amplification rows or coupled RobustKnock
+rows, never an untested combined intervention.
+
+This is a strict composed contract: MOMA-L2 requires QP, ROOM requires MILP, strain design
+requires MILP plus importable `straindesign`, and `nature-r` requires `Rscript` plus loadable
+renderer packages. Package metadata supplies compatible minima; exact renderer versions come
+from `renv.lock` and are asserted in CI. Missing capabilities are surfaced, never silently
+replaced.
+
 ---
 
 ## 2. Simulation — `cmm.core`
@@ -339,13 +499,20 @@ conclusions without saying so.
 from cmm.features import optknock, robustknock
 
 optknock(model, product, *, biomass=None, max_knockouts=3, max_solutions=5,
-         min_growth=0.05, condition=None, actionable_only=True)
+         min_growth=0.05, condition=None, actionable_only=True, seed=0)
 robustknock(model, product, *, biomass=None, max_knockouts=3, max_solutions=8,
-            min_growth=0.05, condition=None, actionable_only=True)
+            min_growth=0.05, condition=None, actionable_only=True, seed=0)
 ```
 
 `StrainDesignResult`: `.designs`, `.best()`. `StrainDesign`: `.knockouts`, `.growth`,
 `.max_product` (optimistic), `.guaranteed_product` (worst case), `.growth_coupled`.
+
+`seed` defaults to `0`, accepts integers in `0..2_000_000_000`, and is forwarded directly to
+the `straindesign` MILP search. The result records it in `metadata["seed"]`,
+`metadata["parameters"]["seed"]`, and
+`metadata["parameters"]["strain_design_seed"]`. Never omit it from a publication protocol:
+without explicit forwarding, `straindesign` generates a random seed for each call, so otherwise
+identical runs can follow different MILP paths and return different finite solution pools.
 
 **Rank by `guaranteed_product`, never `max_product`.** A design is only valuable if the cell
 *cannot* maximize growth without producing; `max_product` is what the cell could do if it
@@ -353,7 +520,7 @@ chose to cooperate. `growth_coupled` is `guaranteed_product > 0`.
 
 `condition=` is new in 0.4.0 and matters: before it, these two functions took no aeration or
 medium argument at all and depended silently on the caller's model state, which is how an
-aerobic design came to be documented as an anaerobic result (see `SC-01` step 3).
+aerobic design came to be documented as an anaerobic result (see `SC-01` step 4).
 
 `actionable_only=True` (0.4.0) restricts the candidate set to gene-associated internal
 reactions. Without it the search proposes deleting boundary exchanges with no GPR
@@ -364,10 +531,13 @@ genuinely want exchange knockouts.
 
 `max_solutions` caps **MILP solutions, not distinct designs** — coupled-set members can yield
 the same intervention more than once, and one run returned 23 designs at `max_solutions=5`.
-The solution-pool size is solver-state dependent and is not a reportable quantity; the top
-design is.
+The solution-pool size is solver/search-state dependent and is not a biological quantity.
+Reproducibility requires the recorded seed, solver/version, candidate set, and search limits;
+the seed alone does not promise identical behavior across different MILP implementations.
 
-Needs a MILP solver **and** the `straindesign` package (which needs Java/OpenJDK). Cite
+Needs a MILP solver **and** the importable `straindesign` package. Current `straindesign`
+backends used by CMM do not make Java an unconditional requirement; check it only when the
+selected backend reports that it needs Java. Cite
 Schneider et al. (2022) for `straindesign` alongside Burgard et al. (2003) and
 Tepper & Shlomi (2010) — the package carries no citation of its own.
 
@@ -471,6 +641,11 @@ Both return a `TargetRanking`: `.sorted(descending=True)`, `.top(n)`, `.best()`,
 
 ## 10. Figures — `cmm.visualization`
 
+These functions create figures for direct, single-analysis API calls. A complete SC-01 run
+uses `cmm.reporting.render_production_report(run_dir, renderer="nature-r")`, which reads the
+saved CSVs and writes matched 300-DPI PNG plus editable PDF/SVG outputs before
+`validate_production_run` checks them.
+
 ```python
 from cmm.visualization import (
     escher_flux_map, flux_comparison_figure, flux_log_change_figure, flux_response_figure,
@@ -490,7 +665,7 @@ All figures are authored at 300 DPI with a colour-blind-safe palette and take
 | `yield_figure([yields])` | list of `ProductionYield` | molar yield bars |
 | `fseof_figure(result, top_n=6)` | `FseofResult` | target flux vs enforced product |
 | `fvseof_figure(result, top_n=5)` | `FvseofResult` | mean (solid) and forced-min (dashed) flux |
-| `flux_response_figure(result)` | `FluxResponseResult` | response curve, infeasible span, optimum, response limit, growth axis |
+| `flux_response_figure(result)` | `FluxResponseResult` | candidate-flux/product response, infeasible span, optimum, response limit, secondary growth trace |
 | `sampling_figure(result, top_n=8, reference=…)` | `SamplingResult` | per-reaction flux violins vs a reference |
 | `flux_comparison_figure(ref, cmp, reactions)` | two flux dicts | grouped bars |
 | `flux_log_change_figure(log_changes)` | dict from `flux_log_change` | ranked log2 changes |
@@ -505,5 +680,7 @@ publication network figure.
 ## 11. Feature manifest
 
 `cmm.features.INCLUDED_FEATURES` lists what actually ships; `PLANNED_FEATURES` lists what does
-not. As of this writing `PLANNED_FEATURES` is `("dynamic_fba", "enzyme_constrained_modeling")`.
-Check the tuple rather than assuming — and never present a planned feature as available.
+not. The concrete `production_target_workflow` and `publication_reporting` entries ship;
+generic `scenario_templates` and `scenario_file_formats` remain in `EXCLUDED_FEATURES`.
+As of this writing `PLANNED_FEATURES` is
+`("dynamic_fba", "enzyme_constrained_modeling")`. Check the tuples rather than assuming.

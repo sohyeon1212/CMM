@@ -133,6 +133,24 @@ def test_moma_l2_distance_is_the_root_of_the_qp_objective(branched_model):
     assert result.distance == pytest.approx(recomputed, abs=1e-6)
 
 
+def test_comparison_exports_summary_and_fluxes_without_hand_transcription(
+    branched_model,
+):
+    reference = reference_state_pfba(branched_model, name="wt")
+    pert = reaction_perturbations(branched_model, ["R2"])[0]
+    with apply_perturbation(branched_model, pert):
+        result = moma(branched_model, reference, linear=False)
+
+    summary = result.summary_frame().iloc[0]
+    assert summary["status"] == result.status
+    assert summary["objective_value"] == pytest.approx(result.objective_value)
+    assert summary["distance"] == pytest.approx(result.distance)
+    assert summary["n_fluxes"] == len(result.fluxes)
+
+    fluxes = result.fluxes_frame().set_index("reaction_id")["flux"]
+    assert fluxes.to_dict() == result.fluxes
+
+
 def test_moma_l1_distance_is_the_lp_objective(branched_model):
     reference = reference_state_pfba(branched_model, name="wt")
     pert = reaction_perturbations(branched_model, ["R2"])[0]

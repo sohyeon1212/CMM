@@ -195,6 +195,13 @@ def test_phases_frame_exports_the_phase_table(ecoli_core):
     prices = frame["shadow_price"].tolist()
     assert prices == sorted(prices, reverse=True)
 
+    summary = result.summary_frame().iloc[0]
+    assert summary["target"] == O2
+    assert summary["response"] == BIOMASS
+    assert summary["n_points"] == len(result.points)
+    assert summary["n_phases"] == len(result.phases)
+    assert summary["feasible_domain_low"] == pytest.approx(result.feasible_range()[0])
+
 
 def test_flat_response_is_reported_as_insensitive(branched_model):
     # R3 and R2 are parallel routes to the same product, so forcing flux through R3

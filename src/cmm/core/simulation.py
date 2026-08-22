@@ -49,6 +49,30 @@ class FluxSolution:
     fluxes: dict[str, float]
     metadata: dict[str, object] = field(default_factory=dict)
 
+    def to_frame(self) -> pd.DataFrame:
+        """Deterministic long-form reaction flux export."""
+
+        return pd.DataFrame(
+            [
+                {"reaction_id": reaction_id, "flux": flux}
+                for reaction_id, flux in sorted(self.fluxes.items())
+            ],
+            columns=["reaction_id", "flux"],
+        )
+
+    def summary_frame(self) -> pd.DataFrame:
+        """One-row solve summary kept separate from the reaction table."""
+
+        return pd.DataFrame(
+            [
+                {
+                    "status": self.status,
+                    "objective_value": self.objective_value,
+                    "n_fluxes": len(self.fluxes),
+                }
+            ]
+        )
+
 
 @dataclass(frozen=True)
 class FluxRange:

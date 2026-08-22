@@ -14,26 +14,45 @@ same functions, and result objects carry enough metadata to reproduce a run.
   OptKnock/RobustKnock, MTA/rMTA, and A→B transformation ranking.
 - `cmm.visualization` converts already-computed results into matplotlib figures. It does not
   solve metabolic models.
+- `cmm.workflows.production` composes existing public services into the fixed SC-01 sequence,
+  writes typed exports and provenance, and owns the `01_preflight`–`07_validation` run schema.
+  It contains no second implementation of the scientific methods and adds no private ranking
+  rule.
+- `cmm.reporting` reads a completed run, renders the Nature Genetics-inspired R figure/report
+  layer, and validates artifact and claim coverage. It never invokes a metabolic solver or
+  changes numerical results.
+- `cmm.cli` is the designated thin adapter for `production-targets`, `report render`, and
+  `report validate`: those commands may perform config parsing and exit-code mapping only.
 - `cmm.app` is the Qt shell. It validates files and UI state, dispatches long analyses to a
   worker, and renders service results.
 
-Only `cmm.app` depends on Qt. The scientific services are importable and testable in a
-headless process.
+Only `cmm.app` depends on Qt. The scientific services, workflow, CLI, and validator are
+importable and testable in a headless process. The `nature-r` renderer depends on an external
+`Rscript` process and fails before rendering when a declared package is unavailable.
 
 ## State and data flow
 
 ```text
-COBRA model + Condition/expression
+confirmed model path + product + explicit condition
               │
               ▼
-       core / omics service ──► FluxState or typed result
-              │                         │
-              ▼                         ▼
-       feature service             provenance metadata
-              │                 (model SHA-256, solver,
-              ▼                  versions, parameters)
-       table / ranking / figure
+       production workflow ──────► core / feature services
+              │                              │
+              │                              ▼
+              │                      typed numerical results
+              ▼
+       CSV + JSON + manifest ─────► R report renderer
+                                             │
+                                             ▼
+                                  HTML + PNG + PDF/SVG
+                                             │
+                                             ▼
+                                       run validator
 ```
+
+For a narrow analysis, callers bypass the workflow and call the relevant core, omics, or
+feature service directly. The workflow is composition and artifact ownership, not a new
+numerical method.
 
 `FluxState` is the shared complete reaction-flux vector used by MOMA, ROOM, MTA/rMTA, and
 transformation workflows. It rejects empty or non-finite state vectors and records its
@@ -56,13 +75,23 @@ still determine feasible model size. A method never silently changes its formula
 capability is missing. In particular, E-Flux2 raises `SolverCapabilityError` unless its
 explicitly named `allow_l1_fallback=True` approximation is requested.
 
+The canonical production workflow strengthens that local rule into a run-level gate. Its
+matched single-knockout stage requires QP for MOMA-L2 and MILP for ROOM; strain design checks
+MILP plus importable `straindesign` and surfaces additional backend requirements. Reporting
+independently checks `Rscript` and required renderer-package availability. Package metadata
+provides compatible minimum versions at runtime; exact versions come from `renv.lock` and the
+three-OS CI comparison. A user may request a narrower run, but an orchestrator may not silently
+decide to produce one.
+
 ## Scientific boundaries
 
 Implemented and tested services are enumerated in `cmm.features.INCLUDED_FEATURES`. **Flux
 sampling (`random_flux_sampling`, `reference_constrained_sampling`) and flux-response analysis
 (`flux_response`) are shipped**, with method contracts in `VALIDATION.md`, GUI tabs, and
-publication figures. Dynamic FBA and enzyme-constrained modeling remain roadmap items; they are
-not exposed as shipped capabilities. `docs/feature-roadmap.md` holds the current split.
+publication figures. The concrete `production_target_workflow` and `publication_reporting`
+services are also shipped; their presence does not imply a generic scenario-template engine,
+which remains excluded. Dynamic FBA and enzyme-constrained modeling remain roadmap items.
+`docs/feature-roadmap.md` holds the current split.
 
 The following distinctions are intentional:
 
@@ -72,6 +101,8 @@ The following distinctions are intentional:
   approximation is available only as `rmta_continuous`.
 - FSEOF ranks a single biomass-optimal flux at each enforced product level. FVSEOF performs
   FVA at each level and reports midpoint, forced-minimum magnitude, and range-width trends.
+  Their top candidate sets are retained independently; overlap is descriptive evidence, not a
+  workflow selection gate.
 - Boundary reactions, biomass, the target exchange, and reactions without a GPR are retained
   in diagnostic tables but excluded from actionable target lists by default.
 - `flux_response` reports sensitivity as the exact LP shadow price and its phase boundaries.

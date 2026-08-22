@@ -174,6 +174,40 @@ class ComparisonResult:
     def to_flux_state(self, name: str = "perturbed") -> FluxState:
         return FluxState(self.fluxes, name=name, provenance="imported")
 
+    def summary_frame(self) -> pd.DataFrame:
+        """One-row export of the solve quantities quoted in reports.
+
+        Fluxes intentionally live in :meth:`fluxes_frame`: repeating status, objective and
+        distance once per reaction makes a CSV look as though those values were measured
+        independently for every reaction.  Saving the two frames preserves both the solve
+        summary and the complete predicted state without hand-transcribing either.
+        """
+
+        return pd.DataFrame(
+            [
+                {
+                    "method": self.method,
+                    "status": self.status,
+                    "objective_value": self.objective_value,
+                    "distance": self.distance,
+                    "distance_kind": self.distance_kind,
+                    "n_changed_reactions": self.n_changed_reactions,
+                    "n_fluxes": len(self.fluxes),
+                }
+            ]
+        )
+
+    def fluxes_frame(self) -> pd.DataFrame:
+        """Deterministic long-form export of the predicted reaction fluxes."""
+
+        return pd.DataFrame(
+            [
+                {"reaction_id": reaction_id, "flux": flux}
+                for reaction_id, flux in sorted(self.fluxes.items())
+            ],
+            columns=["reaction_id", "flux"],
+        )
+
 
 def _reference_solution(model: Model, reference: FluxState) -> Solution:
     """Build a cobra Solution covering every model reaction from the reference state.

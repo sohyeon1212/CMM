@@ -40,6 +40,14 @@ def test_fba_returns_plain_flux_solution(toy_model):
     assert solution.objective_value == pytest.approx(10)
     assert solution.fluxes["BIOMASS"] == pytest.approx(10)
 
+    frame = solution.to_frame()
+    assert frame["reaction_id"].tolist() == sorted(solution.fluxes)
+    assert frame.set_index("reaction_id").loc["BIOMASS", "flux"] == pytest.approx(10)
+    summary = solution.summary_frame().iloc[0]
+    assert summary["status"] == "optimal"
+    assert summary["objective_value"] == pytest.approx(10)
+    assert summary["n_fluxes"] == len(solution.fluxes)
+
 
 def test_fba_accepts_condition(toy_model):
     condition = Condition(

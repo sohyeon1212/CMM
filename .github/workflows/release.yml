@@ -2,15 +2,15 @@ name: Release
 
 # Build the distribution and publish it as a GitHub Release whenever a version tag is pushed:
 #
-#     git tag v0.3.0 && git push origin v0.3.0
+#     git tag v0.5.0 && git push origin v0.5.0
 #
 # CMM is pure Python, so a single universal wheel (cmm-<version>-py3-none-any.whl) installs on
 # Windows, macOS, and Linux. No PyPI account or secrets are required — the artifacts are
 # attached to the GitHub Release and installed from there or directly from the repo:
 #
-#     pip install https://github.com/jyryu3161/CMM/releases/download/v0.3.0/cmm-0.3.0-py3-none-any.whl
-#     pip install "cmm[desktop,design] @ https://github.com/jyryu3161/CMM/releases/download/v0.3.0/cmm-0.3.0-py3-none-any.whl"
-#     pip install "git+https://github.com/jyryu3161/CMM.git@v0.3.0"
+#     pip install https://github.com/jyryu3161/CMM/releases/download/v0.5.0/cmm-0.5.0-py3-none-any.whl
+#     pip install "cmm[desktop,design] @ https://github.com/jyryu3161/CMM/releases/download/v0.5.0/cmm-0.5.0-py3-none-any.whl"
+#     pip install "git+https://github.com/jyryu3161/CMM.git@v0.5.0"
 
 on:
   push:
@@ -38,12 +38,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgl1 libegl1 libxkbcommon0 libdbus-1-3
 
-      - name: Install and verify the locked publication environment
+      - name: Install and verify the locked Python environment
         run: |
           uv sync --frozen --all-extras
           uv run ruff check src tests
           uv run ruff format --check src tests
-          uv run mypy src/cmm/core src/cmm/features src/cmm/omics
+          uv run mypy \
+            src/cmm/core src/cmm/features src/cmm/omics \
+            src/cmm/workflows src/cmm/reporting
           uvx --from cffconvert==2.0.0 cffconvert --validate
           uv export --frozen --all-extras --no-emit-project -o "$RUNNER_TEMP/requirements-audit.txt"
           uvx --from pip-audit==2.10.1 pip-audit \
@@ -75,6 +77,13 @@ jobs:
           uv venv /tmp/cmm-wheel
           uv pip install --python /tmp/cmm-wheel/bin/python dist/*.whl
           /tmp/cmm-wheel/bin/python -m cmm.cli --version
+          /tmp/cmm-wheel/bin/python - <<'PY'
+          from cmm.reporting.publication import renderer_script_path
+
+          renderer = renderer_script_path()
+          if not renderer.is_file() or not renderer.read_bytes().strip():
+              raise SystemExit(f"installed wheel is missing its R renderer: {renderer}")
+          PY
 
       - name: Publish GitHub Release with artifacts
         uses: softprops/action-gh-release@v2

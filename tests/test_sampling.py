@@ -25,6 +25,14 @@ def test_samples_are_a_reaction_table(ecoli_core):
     assert frame.shape[1] == len(ecoli_core.reactions)
     assert BIOMASS in frame.columns
 
+    tidy = result.long_frame()
+    assert list(tidy.columns) == ["sample_id", "reaction_id", "flux"]
+    assert len(tidy) == result.n_samples * len(ecoli_core.reactions)
+    first_sample = tidy[tidy["sample_id"] == result.samples.index[0]].set_index(
+        "reaction_id"
+    )["flux"]
+    assert first_sample.to_dict() == result.samples.iloc[0].to_dict()
+
 
 def test_same_seed_reproduces_the_same_samples(ecoli_core):
     first = random_flux_sampling(ecoli_core, seed=11, **SMALL)

@@ -77,6 +77,20 @@ class SamplingResult:
 
         return self.samples.copy()
 
+    def long_frame(self) -> pd.DataFrame:
+        """Tidy raw samples: one row per sample and reaction.
+
+        The wide frame remains the compact archival form.  This view is intended for a
+        renderer or distribution-shift calculation and contains no inferred biological
+        replicate labels.
+        """
+
+        wide = self.samples.copy()
+        wide.index.name = "sample_id"
+        return wide.reset_index().melt(
+            id_vars="sample_id", var_name="reaction_id", value_name="flux"
+        )
+
     def statistics(self) -> pd.DataFrame:
         """Per-reaction summary: mean, std, min, quartiles, max."""
 

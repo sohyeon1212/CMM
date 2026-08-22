@@ -2,16 +2,52 @@
 
 [![CI](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml/badge.svg)](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml)
 
-CMM is a Python library and Qt desktop application for constraint-based metabolic modeling.
-The same solver-neutral services power scripts and the GUI: FBA/pFBA/FVA, omics integration,
-perturbation response, production scans, growth-coupled strain design, MTA/rMTA target
-ranking, and publication figures.
+CMM is a solver-aware Python platform for reproducible constraint-based metabolic engineering.
+It proposes and tests genetic interventions for target-metabolite production, integrates
+expression data, analyses perturbation responses, and records the evidence needed to reproduce
+a computational study. The optional Qt desktop application calls the same numerical services;
+Python and the thin CLI are the publication workflow boundaries.
+
+> **Research software status:** CMM 0.5.0 is beta software being prepared for journal
+> publication. Passing the validation suite establishes implementation and artifact
+> integrity, not biological validation. Treat every predicted intervention as an *in silico*
+> hypothesis until it is tested experimentally.
 
 ![CMM platform](docs/images/overview.png)
 
+## Reproducible production workflow
+
+The canonical production workflow keeps proposal methods and forward checks distinct:
+
+| Scientific question | Methods | Evidence reported |
+|---|---|---|
+| Which single-gene deletions change the phenotype? | MOMA-L2 and ROOM | Separate growth-versus-product screens, GPR-resolved reaction information, and flux response plus paired sampling for every unique D1–D5 candidate |
+| Which deletion sets couple production to growth? | OptKnock and RobustKnock | Deterministically seeded MILP searches; maximum and guaranteed product; designs ranked by the guarantee |
+| Which fluxes are amplification hypotheses? | FSEOF and FVSEOF | Independent top-10 method rankings and trajectories, visible loop diagnostics, and a flux-response record for every candidate in their union |
+| Can another researcher audit the claims? | Provenance, manifest, R renderer, run validator | Exact model/config, raw CSVs, metadata, 300-DPI PNG, editable PDF/SVG, linked and standalone HTML |
+
+One UTF-8 JSON config specifies the exact SBML file, product exchange, medium, substrate
+uptake, oxygen bounds, solver, search limits, the strain-design seed, and sampling seed. A
+complete run is:
+
+```bash
+uv run cmm production-targets --config workflows/product.json
+uv run cmm report validate results/product_run --json
+```
+
+The first command performs preflight, numerical analysis, publication rendering, and final
+validation. Use `--analysis-only` to separate the solver run from R rendering. A run is not
+complete until validation succeeds; unavailable methods and infeasible solutions remain
+visible rather than being silently omitted.
+
+See [Building a reproducible CMM workflow](docs/building-custom-workflows.md) for a complete
+generic config, the equivalent Python API, guidance for composing a new workflow, artifact and
+provenance contracts, and workflow-level tests. The scientific sequence is specified in
+[SC-01 production target discovery](docs/scenarios/SC-01-production-target-discovery.md).
+
 ## Availability and implementation
 
-Source code, documentation, test data, and reproducibility workflows are freely available
+Source code, documentation, test data, and reproducibility workflows are available
 at <https://github.com/jyryu3161/CMM> under the [MIT License](LICENSE). CMM is implemented in
 Python and supports Python 3.10–3.12 on Linux, macOS, and Windows. It provides both a Python
 API and a Qt desktop interface; installation and a complete test run require no registration.
@@ -38,9 +74,11 @@ Zenodo or an equivalent long-term repository and its DOI added to this section,
   boundaries, and seeded random flux sampling both uniform and constrained around a reference
   flux state.
 - Strain design: distinct OptKnock and three-level RobustKnock modules through StrainDesign,
-  followed by independent maximum/guaranteed-product evaluation. Knockout candidates are
-  restricted to gene-associated internal reactions, so a returned design is buildable as a gene
-  deletion: exchanges are excluded, and so are reactions whose only gene is COBRA's `s0001`
+  with an explicit deterministic seed forwarded to the MILP backend, followed by independent
+  maximum/guaranteed-product evaluation. The default seed is `0`; publication configs record it
+  rather than accepting a hidden backend-generated seed. Knockout candidates are restricted to
+  gene-associated internal reactions, so a returned design is buildable as a gene deletion:
+  exchanges are excluded, and so are reactions whose only gene is COBRA's `s0001`
   spontaneous-reaction placeholder.
 - MTA/rMTA: published MTA MIQP, published rMTA best/MOMA/worst scoring, and an explicitly
   labeled legacy continuous heuristic. Reached as `revert_targets` and `transformation_targets`
@@ -53,17 +91,83 @@ Zenodo or an equivalent long-term repository and its DOI added to this section,
   no map fits. Any Escher JSON can be loaded from the GUI.
 - Auditability: deterministic model fingerprints and solver/package/parameter provenance on
   numerical results.
+- Production workflow: the concrete `production_target_workflow` composes MOMA-L2/ROOM single
+  knockouts, OptKnock/RobustKnock, FSEOF/FVSEOF, loop diagnostics, flux response, paired
+  sampling, recommendations, and the fixed schema-v2 artifact tree. FSEOF and FVSEOF contribute
+  independent method-specific rankings; overlap is reported but is not required for a
+  hypothesis to receive its own forward validation. Every unique MOMA/ROOM display-ranked
+  D1–D5 knockout candidate receives knockout-background flux response and matched paired
+  sampling, and every candidate in the independent FSEOF/FVSEOF top-10 union receives a
+  flux-response scan. Loop-flagged or unresolved amplification targets are still scanned but
+  remain ineligible for support/recommendation; non-runnable or failed analyses remain visible
+  with status and reason rather than shortening those candidate sets. The workflow is available
+  through `cmm production-targets --config CONFIG` and the Python API.
+- Publication reporting: the concrete `publication_reporting` service validates
+  manifest-declared source tables and renders deterministic English HTML plus 300-DPI PNG and editable
+  PDF/SVG figures through R. Generic scenario-template and scenario-file-format engines remain
+  explicitly excluded from the shipped feature manifest.
 
 ## Reproducible installation
 
-CMM requires Python 3.10–3.12. The publication environment is locked in `uv.lock`:
+CMM requires Python 3.10–3.12. Python dependencies are locked in `uv.lock`. R is optional for
+the scientific services, workflow analysis, CLI validation, and desktop application:
 
 ```bash
 git clone https://github.com/jyryu3161/CMM.git
 cd CMM
 uv sync --frozen --all-extras
+uv run cmm --version
 uv run python -m cmm.app
 ```
+
+Publication rendering additionally requires R. In a source checkout, `renv.lock` pins R 4.3.2
+and every renderer package. Restore it, then expose the project library to the current shell;
+the export is needed because CMM deliberately launches `Rscript --vanilla`.
+
+macOS/Linux/WSL:
+
+```bash
+Rscript --vanilla -e 'if (!requireNamespace("renv", quietly=TRUE)) install.packages("renv", repos="https://cloud.r-project.org"); renv::restore(prompt=FALSE)'
+CMM_RENV_LIBRARY="$(Rscript --vanilla -e 'renv::load(); cat(.libPaths()[1])')"
+export R_LIBS_USER="$CMM_RENV_LIBRARY"
+uv run cmm report render RUN_DIR
+```
+
+Windows PowerShell:
+
+```powershell
+Rscript --vanilla -e "if (!requireNamespace('renv', quietly=TRUE)) install.packages('renv', repos='https://cloud.r-project.org'); renv::restore(prompt=FALSE)"
+$env:R_LIBS_USER = ((Rscript --vanilla -e "renv::load(); cat(.libPaths()[1])") -join "").Trim()
+uv run cmm report render RUN_DIR
+```
+
+The Python wheel and sdist contain the checked-in R renderer but not the repository-root
+`renv.lock`. Distribution-only users can install its runtime packages directly:
+
+```bash
+Rscript --vanilla -e "install.packages(c('jsonlite','ggplot2','ggrepel','patchwork','svglite','ragg'), repos='https://cloud.r-project.org')"
+```
+
+That follows current CRAN rather than the publication lock. For an exactly reproducible
+manuscript render, restore `renv.lock` from the matching Git checkout or GitHub source archive.
+At runtime the renderer verifies that `Rscript` and its named packages can be loaded; those
+packages enforce their declared compatible dependency minima. The runtime records the actual
+versions in the figure manifest but does not reinterpret the repository lock. Exact versions
+come from `renv::restore()` and are compared with the complete lock by CI on all three OSes.
+
+The current lock records exact R/package versions and CRAN sources but has no per-package
+`Hash` fields. Do not add hashes by hand: regenerate them only from a fully materialized R
+4.3.2 library when a canonical `renv::snapshot()` diff preserves the complete package set and
+every recorded version.
+
+CI restores that lock and executes the R package smoke test plus publication-report tests on
+Ubuntu, macOS, and Windows. `ggplot2` itself is pure R; native compilation risk comes from
+graphics dependencies such as `ragg`, `systemfonts`, `textshaping`, and `svglite`. The CI job
+uses available CRAN/Posit binaries, installs Linux and macOS build libraries, and provisions
+Rtools43 on Windows. Those toolchains prepare and support source compilation when an archived
+R 4.3 binary is unavailable. The normal matrix does not force a source-only restore; it tests
+the exact restored versions and renderer result regardless of whether each package arrived as
+a binary or was compiled from source.
 
 For a conventional editable installation:
 
@@ -131,8 +235,7 @@ print(yield_result.molar_yield, yield_result.metadata["model_sha256"])
 print(scan.amplification_targets())
 ```
 
-Verifying a predicted target — does forcing flux through it actually buy product, and is the
-prediction forced or just one of many optima?
+Calling the response and sampling building blocks directly:
 
 ```python
 from cmm.features import flux_response, random_flux_sampling
@@ -143,6 +246,11 @@ print(response.optimum(), response.limit.found, response.feasible_range())
 ensemble = random_flux_sampling(model, n=1000, seed=0)
 print(ensemble.statistics().loc["EX_succ_e"])
 ```
+
+The sampling call above characterizes the model as passed; it is not paired knockout
+validation by itself. The canonical production workflow applies every unique MOMA/ROOM D1–D5
+deletion and exports matched wild-type/knockout ensembles for each candidate, while applying
+flux response to those knockout candidates and the complete FSEOF/FVSEOF top-10 union.
 
 Expression integration:
 
@@ -171,7 +279,7 @@ QT_QPA_PLATFORM=offscreen uv run pytest -q -ra --strict-markers \
   --durations=10 --cov=cmm --cov-branch --cov-report=term-missing --cov-fail-under=80
 uv run ruff check src tests
 uv run ruff format --check src tests
-uv run mypy src/cmm/core src/cmm/features src/cmm/omics
+uv run mypy src/cmm/core src/cmm/features src/cmm/omics src/cmm/workflows src/cmm/reporting
 uvx --from cffconvert==2.0.0 cffconvert --validate
 uv build && uvx twine check dist/*
 ```
@@ -183,6 +291,7 @@ biological prediction.
 
 ## Documentation
 
+- [Build or customize a reproducible workflow](docs/building-custom-workflows.md)
 - [Desktop and Python tutorial](docs/TUTORIAL.md)
 - [Scientific validation and reproducibility](docs/VALIDATION.md)
 - [MTA/rMTA design and equations](docs/design-revert-metabolism.md)
@@ -199,9 +308,11 @@ For driving CMM from an AI coding CLI (Claude Code, Codex, …):
 ## Citation and license
 
 CMM is open source under the [MIT License](LICENSE). Citation metadata are machine-readable
-in [CITATION.cff](CITATION.cff); replace the contributor placeholder with the final manuscript
-authors and add the archived release DOI before submission. A manuscript should also cite the
-original papers for every method it uses, listed in `docs/VALIDATION.md`.
+in [CITATION.cff](CITATION.cff). The file intentionally still contains an organization-only
+placeholder: replace it with the final authors and ORCIDs, archive the exact release, and add
+the DOI before journal submission. Until then, cite the repository URL, version, and commit.
+A manuscript must also cite the original paper for every method it uses, as listed in
+[Scientific validation and reproducibility](docs/VALIDATION.md).
 
 Three points that are easy to get wrong, all detailed there:
 

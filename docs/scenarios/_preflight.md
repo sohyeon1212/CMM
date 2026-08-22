@@ -35,9 +35,9 @@ the methods your scenario needs.
 **Branch.**
 - Missing QP/MIQP and the scenario needs it → pick the LP-capable substitute and record the
   substitution, or ask the user to install gurobi/cplex/osqp. Do not proceed silently.
-- MILP, `straindesign` or Java missing and the run needs a growth-coupled design (`SC-01`
-  step 3) → the design search cannot run. `SC-01` defines the single-deletion fallback and the
-  three disclosures the report must then carry; decide this here, not mid-run.
+- MILP or importable `straindesign` missing and the run needs a growth-coupled design → the
+  design search cannot run. Any additional backend requirement is surfaced by that backend;
+  decide how to narrow the run explicitly rather than silently omitting the design stage.
 
 **Pin the model.** Copy the model file into the run directory as `model/<model-id>.xml` (or
 write it there with `cobra.io.write_sbml_model`) before anything else runs. A model *name* does
@@ -81,8 +81,9 @@ it, an `aerobic=False` argument alongside an aerobic medium silently produced an
 design inside an anaerobic run. For an aerobic run use the aerobic preset and drop the
 `bounds=` entry rather than leaving a contradicting oxygen bound behind.
 
-**Decision rule.** The medium is a scientific choice, not a default. If the user did not
-specify one, state which you applied and that results are conditional on it. Re-take the model
+**Decision rule.** The medium is a scientific choice, not a default. If the prompt or config
+does not resolve medium, substrate uptake, and aeration, ask rather than choosing one. If they
+are already explicit and consistent, do not ask for redundant confirmation. Re-take the model
 fingerprint *after* `apply_medium` — it changes with the medium, so it is evidence of which
 condition the run used.
 
@@ -114,8 +115,8 @@ minimal = pfba(model)
 exchange is blocked, or the objective is unset. Report which and stop — every downstream
 number would be meaningless. Do not "fix" it by opening bounds the user did not ask for.
 
-**Artifact.** `01_preflight/wild_type_fluxes.csv` (from `growth.fluxes`), wild-type growth rate
-in `00_provenance.json`.
+**Artifacts.** `01_preflight/preflight.csv`; the canonical workflow exports the full wild-type
+flux state as `03_reference/wild_type_fluxes.csv` and records growth in the summary/provenance.
 
 ---
 

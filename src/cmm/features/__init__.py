@@ -73,6 +73,8 @@ INCLUDED_FEATURES = (
     "revert_metabolism",
     "flux_response_analysis",
     "random_flux_sampling",
+    "production_target_workflow",
+    "publication_reporting",
 )
 
 # Roadmap items described in docs/feature-roadmap.md (Phase 3 / Phase 5) that do NOT yet have
@@ -84,6 +86,8 @@ PLANNED_FEATURES = (
 )
 
 EXCLUDED_FEATURES = (
+    # Generic scenario-template/file-format engines remain outside the shipped surface. The
+    # concrete SC-01 workflow and publication reporter above do not make these generic.
     "scenario_templates",
     "media_management",
     "scenario_file_formats",

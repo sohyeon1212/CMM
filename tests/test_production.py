@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 from cmm.core.condition import Condition, ReactionBound
 from cmm.features.production import (
+    FseofResult,
+    FvseofResult,
     fseof,
     fvseof,
     production_envelope,
@@ -87,6 +90,23 @@ def test_theoretical_yield_aerobic_higher(ecoli_core):
     assert aerobic.molar_yield > anaerobic.molar_yield
 
 
+def test_theoretical_yield_exports_summary_and_carbon_sources(ecoli_core):
+    result = theoretical_yield(ecoli_core, SUCC)
+    summary = result.to_frame().iloc[0]
+    assert summary["molar_yield"] == pytest.approx(result.molar_yield)
+    assert bool(summary["co2_explains_excess"]) is result.co2_explains_excess
+
+    uptake = result.carbon_uptake_frame()
+    assert set(uptake.columns) == {
+        "reaction_id",
+        "uptake",
+        "carbon_atoms",
+        "carbon_flux",
+        "is_nominated_substrate",
+    }
+    assert uptake.loc[uptake["is_nominated_substrate"], "reaction_id"].tolist() == [GLC]
+
+
 def test_theoretical_yield_does_not_mutate_model(ecoli_core):
     before = ecoli_core.reactions.EX_o2_e.lower_bound
     theoretical_yield(ecoli_core, SUCC, condition=ANAEROBIC)
@@ -133,6 +153,41 @@ def test_fseof_finds_known_succinate_targets(ecoli_core):
     assert SUCC in result.amplification_targets(actionable_only=False)
 
 
+def test_fseof_amplification_targets_rank_by_slope_then_reaction_id() -> None:
+    """Workflow top-N selection must not inherit arbitrary SBML reaction order."""
+
+    result = FseofResult(
+        product="PRODUCT",
+        biomass="BIOMASS",
+        enforced_levels=(0.0, 1.0),
+        trends=pd.DataFrame(
+            {
+                0.0: [0.0, 0.0, 0.0, 0.0, 0.0],
+                1.0: [1.0, 1.0, 2.0, 9.0, 3.0],
+                "slope": [1.0, 1.0, 2.0, 9.0, 3.0],
+                "classification": [
+                    "amplify",
+                    "amplify",
+                    "amplify",
+                    "amplify",
+                    "none",
+                ],
+                "actionable": [True, True, True, False, True],
+            },
+            # Deliberately neither slope nor identifier order.
+            index=["B", "A", "C", "BOUNDARY", "NONE"],
+        ),
+    )
+
+    assert result.amplification_targets() == ["C", "A", "B"]
+    assert result.amplification_targets(actionable_only=False) == [
+        "BOUNDARY",
+        "C",
+        "A",
+        "B",
+    ]
+
+
 def test_fseof_criterion_string_describes_what_is_computed(ecoli_core):
     """The provenance label claimed monotonicity that ``_classify_trend`` never tested."""
 
@@ -152,6 +207,22 @@ def test_fseof_trends_shape(ecoli_core):
     assert result.trends.shape[0] == len(ecoli_core.reactions)
     assert "classification" in result.trends.columns
     assert len(result.enforced_levels) == 6
+
+    wide = result.to_frame()
+    tidy = result.trajectory_frame()
+    assert wide["reaction_id"].is_unique
+    ranked = wide.dropna(subset=["amplification_rank"])
+    assert ranked["reaction_id"].tolist() == result.amplification_targets()
+    assert ranked["amplification_rank"].tolist() == list(range(1, len(ranked) + 1))
+    assert len(tidy) == len(ecoli_core.reactions) * len(result.enforced_levels)
+    assert set(tidy.columns) == {
+        "reaction_id",
+        "enforced_product_flux",
+        "flux",
+        "slope",
+        "classification",
+        "actionable",
+    }
 
 
 _FVSEOF_RXNS = ["FRD7", "PPC", "MDH", "FUM", "SUCCt3", "EX_succ_e", "CS", "ACALD"]
@@ -227,6 +298,34 @@ def test_fvseof_amplification_targets_use_park_priority_order(ecoli_core):
     assert set(targets) == set(result.targets_of_type(1, 2, 3))
 
 
+def test_fvseof_amplification_rank_uses_reaction_id_for_capacity_ties() -> None:
+    """Equal Park priorities must not fall back to arbitrary model order."""
+
+    reaction_ids = ["B", "A", "C"]
+    levels = (0.0, 1.0)
+    result = FvseofResult(
+        product="PRODUCT",
+        biomass="BIOMASS",
+        enforced_levels=levels,
+        mean=pd.DataFrame([[0.0, 1.0]] * 3, index=reaction_ids, columns=levels),
+        forced=pd.DataFrame([[0.0, 1.0]] * 3, index=reaction_ids, columns=levels),
+        capacity=pd.DataFrame(
+            [[2.0, 2.0], [2.0, 2.0], [1.0, 1.0]],
+            index=reaction_ids,
+            columns=levels,
+        ),
+        classification=pd.Series("amplify", index=reaction_ids),
+        park_type=pd.Series(2, index=reaction_ids),
+        robust=pd.Series(True, index=reaction_ids),
+        slope=pd.Series(1.0, index=reaction_ids),
+        capacity_slope=pd.Series(0.0, index=reaction_ids),
+        actionable=pd.Series(True, index=reaction_ids),
+    )
+
+    assert result.amplification_targets() == ["C", "A", "B"]
+    assert result.to_frame().loc[:, "reaction_id"].tolist() == ["C", "A", "B"]
+
+
 def test_fvseof_default_n_steps_meets_parks_minimum(ecoli_core):
     """Park specify n >= 10; the default was 8."""
 
@@ -250,6 +349,25 @@ def test_fvseof_ranges_shape_and_columns(ecoli_core):
     # The forced minimum magnitude is never negative (it is a |flux| lower bound).
     assert (result.forced.to_numpy() >= -1e-9).all()
     assert len(result.enforced_levels) == 3
+
+    summary = result.to_frame()
+    tidy = result.trajectory_frame()
+    assert set(summary["reaction_id"]) == set(_FVSEOF_RXNS)
+    ranked = summary.dropna(subset=["amplification_rank"])
+    assert ranked["reaction_id"].tolist() == result.amplification_targets()
+    assert ranked["amplification_rank"].tolist() == list(range(1, len(ranked) + 1))
+    assert len(tidy) == len(_FVSEOF_RXNS) * len(result.enforced_levels)
+    assert set(tidy.columns) == {
+        "reaction_id",
+        "enforced_product_flux",
+        "mean_flux",
+        "forced_min_abs_flux",
+        "capacity",
+        "classification",
+        "park_type",
+        "robust",
+        "actionable",
+    }
 
 
 def test_fvseof_zero_yield_product_is_consistent(ecoli_core):
