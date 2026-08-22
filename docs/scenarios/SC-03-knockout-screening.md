@@ -58,9 +58,10 @@ with an explicit essentiality threshold, and a stated reference and method.
 
 ## Step 0 — Preflight
 
-**Call.** First confirm one condition — medium, substrate uptake, oxygen/aeration bounds and
-other changed bounds — then run `_preflight.md` P1–P3; P4 only if a product is named; P5 only
-if using an omics baseline.
+**Call.** Run `_preflight.md` P0–P3 to resolve and confirm one condition — medium, substrate
+uptake, oxygen/aeration bounds and other changed bounds. P4 applies only if a product is named;
+P5 applies only when using an omics baseline. Do not begin condition-dependent screening until
+an interview-created run definition is confirmed.
 
 **Branch.** Genome-scale model → decide the method now, not after a failed overnight run: a
 `moma_l1` (LP) screen is the practical default, with `moma_l2` re-checks on the survivors.

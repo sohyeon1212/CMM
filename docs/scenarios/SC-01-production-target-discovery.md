@@ -83,9 +83,18 @@ The run definition contains:
 - oxygen exchange and aeration bound.
 
 If the prompt or config already makes these values explicit and consistent, continue without
-asking for redundant confirmation. Ask only when a value is missing or ambiguous. Do not infer
-conditions from a filename or prior run. Aerobic and anaerobic analyses are different runs,
-not panels silently mixed into one run. Save the exact input model and resolved config.
+asking for redundant confirmation. Before asking, inspect the model and local capabilities and
+resolve facts that are unique. If a remaining user decision is missing or ambiguous, follow
+[`_preflight.md` step P0](_preflight.md#step-p0--resolve-consequential-ambiguity): ask only the
+current decision, include a clearly labeled recommended option with its evidence and effect on
+the scientific claim, and resolve dependent decisions in order. Do not infer conditions from a
+filename, a prior run, or unconfirmed model bounds. Aerobic and anaerobic analyses are different
+runs, not panels silently mixed into one run.
+
+If clarification was required, show the exact model, product exchange, condition, method scope or
+substitutions, and relevant experimental constraints in a final run-definition summary. Start the
+canonical workflow only after the user confirms it. An initially complete request needs no extra
+confirmation. Save the exact input model and resolved config.
 
 ## Pipeline and artifacts
 

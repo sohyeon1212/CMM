@@ -63,9 +63,9 @@ Two capabilities have no scenario and are reached that way: `revert_targets` (MT
 
 ### Canonical production-workflow boundary
 
-For an end-to-end SC-01 request, do not hand-assemble a one-off script. After confirming the
-model, product exchange, and condition with the user, use one of these equivalent public
-boundaries:
+For an end-to-end SC-01 request, do not hand-assemble a one-off script. Resolve the model,
+product exchange, and condition first. When that required clarification, obtain confirmation of
+the resolved run definition before using one of these equivalent public boundaries:
 
 ```bash
 cmm production-targets --config CONFIG
@@ -159,8 +159,16 @@ packages; compatible minima come from package metadata, while exact versions com
 1. **Resolve the run definition.** A production solve needs an exact model path, product
    exchange reaction, and one explicit condition containing medium, substrate uptake,
    oxygen/aeration bounds, and any other changed bounds. Preflight computes model id and
-   fingerprint after loading; do not ask the user to supply a hash. Proceed when the inputs are
-   already clear; ask only when a missing or ambiguous value would change the scientific answer.
+   fingerprint after loading; do not ask the user to supply a hash. Inspect the model and local
+   capabilities read-only before asking anything, and resolve unique facts yourself. Proceed
+   when the inputs are already clear. If a missing or ambiguous user decision would change the
+   scientific answer, ask only that decision, include a clearly labeled recommended option with
+   its evidence and scientific consequence, and resolve dependent questions in order. If any
+   clarification was required, summarize the final run definition and obtain explicit approval
+   before starting the workflow. Do not add that confirmation round to an initially complete
+   request. The production skill's
+   [`clarification-interview.md`](.agents/skills/cmm-production-engineering/references/clarification-interview.md)
+   defines the detailed protocol.
 2. **Preflight first.** Run `docs/scenarios/_preflight.md` before any scenario. A model that
    does not grow, has no exchanges, or whose gene ids do not match the expression table will
    produce confident nonsense.
@@ -249,11 +257,15 @@ figure from data that are absent from the run directory. Completion requires a c
 
 ## 5. Stop and ask
 
-Ask the user rather than guessing when:
+Inspect discoverable facts before asking. When a user decision is still required, give compatible
+choices and identify the recommended choice, why it is recommended, and how it changes the
+analysis or claim. Ask the user rather than guessing when:
 
 - **No target metabolite is named** for a production goal — everything downstream depends on it.
 - **The medium, substrate uptake, or oxygen/aeration bounds are not explicit.** Ask for one
-  condition rather than inheriting biologically decisive defaults without confirmation.
+  coherent condition rather than inheriting biologically decisive defaults without confirmation.
+  `model-as-loaded` is a valid condition only after the user explicitly accepts the inspected
+  bounds; a generic request to "use defaults" does not supply a biological condition.
 - **The product has no exchange reaction**, or `model.exchanges` is empty. Production design is
   unavailable; do not silently substitute an internal reaction.
 - **Expression gene ids do not overlap `model.genes`** (preflight reports the overlap). Ask for

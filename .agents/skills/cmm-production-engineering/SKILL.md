@@ -16,7 +16,27 @@ The run needs all three:
 2. The product **exchange reaction ID**.
 3. One explicit condition: medium, substrate exchange and uptake bound, oxygen exchange and aeration bound, plus any other changed bounds.
 
-If these values are already explicit and internally consistent, proceed without asking the user to reconfirm them. Ask only about missing or ambiguous values that would change the scientific answer. Stop if the product is not an exchange, the model does not grow, or theoretical yield is zero. Treat each condition as a separate run.
+If these values are already explicit and internally consistent, proceed without asking the user
+to reconfirm them. Ask only about missing or ambiguous values that would change the scientific
+answer. Stop downstream analysis if the product cannot be resolved to an exchange, the model
+does not grow, or theoretical yield is zero; for zero yield, use the clarification protocol to
+recommend and ask about a scientifically justified condition change rather than opening bounds
+yourself. Treat each condition as a separate run.
+
+Before asking, inspect the model and local environment read-only. Resolve facts that CMM can
+determine uniquely, such as the model fingerprint, objective, exchange inventory, current
+bounds, and solver or R capabilities. Do not mistake the model's current bounds for the user's
+intended biological condition.
+
+If a consequential ambiguity remains, or the user explicitly asks to be interviewed, challenged,
+or guided through setup, read
+[`references/clarification-interview.md`](references/clarification-interview.md) and use its
+adaptive interview. Every decision question must include a clearly labeled recommended option,
+the evidence for that recommendation, and how each choice changes the analysis or scientific
+claim. Ask one dependent question at a time; group only a few genuinely independent choices.
+If an interview was needed, present the resolved run definition and obtain explicit confirmation
+before launching the workflow or writing run artifacts. A prompt that was complete from the
+start requires neither an interview nor an extra confirmation round.
 
 ## Use the canonical entry point
 

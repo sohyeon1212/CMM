@@ -57,7 +57,9 @@ condition it was derived in.
 **Goal.** Confirm the expression table actually maps onto the model. This scenario fails
 silently more than any other.
 
-**Call.** `_preflight.md` P1–P3 and **P5**, plus P4 if a product is named.
+**Call.** `_preflight.md` P0–P3 and **P5**, plus P4 if a product is named. P0 performs read-only
+discovery and asks only unresolved scientific decisions; do not begin condition-dependent
+integration until an interview-created run definition is confirmed.
 
 **Decision rule.** Gene id overlap must cover most model genes. Below roughly half, stop and
 ask for the mapping — an unmapped table yields a confident, meaningless flux state.
