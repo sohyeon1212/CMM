@@ -788,6 +788,11 @@ def _validate_numeric_rows(
                 issues.append(
                     f"artifact {role!r} row {index} has invalid candidate_scope {scope!r}"
                 )
+            if scope in allowed_scopes and row.get("background") != "wild_type":
+                issues.append(
+                    f"artifact {role!r} row {index} uses current candidate_scope {scope!r} "
+                    "but background is not 'wild_type'"
+                )
             _finite_number(
                 row.get("target_flux"),
                 role=role,
@@ -809,7 +814,7 @@ def _validate_numeric_rows(
                     column="biomass_flux",
                     row_number=index,
                     issues=issues,
-                    optional=True,
+                    optional=scope not in allowed_scopes,
                 )
         return
 
@@ -864,6 +869,11 @@ def _validate_numeric_rows(
             if scope and scope not in allowed_scopes:
                 issues.append(
                     f"artifact {role!r} row {index} has invalid candidate_scope {scope!r}"
+                )
+            if scope in allowed_scopes and background != "wild_type":
+                issues.append(
+                    f"artifact {role!r} row {index} uses current candidate_scope {scope!r} "
+                    "but background is not 'wild_type'"
                 )
             if status not in {"complete", "failed", "skipped"}:
                 issues.append(
@@ -1043,6 +1053,105 @@ def _validate_cross_artifact_invariants(
         return ";".join(
             sorted(part.strip() for part in value.split(";") if part.strip())
         )
+
+    current_response_scopes = {
+        "all_report_selected_candidates",
+        "all_display_ranked_candidates",
+    }
+    product_reaction = str(summary.get("product", "")).strip()
+    tidy_by_target_scope: dict[tuple[str, str], list[Mapping[str, str]]] = {}
+    for row_number, row in enumerate(csv_rows.get("flux_response_tidy", ()), start=2):
+        scope = row.get("candidate_scope", "").strip()
+        if scope not in current_response_scopes:
+            continue
+        target = row.get("target", "").strip()
+        key = (target, scope)
+        tidy_by_target_scope.setdefault(key, []).append(row)
+        if (
+            product_reaction
+            and row.get("response_reaction", "").strip() != product_reaction
+        ):
+            issues.append(
+                "current scoped flux-response tidy row "
+                f"{row_number} must use configured product {product_reaction!r} as "
+                "response_reaction"
+            )
+        if (
+            scope == "all_report_selected_candidates"
+            and row.get("scan_reaction", "").strip() != target
+        ):
+            issues.append(
+                "current amplification flux-response tidy row "
+                f"{row_number} must scan its candidate target reaction"
+            )
+
+    for row_number, row in enumerate(response_index, start=2):
+        scope = row.get("candidate_scope", "").strip()
+        if scope not in current_response_scopes:
+            continue
+        target = row.get("target", "").strip()
+        scan_reaction = row.get("scan_reaction", "").strip()
+        response_reaction = row.get("response_reaction", "").strip()
+        background = row.get("background", "").strip()
+        status = row.get("status", "").strip().lower()
+        if product_reaction and response_reaction != product_reaction:
+            issues.append(
+                "current scoped flux-response index row "
+                f"{row_number} must use configured product {product_reaction!r} as "
+                "response_reaction"
+            )
+        if scope == "all_report_selected_candidates" and scan_reaction != target:
+            issues.append(
+                "current amplification flux-response index row "
+                f"{row_number} must scan its candidate target reaction"
+            )
+        if scope == "all_display_ranked_candidates" and status == "complete":
+            signature = normalized_signature(
+                row.get("blocked_reactions", "")
+                or row.get("blocked_reaction_signature", "")
+            )
+            blocked_reactions = signature.split(";") if signature else []
+            if len(blocked_reactions) != 1:
+                issues.append(
+                    "complete current knockout flux-response index row "
+                    f"{row_number} must represent exactly one blocked reaction"
+                )
+            elif scan_reaction != blocked_reactions[0]:
+                issues.append(
+                    "complete current knockout flux-response index row "
+                    f"{row_number} must scan its single blocked reaction "
+                    f"{blocked_reactions[0]!r}"
+                )
+            _finite_number(
+                row.get("scan_reference_flux"),
+                role="flux_response_validation_index",
+                column="scan_reference_flux",
+                row_number=row_number,
+                issues=issues,
+            )
+
+        if status != "complete":
+            continue
+        matching_tidy = tidy_by_target_scope.get((target, scope), [])
+        if not matching_tidy:
+            issues.append(
+                "complete current scoped flux-response index row "
+                f"{row_number} has no tidy rows with matching target {target!r} and "
+                f"candidate_scope {scope!r}"
+            )
+            continue
+        for column, expected in (
+            ("scan_reaction", scan_reaction),
+            ("response_reaction", response_reaction),
+            ("background", background),
+        ):
+            observed = {tidy_row.get(column, "").strip() for tidy_row in matching_tidy}
+            if observed and observed != {expected}:
+                issues.append(
+                    "current scoped flux-response tidy/index semantics disagree for "
+                    f"target {target!r}, candidate_scope {scope!r}, column {column!r}: "
+                    f"index={expected!r}, tidy={sorted(observed)!r}"
+                )
 
     def display_ranked_signature_aliases() -> dict[str, set[str]]:
         ranked_signatures: set[str] = set()

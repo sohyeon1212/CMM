@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -103,6 +104,37 @@ def _replace_artifact(
     _write(path, content)
     entry["sha256"] = _digest(path)
     entry["size_bytes"] = path.stat().st_size
+
+
+def _update_csv_artifact_rows(
+    root: Path,
+    manifest: dict[str, object],
+    role: str,
+    *,
+    target_column: str,
+    target: str,
+    updates: dict[str, str],
+) -> None:
+    artifacts = manifest["artifacts"]
+    assert isinstance(artifacts, dict)
+    entry = artifacts[role]
+    assert isinstance(entry, dict)
+    path = root / str(entry["path"])
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows
+    fields = list(rows[0])
+    matched = False
+    for row in rows:
+        if row[target_column] == target:
+            row.update(updates)
+            matched = True
+    assert matched
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    _replace_artifact(root, manifest, role, output.getvalue())
 
 
 def _make_run(
@@ -521,7 +553,7 @@ def _make_run(
             ) + "".join(
                 f"{target},{signature},EX_product,wild_type,{signature},{signature},"
                 f"{candidate_ids},knockout,moma_l2;room,all_display_ranked_candidates,"
-                f",,,,{0.0 if target == 'g1' else 1.0},complete,,,"
+                f",,,,{1e-12 if target == 'g1' else 1.0},complete,,,"
                 f"flux_response__{target}.csv,"
                 f"flux_response_phases__{target}.csv,flux_response__{target}.metadata.json\n"
                 for target, signature, candidate_ids in knockout_specs
@@ -1092,7 +1124,10 @@ def test_r_renderer_writes_validated_vector_and_300_dpi_artwork(rendered_run):
     assert "enforced candidate-reaction flux (target_flux)" in figure_five["caption"]
     assert "optimized target-product flux (response_flux)" in figure_five["caption"]
     assert "not a plot axis" in figure_five["caption"]
-    assert "wild-type pre-deletion single-reaction titrations" in figure_five["caption"]
+    assert (
+        "Legacy unscoped panels retain their recorded model background"
+        in figure_five["caption"]
+    )
     assert (
         "enforced-candidate-reaction-flux versus target-product-flux"
         in figure_five["alt"]
@@ -1102,7 +1137,8 @@ def test_r_renderer_writes_validated_vector_and_300_dpi_artwork(rendered_run):
     response_svg = (run / "figures/fig05_flux_response.svg").read_text()
     assert "Amplification candidates (wild type)" in response_svg
     assert (
-        "Knockout-derived candidate reactions (wild type, pre-deletion)" in response_svg
+        "Knockout-derived candidate reaction scans (recorded backgrounds)"
+        in response_svg
     )
     assert ">g2 (R2)</text>" in response_svg
     assert response_svg.count(">Enforced candidate-reaction flux</text>") == 2
@@ -1120,10 +1156,10 @@ def test_r_renderer_writes_validated_vector_and_300_dpi_artwork(rendered_run):
     assert renderer_source.count("limits = shared_response_limits") == 2
     assert renderer_source.count('scales = "free_x"') == 2
     assert renderer_source.count("min(4L, length(") >= 2
-    assert renderer_source.count("scale_x_continuous(n.breaks = 3)") >= 2
+    assert renderer_source.count("scale_x_continuous(breaks = facet_flux_breaks)") == 2
+    assert "pretty(limits, n = 3)" in renderer_source
     assert renderer_source.count('panel.spacing.x = grid::unit(4, "mm")') == 2
     assert "at most four facets per row" in figure_five["caption"]
-    assert "representative gene with its scanned reaction" in figure_five["caption"]
     assert "aes(x = biomass_flux" not in renderer_source
 
     figure_six = rendered["fig06_sampling_shift"]
@@ -1184,6 +1220,8 @@ def test_exhaustive_candidate_validation_is_complete_and_publication_readable(tm
     assert "20/20" in linked
     assert linked.count("9/9") >= 2
     assert "29" in figure_five["caption"]
+    assert "wild-type pre-deletion single-reaction titrations" in figure_five["caption"]
+    assert "representative gene with its scanned reaction" in figure_five["caption"]
     assert "1 zero-reference knockout-derived scan (g1)" in figure_five["caption"]
     assert "cannot causally support deletion" in figure_five["caption"]
     assert "all 9 completed" in figure_six["caption"]
@@ -1238,6 +1276,92 @@ def test_exhaustive_indexes_require_every_signature_equivalent_gene_alias(
     assert not result.valid
     assert "must list every signature-equivalent gene" in " ".join(result.issues)
     assert "g1_alias" in " ".join(result.issues)
+
+
+def test_current_flux_response_scope_requires_wild_type_background(tmp_path):
+    run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
+    manifest_path = run / "00_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for role in ("flux_response_validation_index", "flux_response_tidy"):
+        _update_csv_artifact_rows(
+            run,
+            manifest,
+            role,
+            target_column="target",
+            target="g1",
+            updates={"background": "gene_knockout"},
+        )
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = validate_production_run(run)
+    assert not result.valid
+    assert "current candidate_scope" in " ".join(result.issues)
+    assert "background is not 'wild_type'" in " ".join(result.issues)
+
+
+def test_current_flux_response_scope_requires_configured_product_response(tmp_path):
+    run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
+    manifest_path = run / "00_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for role in ("flux_response_validation_index", "flux_response_tidy"):
+        _update_csv_artifact_rows(
+            run,
+            manifest,
+            role,
+            target_column="target",
+            target="g1",
+            updates={"response_reaction": "BIOMASS"},
+        )
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = validate_production_run(run)
+    assert not result.valid
+    assert "must use configured product 'EX_product'" in " ".join(result.issues)
+
+
+def test_current_flux_response_scope_requires_finite_secondary_biomass(tmp_path):
+    run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
+    manifest_path = run / "00_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    _update_csv_artifact_rows(
+        run,
+        manifest,
+        "flux_response_tidy",
+        target_column="target",
+        target="g1",
+        updates={"biomass_flux": ""},
+    )
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = validate_production_run(run)
+    assert not result.valid
+    assert "has no finite 'biomass_flux' value" in " ".join(result.issues)
+
+
+def test_current_flux_response_index_cannot_be_downgraded_to_unscoped_tidy(tmp_path):
+    run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
+    manifest_path = run / "00_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    _update_csv_artifact_rows(
+        run,
+        manifest,
+        "flux_response_tidy",
+        target_column="target",
+        target="g1",
+        updates={
+            "candidate_scope": "",
+            "scan_reaction": "WRONG_SCAN",
+            "response_reaction": "WRONG_RESPONSE",
+            "background": "gene_knockout",
+            "biomass_flux": "",
+        },
+    )
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = validate_production_run(run)
+    assert not result.valid
+    assert "has no tidy rows with matching target 'g1'" in " ".join(result.issues)
+    assert "candidate_scope 'all_display_ranked_candidates'" in " ".join(result.issues)
 
 
 def test_exhaustive_indexes_report_failed_and_skipped_candidates(tmp_path):
@@ -1422,9 +1546,10 @@ def test_html_is_structured_deterministic_linked_and_standalone(rendered_run):
     assert "target_flux</code>) is on the x-axis" in linked
     assert "response_flux</code>) is on the y-axis" in linked
     assert "Biomass flux is a secondary value" in linked
-    assert "wild-type pre-deletion" in linked
+    assert "Legacy schema-v2 rows retain their" in linked
+    assert "recorded model background" in linked
     assert "multi-reaction knockout signature remains" in linked
-    assert "not relabelled as product responses" in linked
+    assert "relabelled as product responses" in linked
     assert "Signature-equivalent rows are model-equivalent deletions" in linked
     assert "Signature-equivalent model deletion" in linked
     assert "g_cross" not in linked

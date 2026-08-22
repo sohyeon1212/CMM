@@ -56,6 +56,7 @@ if (length(incompatible_packages) > 0L) {
 }
 # A publication render must not silently discard rows or use an invalid scale/device.
 options(warn = 2)
+zero_reference_flux_tolerance <- 1e-9
 
 run_dir <- normalizePath(args[[1]], winslash = "/", mustWork = TRUE)
 manifest_path <- normalizePath(args[[2]], winslash = "/", mustWork = TRUE)
@@ -1013,7 +1014,7 @@ render_panel(
           knockout_index$target[
             knockout_index$status == "complete" &
               is.finite(reference_flux) &
-              reference_flux == 0
+              abs(reference_flux) <= zero_reference_flux_tolerance
           ]
         ))
       }
@@ -1051,6 +1052,27 @@ render_panel(
     }
     amplification <- plotted[plotted$panel_class == "amplification", , drop = FALSE]
     knockout <- plotted[plotted$panel_class == "knockout", , drop = FALSE]
+    knockout_is_current_scope <- nrow(knockout) > 0L && all(
+      !is.na(knockout$candidate_scope) &
+        knockout$candidate_scope == "all_display_ranked_candidates"
+    )
+    knockout_panel_title <- if (knockout_is_current_scope) {
+      "Knockout-derived candidate reactions (wild type, pre-deletion)"
+    } else {
+      "Knockout-derived candidate reaction scans (recorded backgrounds)"
+    }
+    knockout_context <- if (knockout_is_current_scope) {
+      paste0(
+        "Knockout-derived panels are wild-type pre-deletion single-reaction titrations; ",
+        "their facet titles pair the representative gene with its scanned reaction."
+      )
+    } else {
+      paste0(
+        "Current scoped knockout-derived panels are wild-type pre-deletion single-reaction ",
+        "titrations. Legacy unscoped panels retain their recorded model background and are ",
+        "not reinterpreted as current scoped knockout evidence."
+      )
+    }
     amplification_targets <- unique(as.character(amplification$target))
     knockout_targets <- unique(as.character(knockout$target))
     amplification$facet_label <- as.character(amplification$target)
@@ -1087,6 +1109,10 @@ render_panel(
       }
       limits
     }
+    facet_flux_breaks <- function(limits) {
+      if (length(limits) != 2L || any(!is.finite(limits))) return(numeric())
+      pretty(limits, n = 3)
+    }
     shared_response_limits <- finite_limits(plotted$response_flux)
     panels <- list()
     if (nrow(amplification) > 0L) {
@@ -1102,7 +1128,7 @@ render_panel(
           scales = "free_x",
           ncol = amplification_columns
         ) +
-        ggplot2::scale_x_continuous(n.breaks = 3) +
+        ggplot2::scale_x_continuous(breaks = facet_flux_breaks) +
         ggplot2::scale_y_continuous(
           limits = shared_response_limits,
           n.breaks = 4,
@@ -1132,14 +1158,14 @@ render_panel(
           scales = "free_x",
           ncol = knockout_columns
         ) +
-        ggplot2::scale_x_continuous(n.breaks = 3) +
+        ggplot2::scale_x_continuous(breaks = facet_flux_breaks) +
         ggplot2::scale_y_continuous(
           limits = shared_response_limits,
           n.breaks = 4,
           expand = ggplot2::expansion(mult = 0.04)
         ) +
         ggplot2::labs(
-          title = "Knockout-derived candidate reactions (wild type, pre-deletion)",
+          title = knockout_panel_title,
           x = flux_axis_label("Enforced candidate-reaction flux"),
           y = flux_axis_label("Target-product flux")
         ) +
@@ -1209,9 +1235,7 @@ render_panel(
         "enforced candidate-reaction flux (target_flux) on the x-axis to optimized target-product ",
         "flux (response_flux) on the y-axis. Product-flux limits are shared; candidate-",
         "reaction x ranges vary by facet. Biomass flux records the secondary state under the ",
-        "configured minimum-growth constraint and is not a plot axis. Knockout-derived panels ",
-        "are wild-type pre-deletion single-reaction titrations; their facet titles pair the ",
-        "representative gene with its scanned reaction. Multi-reaction signatures remain ",
+        "configured minimum-growth constraint and is not a plot axis. %s Multi-reaction signatures remain ",
         "explicit skipped or unavailable index rows. Fluxes are in mmol gDW⁻¹ h⁻¹. Candidate ",
         "inclusion is independent of recommendation status. Optimal points are connected in ",
         "target_flux scan order; all rows and failed execution reasons remain in ",
@@ -1224,6 +1248,7 @@ render_panel(
       plural_noun(amplification_count, "target"),
       knockout_count,
       plural_noun(knockout_count, "candidate-reaction titration"),
+      knockout_context,
       omitted_note,
       exploratory_note,
       noncomplete_note

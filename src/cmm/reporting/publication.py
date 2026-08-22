@@ -95,6 +95,7 @@ _REFERENCES = (
 )
 _EXPECTED_DOIS = tuple(reference[3] for reference in _REFERENCES)
 _REPORT_VALIDATION_NAME = "report_validation.json"
+_ZERO_REFERENCE_FLUX_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True)
@@ -1770,7 +1771,10 @@ def _validation_execution_summary(validated: ValidatedRun) -> str:
             reference_flux = float(response_row.get("scan_reference_flux", ""))
         except (TypeError, ValueError):
             continue
-        if math.isfinite(reference_flux) and reference_flux == 0:
+        if (
+            math.isfinite(reference_flux)
+            and abs(reference_flux) <= _ZERO_REFERENCE_FLUX_TOLERANCE
+        ):
             exploratory_knockouts.append(response_row.get("target", ""))
     exploratory_note = (
         '<p class="muted"><strong>Zero-reference knockout candidates.</strong> '
@@ -2144,10 +2148,11 @@ eligibility. {_escape(amplification_result)} Sources:
 Figure 5 uses the standard candidate-reaction-to-product flux-response definition in every facet: enforced candidate-reaction
 flux (<code>target_flux</code>) is on the x-axis and optimized target-product flux
 (<code>response_flux</code>) is on the y-axis. Biomass flux is a secondary value recorded under the configured
-minimum-growth constraint, not a plot axis. The knockout-derived block contains wild-type pre-deletion
-single-reaction titrations identified by the index candidate scope; a multi-reaction knockout signature remains
-an explicit skipped or unavailable index row because it has no single candidate-reaction scan. Legacy schema-v2
-product-to-growth rows remain auditable in their source CSV and are not relabelled as product responses. A
+minimum-growth constraint, not a plot axis. Rows carrying the current exhaustive knockout candidate scope are
+wild-type pre-deletion single-reaction titrations; a multi-reaction knockout signature remains an explicit skipped
+or unavailable index row because it has no single candidate-reaction scan. Legacy schema-v2 rows retain their
+recorded model background, remain auditable in their source CSV, and are not reinterpreted as current scoped
+knockout evidence or relabelled as product responses. A
 single-reaction candidate with zero reference flux is scanned over its full feasible domain and labelled
 exploratory; that response cannot causally support deletion. Paired sampling compares feasible-state ensembles
 and is not biological replication.
