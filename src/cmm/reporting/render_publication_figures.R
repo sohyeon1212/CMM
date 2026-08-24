@@ -387,17 +387,10 @@ single_knockout_roles <- c("single_knockout_moma", "single_knockout_room", "summ
 if (artifact_available("reproduction_config")) {
   single_knockout_roles <- c(single_knockout_roles, "reproduction_config")
 }
-if (artifact_available("single_knockout_consensus")) {
-  single_knockout_roles <- c(single_knockout_roles, "single_knockout_consensus")
-}
-if (artifact_available("recommendations")) {
-  single_knockout_roles <- c(single_knockout_roles, "recommendations")
-}
-
 render_panel(
   "fig02_single_knockout",
   "Figure 2",
-  "Single-knockout phenotypes predicted independently by MOMA and ROOM. D1-D5 use the method-specific workflow display rank when declared (current exports retain one representative per blocked-reaction signature); legacy runs fall back to the five highest-product feasible, viability-qualified rows within each method. Every D1-D5 row is a forward-validation candidate, not a recommendation. Grey denotes other feasible screens, blue denotes D1-D5 validation candidates, orange denotes final single-gene support in recommendations.csv, and the black star is the wild-type reference. Infeasible outcomes remain in the source tables.",
+  "Single-knockout phenotypes predicted independently by MOMA and ROOM. D1-D5 use the method-specific workflow display rank when declared (current exports retain one representative per blocked-reaction signature); legacy runs fall back to the five highest-product feasible, viability-qualified rows within each method. Grey denotes other feasible screens, blue denotes D1-D5 analysis candidates, and the black star is the wild-type reference. No combined target verdict is overlaid; infeasible outcomes remain in the source tables.",
   "Faceted scatter plots of predicted product flux against growth rate for MOMA and ROOM single knockouts.",
   single_knockout_roles,
   180,
@@ -460,23 +453,13 @@ render_panel(
       displayed <- utils::head(eligible, 5L)
       screen$display_rank[displayed] <- seq_along(displayed)
     }
-    supported_targets <- character(0)
-    if (artifact_available("recommendations")) {
-      recommendations <- read_artifact_csv("recommendations")
-      supported_targets <- as.character(recommendations$target[
-        recommendations$type == "single_gene_knockout" &
-          tolower(as.character(recommendations$verdict)) == "support"
-      ])
-    }
     screen$category <- "Other feasible"
-    screen$category[is.finite(screen$display_rank)] <- "Validation candidate (D1-D5)"
-    screen$category[screen$target_id %in% supported_targets] <- "Supported recommendation"
+    screen$category[is.finite(screen$display_rank)] <- "Analysis candidate (D1-D5)"
     screen$category <- factor(
       screen$category,
       levels = c(
         "Other feasible",
-        "Validation candidate (D1-D5)",
-        "Supported recommendation",
+        "Analysis candidate (D1-D5)",
         "Wild-type reference"
       )
     )
@@ -526,8 +509,7 @@ render_panel(
       ggplot2::scale_colour_manual(
         values = c(
           "Other feasible" = grey,
-          "Validation candidate (D1-D5)" = blue,
-          "Supported recommendation" = orange,
+          "Analysis candidate (D1-D5)" = blue,
           "Wild-type reference" = "black"
         ),
         name = NULL
@@ -535,8 +517,7 @@ render_panel(
       ggplot2::scale_shape_manual(
         values = c(
           "Other feasible" = 16,
-          "Validation candidate (D1-D5)" = 17,
-          "Supported recommendation" = 18,
+          "Analysis candidate (D1-D5)" = 17,
           "Wild-type reference" = 8
         ),
         name = NULL
@@ -661,7 +642,7 @@ render_panel(
 render_panel(
   "fig04_amplification",
   "Figure 4",
-  "Independent method-specific amplification trajectories: panel a shows FSEOF ranks 1-10 and panel b FVSEOF ranks 1-10; target intersection is not required. D labels give within-method rank, and a target shared by both methods retains one colour. Loop-flagged targets are marked [loop] with black crosses and placed on a separate free-y diagnostic scale so extreme cycles do not compress eligible trajectories; they are retained in flux-response validation but excluded from support and recommendation eligibility. FVSEOF separates mean flux from forced-minimum magnitude; axes report mmol gDW⁻¹ h⁻¹.",
+  "Independent method-specific amplification trajectories: panel a shows FSEOF ranks 1-10 and panel b FVSEOF ranks 1-10; target intersection is not required. D labels give within-method rank, and a target shared by both methods retains one colour. Loop-flagged targets are marked [loop] with black crosses and placed on a separate free-y diagnostic scale so extreme cycles do not compress the other trajectories; they remain in flux-response validation with their diagnostic status visible. FVSEOF separates mean flux from forced-minimum magnitude; axes report mmol gDW⁻¹ h⁻¹.",
   "Independent top-ten FSEOF and FVSEOF amplification-target trajectories with direct rank labels.",
   amplification_roles,
   180,
@@ -1236,8 +1217,8 @@ render_panel(
         "flux (response_flux) on the y-axis. Product-flux limits are shared; candidate-",
         "reaction x ranges vary by facet. Biomass flux records the secondary state under the ",
         "configured minimum-growth constraint and is not a plot axis. %s Multi-reaction signatures remain ",
-        "explicit skipped or unavailable index rows. Fluxes are in mmol gDW⁻¹ h⁻¹. Candidate ",
-        "inclusion is independent of recommendation status. Optimal points are connected in ",
+        "explicit skipped or unavailable index rows. Fluxes are in mmol gDW⁻¹ h⁻¹. Every ",
+        "declared candidate remains visible. Optimal points are connected in ",
         "target_flux scan order; all rows and failed execution reasons remain in ",
         "flux_response_tidy.csv and flux_response_index.csv.%s%s%s ",
         "Gene IDs sharing one blocked-reaction signature share a simulation facet; the index ",
@@ -1260,7 +1241,7 @@ render_panel(
 render_panel(
   "fig06_sampling_shift",
   "Figure 6",
-  "Paired feasible-flux distributions for the target-product exchange (top; mmol gDW⁻¹ h⁻¹) and biomass reaction (bottom; h⁻¹) before and after every completed display-ranked single-gene-knockout sampling analysis. Candidate inclusion is independent of recommendation status. The main figure intentionally omits other reactions, which remain available in sampling_tidy.csv. Samples are feasible states, not biological replicates.",
+  "Paired feasible-flux distributions for the target-product exchange (top; mmol gDW⁻¹ h⁻¹) and biomass reaction (bottom; h⁻¹) before and after every completed display-ranked single-gene-knockout sampling analysis. Every completed analysis is shown. The main figure intentionally omits other reactions, which remain available in sampling_tidy.csv. Samples are feasible states, not biological replicates.",
   "Multi-row product-flux and biomass-growth distributions for all completed display-ranked single-gene-knockout sampling analyses.",
   c(
     "sampling_tidy",
@@ -1349,7 +1330,7 @@ render_panel(
         "Paired feasible-flux distributions for the product exchange (top; mmol gDW⁻¹ h⁻¹) ",
         "and biomass reaction (bottom; h⁻¹) before and after all %d completed display-ranked ",
         "single-gene-knockout sampling analyses, arranged in grids of at most five targets per ",
-        "row. Candidate inclusion is independent of recommendation status. The main figure ",
+        "row. Every completed analysis is shown. The main figure ",
         "intentionally omits other reactions, which remain in sampling_tidy.csv; samples are ",
         "feasible states, not biological replicates. ",
         "Gene IDs sharing one blocked-reaction signature share a simulation facet; the index ",

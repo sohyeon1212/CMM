@@ -31,8 +31,8 @@ run_dir = result.run_directory
 `results/` is in CMM's `.gitignore`, but an absolute location outside the clone is preferable
 for manuscript runs. The CLI config records the resolved output path in `00_config.json`.
 
-**Say in the report where the directory is** (§7), as an absolute path. A reader given only
-the folder cannot otherwise tell where it came from.
+**Identify the run directory in provenance** (§6) using a relocatable path such as `.`. Do not
+leak an absolute workstation path into a report intended for sharing.
 
 ## Directory layout
 
@@ -144,7 +144,7 @@ Where things go when it is not obvious:
 
 - **The scripts that reproduce, render, and validate the run** → `scripts/`. The canonical
   workflow writes the resolved `production_config.json` plus `reproduce.py`, `render.py`, and
-  `validate.py`; §7 names them. A path into a session's temporary directory is not a provenance
+  `validate.py`; §6 names them. A path into a session's temporary directory is not a provenance
   record.
 - **A summary of one step** → that step's directory, not the root.
 - **A summary of the whole run** → `00_summary.json`, described below. This is the one summary
@@ -406,29 +406,24 @@ handoff.
 
 ### Sections
 
-Number every section and cross-reference as `§4`. Sections 1–4, 6 and 7 are required; §5 is
-the scenario's own answer and its heading changes with the scenario.
+The canonical SC-01 `nature-r` publication report has six continuously numbered sections:
 
 | # | Section | Content |
 |---|---|---|
-| 1 | **Summary** | The findings themselves, not a description of the work. Three to five sentences: what was found, what is recommended, and the single most important caveat. A reader who stops here must not be misled. |
+| 1 | **Summary** | Neutral method-level outcomes and execution coverage. It does not promote a target, choose a strain, or import machine-readable recommendation verdicts. |
 | 2 | **Setup** | The preflight summary table from `_preflight.md`, plus the confirmed model/product/condition, aeration as bounds, substrate and uptake, solver/R capabilities, and any unavailable or explicitly substituted method with its reason. |
 | 3 | **Data and methods** | Model and its fingerprint, sizes, every parameter that changes an answer — reference flux state, `n_steps`, strain-design seed, sampler seed and count, thresholds. Enough that someone repeats the run without reading the scenario. |
-| 4 | **Results** | One subsection per pipeline step, in order. Each states what was run, the decisive numbers, the figure, and the CSV they came from. |
-| 5 | *scenario-specific* | SC-01 → **Recommended targets and strain proposal**; SC-02 → **Interpretation — what explains the difference**; SC-03 → **Essentiality classes**. See below. |
-| 6 | **Limitations** | What the analysis does *not* establish. At minimum: predictions needing experimental validation; the medium and aeration assumed; conflicting method assumptions (MOMA's minimal adjustment vs OptKnock's growth maximization); solver capability that constrained the run. |
-| 7 | **Provenance** | Model fingerprint, solver and version, CMM version or git commit, strain-design seed, sampler seed, run directory, and the command or script that produced it. |
+| 4 | **Results** | One subsection per pipeline step. MOMA, ROOM, OptKnock, RobustKnock, FSEOF, FVSEOF, flux response, and sampling remain separate analyses with their own figures, tables, statuses, and source CSVs. |
+| 5 | **References** | Verified method citations and DOI links. |
+| 6 | **Provenance** | Model fingerprint, solver and version, CMM version or git commit, strain-design seed, sampler seed, run directory, and the command or script that produced it. |
 
-**§5 for SC-01** — keep three evidence tables rather than forcing unlike methods into one
-score: every canonical single-knockout candidate (MOMA/ROOM display ranks, growth, product,
-response, paired-sampling verdict, and GPR-resolved reaction ids/names), strain designs
-(OptKnock/RobustKnock, knockout set, growth, maximum and guaranteed product, coupling verdict),
-and every canonical amplification candidate (method-specific FSEOF or FVSEOF rank, direction
-and robustness, loopless-capacity verdict, wild-type-to-supported flux range, response
-verdict). Each row links to its source and states `support`, `contradict`, `inconclusive`,
-`skipped`, or `unavailable`; never turn method count alone into a confidence claim. Tables and
-figures may paginate or facet these rows for readability, but must not select a smaller
-scientific subset.
+Do not add **Recommended targets and strain proposal** or standalone **Limitations** sections to
+the SC-01 publication report. Do not import `recommendations.csv` verdicts into the Summary,
+Results prose, tables, or figure categories. Keep the assumptions and caveats that a reader needs,
+but place each beside the method-specific result it qualifies: condition and solver boundaries in
+Setup, adaptation assumptions in MOMA/ROOM methods, maximum versus guaranteed product in strain
+design, loop diagnostics beside amplification, and sampling/causal boundaries beside forward
+validation. The reader chooses interventions from these individual results.
 
 `recommendations.csv` contains only claims that pass the declared evidence policy in its
 metadata sidecar: beneficial single-gene prediction plus paired-sampling support and retained
@@ -441,25 +436,22 @@ is not required. OptKnock remains visible but is not worst-case evidence. Combin
 knockout-amplification proposals are withheld because this workflow does not simulate the
 combined intervention.
 
+This CSV remains a machine-readable workflow/schema compatibility artifact. It is linked through
+the provenance inventory but is not rendered as a synthesized recommendation table, report
+conclusion, visual overlay, or strain proposal.
+
 For amplification, the wild-type flux and supported response range are not decoration. A
 target whose response is flat, whose proposed direction is contradicted, or whose useful point
 sits at an artificial bound is not presented as a recommendation however highly an inverse
 scan ranked it. For knockouts, the sampling column compares the matched wild-type and deletion
 ensembles; a wild-type-only sampling plot is not validation.
 
-**§5 for SC-02** — what mechanism the per-condition fluxes support, and how strongly. Separate
-what the transcriptome decided from what the declared condition decided; when the condition
-dominates, say so, because a reader will otherwise credit the data.
-
-**§5 for SC-03** — the essentiality classes with their counts, and the beneficial deletions.
-An essential gene is a result, not a failed row.
-
-Descriptive or purely operational runs may leave §5 empty rather than inventing an
-interpretation. Say it is empty and why.
+SC-02 and SC-03 narrative requirements remain in their own scenario files; they must not inherit
+an SC-01 recommendation or strain-proposal section.
 
 ### How it is written
 
-- **Headings are plain and descriptive** — `Data and methods`, `Limitations` — never narrative
+- **Headings are plain and descriptive** — `Data and methods`, `Results` — never narrative
   (`What the screen told us`, `Reframing the question`).
 - **No process narration.** The report states what is true and how it was established, not the
   order the work happened in. Cut "we then", "in the first pass", "next we examined". §4 is
@@ -509,7 +501,8 @@ no figure beside it is harder to check.
    belong in §3, where a reader looks for them, not scattered through §4. Never leave the
    strain-design seed implicit: a hidden backend seed can change MILP paths and runtime.
 4. **Say what is a hypothesis.** FSEOF, rMTA and sampling-based rankings prioritise candidates;
-   they do not prove them. §6 is not optional.
+   they do not prove them. Put this interpretation boundary beside the affected result; removing
+   a standalone Limitations section does not make the caveat optional.
 5. **Do not fabricate a run.** If a step failed or was skipped, say so and why, in place. A
    report that omits a failed step reads as though the step succeeded.
 6. **Ship both copies.** A run that leaves only `report.html` cannot be sent to anyone, and the

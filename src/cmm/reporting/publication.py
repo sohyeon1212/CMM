@@ -392,27 +392,6 @@ def _format_number(value: object, *, digits: int = 4) -> str:
     return f"{number:.{digits}g}"
 
 
-def _format_growth_retained(value: object) -> str:
-    try:
-        fraction = float(str(value).strip())
-    except (TypeError, ValueError):
-        return "Not quantified"
-    if not (0 <= fraction <= 1):
-        return "Not quantified"
-    return f"{100 * fraction:.3g}%"
-
-
-def _format_signed_number(value: object, *, digits: int = 4) -> str:
-    """Format a finite effect size with an explicit sign when it is positive."""
-
-    rendered = _format_number(value, digits=digits)
-    try:
-        number = float(str(value).strip())
-    except (TypeError, ValueError):
-        return rendered
-    return f"+{rendered}" if number > 0 and rendered != "—" else rendered
-
-
 def _plural_noun(count: int, singular: str, plural: str | None = None) -> str:
     """Return publication-ready singular/plural wording without placeholder syntax."""
 
@@ -674,12 +653,6 @@ def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
     rows = _rows(validated, role)
     display_ranks = _ko_display_ranks(validated, rows)
     mapping = _ko_mapping_index(validated)
-    supported = {
-        row.get("target", "")
-        for row in _rows(validated, "recommendations")
-        if row.get("type") == "single_gene_knockout"
-        and row.get("verdict", "").lower() == "support"
-    }
 
     def finite_number(row: Mapping[str, str], column: str) -> float:
         try:
@@ -746,12 +719,10 @@ def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
             )
             or "—"
         )
-        evidence_status = (
-            "Final support"
-            if target in supported
-            else "Beneficial screen candidate (forward-tested)"
+        analysis_context = (
+            "Beneficial outcome in this method"
             if _truthy(row.get("selected", ""))
-            else "Display candidate (forward-tested)"
+            else "Display-ranked outcome"
         )
         table_rows.append(
             (
@@ -762,7 +733,7 @@ def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
                 row.get("status", ""),
                 _format_number(row.get("objective", "")),
                 _format_number(row.get("product_flux", "")),
-                evidence_status,
+                analysis_context,
             )
         )
     note = (
@@ -770,10 +741,10 @@ def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
         "method-specific workflow display rank when exported; current exports choose one "
         "representative per blocked-reaction signature. For legacy runs without that field, "
         "the reporter selects the five highest-product feasible rows retaining the configured "
-        "viability fraction, with ties resolved by growth and gene ID. Display rank is not a "
-        "recommendation or confidence rank. These are the canonical D1–D5 forward-validation "
-        "candidates; final support remains a separate verdict. The complete unmodified screen "
-        "remains in the source CSV."
+        "viability fraction, with ties resolved by growth and gene ID. Display rank is a "
+        "method-specific visualization rank, not a combined verdict. These are the canonical "
+        "D1–D5 forward-analysis candidates. The complete unmodified screen remains in the "
+        "source CSV."
     )
     note += (
         f" Showing all {len(ordered)} {_plural_noun(len(ordered), 'canonical candidate')} "
@@ -792,7 +763,7 @@ def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
                 "Status",
                 "Growth rate (h⁻¹)",
                 "Product flux (mmol gDW⁻¹ h⁻¹)",
-                "Workflow evidence",
+                "Analysis context",
             ),
             table_rows,
             css_class="ko-screen-table",
@@ -939,104 +910,22 @@ def _setup_table(validated: ValidatedRun) -> str:
     return _table(("Run definition", "Resolved value"), rows)
 
 
-def _amplification_support_statement(
-    validated: ValidatedRun, supported_targets: Sequence[str]
-) -> str:
-    if supported_targets:
-        return (
-            "Computational support was assigned to "
-            + _plural_noun(len(supported_targets), "amplification target")
-            + " "
-            + ", ".join(supported_targets)
-            + "."
-        )
-    return (
-        "No independently proposed FSEOF or FVSEOF target passed the workflow's "
-        "method-specific forward-validation support rule."
-    )
-
-
 def _summary_html(validated: ValidatedRun, *, standalone: bool) -> str:
-    report = validated.report
-    findings_value = report.get("findings", ())
-    findings = (
-        [str(item) for item in findings_value if isinstance(item, str) and item.strip()]
-        if isinstance(findings_value, list)
-        else []
-    )
     summary = _json(validated, "summary")
     yield_rows = _rows(validated, "theoretical_yield")
     yield_row = yield_rows[0] if yield_rows else {}
-    recommendations = _rows(validated, "recommendations")
-    supported_knockout_rows = sorted(
-        (
-            row
-            for row in recommendations
-            if row.get("type") == "single_gene_knockout"
-            and row.get("verdict", "").lower() == "support"
-            and row.get("target", "")
-        ),
-        key=lambda row: row.get("target", ""),
-    )
-    supported_amplifications = sorted(
-        row.get("target", "")
-        for row in recommendations
-        if row.get("type") == "amplification"
-        and row.get("verdict", "").lower() == "support"
-        and row.get("target", "")
-    )
-    coupled_designs = [
-        row
-        for row in recommendations
-        if row.get("type") == "multi_knockout"
-        and row.get("verdict", "").lower() == "coupled"
-    ]
+    optknock_count = len(_rows(validated, "optknock"))
+    robustknock_count = len(_rows(validated, "robustknock"))
 
-    def product_effect(row: Mapping[str, str]) -> float:
-        try:
-            return float(row.get("product_effect", ""))
-        except ValueError:
-            return float("-inf")
-
-    top_design = max(
-        coupled_designs,
-        key=product_effect,
-        default=None,
-    )
-    findings_html = (
-        "<ul>" + "".join(f"<li>{_escape(item)}</li>" for item in findings) + "</ul>"
-        if findings
-        else ""
-    )
-    knockout_details: list[str] = []
-    for row in supported_knockout_rows:
-        details: list[str] = []
-        growth = _format_growth_retained(row.get("growth_retained", ""))
-        if growth != "Not quantified":
-            details.append(f"{growth} WT growth retained")
-        effect = _format_signed_number(row.get("product_effect", ""))
-        if effect != "—":
-            details.append(
-                f"conservative paired-sampling product-flux shift {effect} mmol gDW⁻¹ h⁻¹"
-            )
-        suffix = f" ({'; '.join(details)})" if details else ""
-        knockout_details.append(f"{_escape(row.get('target', ''))}{suffix}")
-    knockout_statement = (
-        "Final computational support was assigned to "
-        + _plural_noun(
-            len(knockout_details),
-            "single-gene knockout",
-            "single-gene knockouts",
+    def distinct_targets(role: str) -> int:
+        return len(
+            {
+                row.get("target", row.get("reaction_id", ""))
+                for row in _rows(validated, role)
+                if row.get("target", row.get("reaction_id", ""))
+            }
         )
-        + " "
-        + "; ".join(knockout_details)
-        + "."
-        if knockout_details
-        else "No single-gene knockout passed the exported support rule."
-    )
-    amplification_statement = _amplification_support_statement(
-        validated, supported_amplifications
-    )
+
     sentences = [
         (
             f"The requested product exchange {_escape(summary.get('product', validated.report.get('product_label', '')))} "
@@ -1051,10 +940,15 @@ def _summary_html(validated: ValidatedRun, *, standalone: bool) -> str:
             "their predictions are reported separately because they encode different adaptation assumptions."
         ),
         (
-            f"{knockout_statement} "
-            f"{_escape(amplification_statement)} These labels mean that each promoted row "
-            "passed the workflow's declared proposal and forward-validation rules, not that efficacy is causal "
-            "or experimentally demonstrated."
+            f"OptKnock and RobustKnock exported {optknock_count} and {robustknock_count} "
+            "reaction-level design outcomes, respectively; maximum and guaranteed product fluxes "
+            "remain separate columns in the method tables."
+        ),
+        (
+            "The FSEOF and FVSEOF trajectory exports contain "
+            f"{distinct_targets('fseof_tidy')} and {distinct_targets('fvseof_tidy')} distinct "
+            "method-specific targets, respectively; loop diagnostics and flux responses are "
+            "reported beside those trajectories."
         ),
     ]
     coverage = summary.get("validation_coverage")
@@ -1069,41 +963,12 @@ def _summary_html(validated: ValidatedRun, *, standalone: bool) -> str:
             "including the shared wild-type ensemble; failed or skipped executions are "
             "listed individually in §4.5."
         )
-    if top_design is not None:
-        top_effect = product_effect(top_design)
-        tied_top = [
-            row
-            for row in coupled_designs
-            if math.isclose(
-                product_effect(row), top_effect, rel_tol=1e-9, abs_tol=1e-12
-            )
-        ]
-        top_growth = _format_growth_retained(top_design.get("growth_retained", ""))
-        growth_clause = (
-            f" ({top_growth} WT growth retained)"
-            if top_growth != "Not quantified"
-            else ""
-        )
-        tied_targets = [
-            row.get("target", "")
-            for row in tied_top
-            if row is not top_design and row.get("target", "")
-        ]
-        tie_clause = (
-            f" This top value is tied with {_escape(', '.join(tied_targets))}."
-            if tied_targets
-            else ""
-        )
-        sentences.append(
-            f"The export contains {len(coupled_designs)} growth-coupled reaction-level "
-            f"{_plural_noun(len(coupled_designs), 'multi-knockout design')}; "
-            "the highest guaranteed product flux is "
-            f"{_escape(_format_number(top_design.get('product_effect', '')))} mmol gDW⁻¹ h⁻¹ "
-            f"for {_escape(top_design.get('target', ''))}{growth_clause}.{tie_clause} "
-            "Reaction interventions still require "
-            "GPR-aware resolution to experimental gene edits."
-        )
-    return findings_html + "".join(f"<p>{sentence}</p>" for sentence in sentences)
+    sentences.append(
+        "The report does not combine these outputs into a target recommendation or strain "
+        "proposal; each method-specific table, figure, and validation result is provided for "
+        "the user to interpret."
+    )
+    return "".join(f"<p>{sentence}</p>" for sentence in sentences)
 
 
 def _amplification_table(validated: ValidatedRun) -> str:
@@ -1225,35 +1090,24 @@ def _amplification_table(validated: ValidatedRun) -> str:
         + fvseof_table
         + '<p class="muted">Each method contributes its own ranked hypotheses; target '
         "intersection is not required. Loop-flagged rows are displayed for diagnosis and "
-        "retained in flux-response validation, but are excluded from support and recommendation "
-        "eligibility.</p>"
+        "retained in flux-response validation with their diagnostic status visible for "
+        "user interpretation.</p>"
     )
 
 
 def _mapping_table(validated: ValidatedRun) -> str:
     rows = _rows(validated, "gene_knockout_mapping")
-    recommendations = _rows(validated, "recommendations")
-    consensus = _rows(validated, "single_knockout_consensus")
     prioritized: list[str] = []
 
     def add_priority(target: str) -> None:
         if target and target not in prioritized:
             prioritized.append(target)
 
-    for row in recommendations:
-        if (
-            row.get("type") == "single_gene_knockout"
-            and row.get("verdict", "").lower() == "support"
-        ):
-            add_priority(row.get("target", ""))
     for role in ("single_knockout_moma", "single_knockout_room"):
         screen_rows = _rows(validated, role)
         display_ranks = _ko_display_ranks(validated, screen_rows)
         for index in sorted(display_ranks, key=lambda value: display_ranks[value]):
             add_priority(screen_rows[index].get("target_id", ""))
-    for row in consensus:
-        if _truthy(row.get("recommended", "")):
-            add_priority(row.get("target_id", ""))
     priority = {target: index for index, target in enumerate(prioritized)}
 
     def normalized_signature(reactions: Sequence[str]) -> str:
@@ -1345,9 +1199,9 @@ def _mapping_table(validated: ValidatedRun) -> str:
     artifact = validated.artifacts.get("gene_knockout_mapping")
     path = artifact.relative_path if artifact is not None else None
     note = (
-        "Shown rows include supported or canonical D1–D5 validation representatives and every gene "
-        "with the same blocked-reaction signature. Signature-equivalent rows are model-equivalent "
-        "deletions, not a preferred wet-lab gene; GPR-aware experimental resolution is still required. "
+        "Shown rows include canonical D1–D5 analysis representatives and every gene with the same "
+        "blocked-reaction signature. Signature-equivalent rows are model-equivalent deletions, not "
+        "a preferred wet-lab gene; GPR-aware experimental resolution is still required. "
         f"The full gene-to-reaction mapping remains in <code>{_escape(path or 'gene_knockout_mapping unavailable')}</code>."
     )
     return table + f'<p class="muted">{note}</p>'
@@ -1416,11 +1270,6 @@ def _validation_table(validated: ValidatedRun) -> str:
         (*base_key(row), row.get("candidate_scope", "").strip()): row
         for row in index_rows
     }
-    recommendation_verdicts = {
-        row.get("target", ""): row.get("verdict", "")
-        for row in _rows(validated, "recommendations")
-        if row.get("target", "")
-    }
     keys = list(grouped)
     for key in indexed:
         if key not in grouped:
@@ -1443,7 +1292,6 @@ def _validation_table(validated: ValidatedRun) -> str:
             "Reference candidate flux (mmol gDW⁻¹ h⁻¹)",
             "Loop diagnostic eligible",
             "Execution status",
-            "Recommendation verdict",
             "Optimal points",
             "Other/infeasible",
             "Reason",
@@ -1461,7 +1309,6 @@ def _validation_table(validated: ValidatedRun) -> str:
                 else "—",
                 indexed.get(key, {}).get("loop_diagnostic_eligible", "—") or "—",
                 indexed.get(key, {}).get("status", "complete"),
-                recommendation_verdicts.get(key[0], "Not promoted"),
                 grouped.get(key, {}).get("optimal", 0),
                 grouped.get(key, {}).get("infeasible", 0),
                 indexed.get(key, {}).get("reason", "")
@@ -1809,8 +1656,9 @@ def _validation_execution_summary(validated: ValidatedRun) -> str:
             ),
             coverage_rows,
         )
-        + f'<p class="muted">Candidate coverage is separate from recommendation status.{wild_type_note} '
-        "Every completed tidy target is shown in the corresponding figure; raw scan and sampling rows remain in the source CSVs.</p>"
+        + f'<p class="muted">Coverage includes every declared validation candidate.{wild_type_note} '
+        "Every completed tidy target is shown in the corresponding figure; raw scan and sampling "
+        "rows remain in the source CSVs for user interpretation.</p>"
         + exploratory_note
         + alias_note
         + legacy_note
@@ -1865,75 +1713,6 @@ def _sampling_validation_table(validated: ValidatedRun) -> str:
     return f'<div class="table-scroll">{table}</div>'
 
 
-def _recommendations_html(validated: ValidatedRun) -> str:
-    rows = _rows(validated, "recommendations")
-    if not rows:
-        return (
-            '<div class="notice">No recommendation row was exported. The inverse-method outputs '
-            "remain hypotheses and are not promoted to interventions.</div>"
-        )
-    sections: list[str] = []
-    labels = (
-        (
-            "single_gene_knockout",
-            "Single-gene knockouts",
-            "Conservative sampling Δ product flux (mmol gDW⁻¹ h⁻¹)",
-            "Product effect is the minimum of the positive paired-sampling mean and median knockout-minus-WT product-flux shifts.",
-        ),
-        (
-            "multi_knockout",
-            "Reaction-level multi-knockout strain designs",
-            "Guaranteed product flux (mmol gDW⁻¹ h⁻¹)",
-            "Product effect is the RobustKnock guaranteed product flux at the reported growth optimum; reaction sets require GPR-aware gene resolution.",
-        ),
-        (
-            "amplification",
-            "Amplification targets",
-            "Response Δ product flux (mmol gDW⁻¹ h⁻¹)",
-            "Product effect is the optimized product-flux change across the exported target-flux response scan.",
-        ),
-    )
-    for intervention_type, label, product_header, definition in labels:
-        selected = [row for row in rows if row.get("type") == intervention_type]
-        sections.append(f"<h3>{_escape(label)}</h3>")
-        if intervention_type == "amplification" and not selected:
-            sections.append(
-                f'<div class="notice">{_escape(_amplification_support_statement(validated, ()))}</div>'
-            )
-        sections.append(
-            _table(
-                (
-                    "Target/intervention",
-                    "Verdict",
-                    "Proposal methods",
-                    "Validation methods",
-                    "WT growth retained (%)",
-                    product_header,
-                    "Loop/artifact flag",
-                    "Reason",
-                ),
-                [
-                    (
-                        row.get("target", ""),
-                        row.get("verdict", "unavailable") or "unavailable",
-                        row.get("proposal_methods", row.get("evidence", "")),
-                        row.get("validation_methods", ""),
-                        _format_growth_retained(row.get("growth_retained", "")),
-                        _format_number(row.get("product_effect", "")),
-                        row.get("artifact_flag", ""),
-                        row.get("reason", ""),
-                    )
-                    for row in selected
-                ],
-            )
-        )
-        sections.append(
-            f'<p class="muted"><strong>Definition.</strong> {_escape(definition)} '
-            "WT growth retained is the predicted growth-rate fraction relative to the wild type, shown as a percentage.</p>"
-        )
-    return "".join(sections)
-
-
 _CSS = """
 :root{color-scheme:light;--ink:#171717;--muted:#626262;--rule:#d7d7d7;--accent:#1769aa}
 *{box-sizing:border-box}body{margin:0 auto;padding:36px 28px 64px;max-width:1080px;color:var(--ink);
@@ -1977,35 +1756,6 @@ def _document(
     subtitle = str(report.get("subtitle", "Schema-v2 reproducible analysis bundle"))
     figures, numbers = _figure_lookup(figure_manifest)
     summary_data = _json(validated, "summary")
-    recommendation_rows = _rows(validated, "recommendations")
-    supported_single = sorted(
-        row.get("target", "")
-        for row in recommendation_rows
-        if row.get("type") == "single_gene_knockout"
-        and row.get("verdict", "").lower() == "support"
-        and row.get("target", "")
-    )
-    supported_amplification = sorted(
-        row.get("target", "")
-        for row in recommendation_rows
-        if row.get("type") == "amplification"
-        and row.get("verdict", "").lower() == "support"
-        and row.get("target", "")
-    )
-    coupled_multi = [
-        row
-        for row in recommendation_rows
-        if row.get("type") == "multi_knockout"
-        and row.get("verdict", "").lower() == "coupled"
-    ]
-
-    def numeric_effect(row: Mapping[str, str]) -> float:
-        try:
-            return float(row.get("product_effect", ""))
-        except ValueError:
-            return float("-inf")
-
-    top_multi = max(coupled_multi, key=numeric_effect, default=None)
 
     def available_roles(*roles: str) -> tuple[str, ...]:
         return tuple(
@@ -2019,9 +1769,6 @@ def _document(
     single_sources = available_roles(
         "single_knockout_moma",
         "single_knockout_room",
-        "single_knockout_consensus",
-        "recommendations",
-        "summary",
     )
 
     def figure(figure_id: str) -> str:
@@ -2062,24 +1809,6 @@ def _document(
         validated, "workflow_configuration"
     )
     parameter_rows = _flatten_scalars(configuration)
-    loop_rows = _rows(validated, "amplification_loop_diagnostic")
-    flagged = [
-        row.get("target", "")
-        for row in loop_rows
-        if str(row.get("loop_artifact_flag", "")).lower() == "true"
-    ]
-    unavailable = [
-        f"{_human_label(role)}: {artifact.reason}"
-        for role, artifact in validated.artifacts.items()
-        if artifact.status in {"skipped", "failed"}
-    ]
-    dynamic_limitations = "".join(f"<li>{_escape(item)}</li>" for item in unavailable)
-    if flagged:
-        dynamic_limitations += (
-            "<li>Loopless diagnostics flagged the following amplification candidates as potential "
-            f"loop artifacts; they are not presented as supported targets: {_escape(', '.join(flagged))}.</li>"
-        )
-
     references_html = (
         "<ol>"
         + "".join(
@@ -2090,27 +1819,17 @@ def _document(
         )
         + "</ol>"
     )
-    supported_single_text = ", ".join(supported_single) if supported_single else "none"
-    amplification_result = _amplification_support_statement(
-        validated, supported_amplification
-    )
-    multi_result = (
-        f"{len(coupled_multi)} coupled reaction-level "
-        f"{_plural_noun(len(coupled_multi), 'design')} "
-        f"{'was' if len(coupled_multi) == 1 else 'were'} exported; the highest "
-        f"guaranteed-product design was {_escape(top_multi.get('target', ''))} at "
-        f"{_escape(_format_number(top_multi.get('product_effect', '')))} mmol gDW⁻¹ h⁻¹. "
-        if top_multi is not None
-        else "No coupled multi-knockout recommendation was exported. "
-    )
+    optknock_count = len(_rows(validated, "optknock"))
+    robustknock_count = len(_rows(validated, "robustknock"))
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{_escape(title)}</title><style>{_CSS}</style></head><body>
 <header><h1>{_escape(title)}</h1><p>{_escape(subtitle)}</p></header><main>
 <section id="section-1"><h2>1. Summary</h2>{_summary_html(validated, standalone=standalone)}{warning_html}
-<div class="notice"><strong>Interpretation boundary.</strong> All interventions in this report are <em>in silico</em>
-hypotheses. A computational support verdict is not evidence of wet-lab efficacy.</div></section>
+<div class="notice"><strong>Interpretation boundary.</strong> This report presents method-specific <em>in silico</em>
+outputs without selecting a recommended intervention or assembling a strain proposal. Experimental and biological
+interpretation remains with the user; these hypotheses require experimental validation.</div></section>
 <section id="section-2"><h2>2. Setup</h2>{_setup_table(validated)}
 <h3>Preflight checks</h3>{preflight}<p>Source: {_source_refs(validated, ("preflight_checks",), standalone=standalone)}.</p></section>
 <section id="section-3"><h2>3. Data and methods</h2>
@@ -2124,23 +1843,24 @@ sampling are forward checks and do not turn a model prediction into an experimen
 <p>The yield and feasible growth/product envelope establish the model-specific production boundary. Sources:
 {_source_refs(validated, ("theoretical_yield", "production_envelope"), standalone=standalone)}.</p>{figure("fig01_yield_envelope")}
 <h3>4.2 Single-knockout phenotypes</h3>
-<p>MOMA and ROOM results remain method-specific; infeasible rows are retained in the source CSVs. The final
-supported single-gene set is {_escape(supported_single_text)}. Every D1–D5 display-ranked signature is a
-forward-validation candidate, while final support remains a distinct category. Sources:
+<p>MOMA and ROOM results remain method-specific; infeasible rows are retained in the source CSVs.
+Every D1–D5 display-ranked signature is shown as a forward-analysis candidate so the growth, product, response,
+and sampling results can be compared directly. Sources:
 {_source_refs(validated, single_sources, standalone=standalone)}.</p>
 {figure("fig02_single_knockout")}{_screen_table(validated, "single_knockout_moma", "MOMA")}
 {_screen_table(validated, "single_knockout_room", "ROOM")}<h4>Gene-to-reaction interpretation</h4>
 {_mapping_table(validated)}
 <h3>4.3 Multi-knockout strain designs</h3>
-<p>{multi_result}Guaranteed product, rather than the cooperative maximum, determines the coupling interpretation.
-These are reaction-level interventions and require GPR-aware resolution before any gene-edit proposal. Sources:
+<p>OptKnock and RobustKnock exported {optknock_count} and {robustknock_count} reaction-level outcomes,
+respectively. Their maximum product, guaranteed product, growth, and coupling fields are shown without selecting
+a preferred strain. Reaction-level interventions require GPR-aware resolution before any gene-edit proposal. Sources:
 {_source_refs(validated, ("optknock", "robustknock"), standalone=standalone)}.</p>{figure("fig03_strain_design")}
 {_design_table(validated, "optknock", "OptKnock")}{_design_table(validated, "robustknock", "RobustKnock")}
 <h3>4.4 Amplification hypotheses</h3>
 <p>FSEOF and FVSEOF independently contribute their method-specific top ten; intersection is not required, and
 the trajectories are not gene-expression fold-change prescriptions. Loop-flagged ranks are isolated on a
-diagnostic scale and retained in flux-response validation, but excluded from support and recommendation
-eligibility. {_escape(amplification_result)} Sources:
+diagnostic scale and retained in flux-response validation with their diagnostic status visible. The report does
+not promote either method-specific list to a target recommendation. Sources:
 {_source_refs(validated, ("amplification_target_ranking", "variability_supported_amplification_targets", "fseof_tidy", "fvseof_tidy"), standalone=standalone)}.</p>
 {figure("fig04_amplification")}{_amplification_table(validated)}<h4>Loopless capacity diagnostic</h4>{_loop_table(validated)}
 <h3>4.5 Forward validation</h3>
@@ -2156,26 +1876,15 @@ knockout evidence or relabelled as product responses. A
 single-reaction candidate with zero reference flux is scanned over its full feasible domain and labelled
 exploratory; that response cannot causally support deletion. Paired sampling compares feasible-state ensembles
 and is not biological replication.
-Every completed candidate analysis is displayed independently of whether it became a recommendation. The
-sampling figure is restricted to the product exchange and biomass reaction; all other sampled reactions remain
+Every completed candidate analysis is displayed with its own execution status. The sampling figure is restricted
+to the product exchange and biomass reaction; all other sampled reactions remain
 in the source CSV. Sources:
 {_source_refs(validated, available_roles("flux_response_validation_index", "flux_response_tidy", "single_knockout_sampling_validation_index", "sampling_tidy"), standalone=standalone)}.</p>
 {_validation_execution_summary(validated)}
 {figure("fig05_flux_response")}<h4>Flux-response candidate accounting</h4>{_validation_table(validated)}
 {figure("fig06_sampling_shift")}<h4>Single-knockout sampling accounting</h4>{_sampling_validation_table(validated)}</section>
-<section id="section-5"><h2>5. Recommended targets and strain proposal</h2>
-<p>Rows are kept by intervention class. “Support”, “contradict”, “inconclusive”, and “unavailable” describe
-agreement among the exported computations only; method count is not a confidence score.</p>{_recommendations_html(validated)}
-<p>Source: {_source_refs(validated, ("recommendations",), standalone=standalone)}.</p></section>
-<section id="section-6"><h2>6. Limitations</h2><ul>
-<li>Predictions require experimental validation under the reported medium, aeration, substrate and strain background.</li>
-<li>MOMA minimal adjustment, ROOM regulatory switching and bilevel growth optimisation are distinct assumptions;
-agreement is model robustness, not replication.</li><li>Flux-space samples are correlated feasible states, not biological
-variance or confidence intervals.</li><li>Reaction interventions require GPR-aware gene mapping; isozymes and
-multi-subunit enzymes can change the experimental deletion set.</li><li>Artificial bounds, thermodynamically infeasible
-cycles and alternative optima can inflate a response unless the exported diagnostics exclude them.</li>{dynamic_limitations}</ul></section>
-<section id="section-7"><h2>7. References</h2>{references_html}</section>
-<section id="section-8"><h2>8. Provenance</h2>{_provenance_table(validated)}
+<section id="section-5"><h2>5. References</h2>{references_html}</section>
+<section id="section-6"><h2>6. Provenance</h2>{_provenance_table(validated)}
 <p>Run directory: <code>.</code>. Authoritative manifest:
 <code>{_escape(validated.manifest_path.name)}</code>.</p><h3>Reproduction assets</h3>
 <p>{_source_refs(validated, ("reproduction_config", "reproduce_script", "render_script", "validate_script"), standalone=standalone)}</p>
@@ -2500,11 +2209,28 @@ def _audit_html(
         )
     if len(parser.ids) != len(set(parser.ids)):
         issues.append(f"report {path.name!r} contains duplicate HTML ids")
-    expected_sections = {f"section-{number}" for number in range(1, 9)}
-    if not expected_sections.issubset(parser.ids):
+    expected_sections = {f"section-{number}" for number in range(1, 7)}
+    actual_sections = {
+        value for value in parser.ids if re.fullmatch(r"section-[0-9]+", value)
+    }
+    missing_sections = expected_sections - actual_sections
+    if missing_sections:
         issues.append(
-            f"report {path.name!r} is missing section id(s): {sorted(expected_sections - set(parser.ids))}"
+            f"report {path.name!r} is missing section id(s): {sorted(missing_sections)}"
         )
+    for forbidden_heading in (
+        "Recommended targets and strain proposal",
+        "Limitations",
+    ):
+        if re.search(
+            rf"<h[1-6][^>]*>\s*(?:[0-9]+\.\s*)?{re.escape(forbidden_heading)}\s*</h[1-6]>",
+            document,
+            flags=re.IGNORECASE,
+        ):
+            issues.append(
+                f"report {path.name!r} contains forbidden publication heading "
+                f"{forbidden_heading!r}"
+            )
 
     if standalone:
         for source in parser.image_sources:

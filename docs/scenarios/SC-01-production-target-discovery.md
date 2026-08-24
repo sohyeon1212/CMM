@@ -345,9 +345,14 @@ The run is complete only when validation reports no errors. The report must incl
 - separate OptKnock and RobustKnock tables ranked by guaranteed product;
 - independent top-10 FSEOF and top-10 FVSEOF trajectories and classifications;
 - loopless-capacity diagnostics, target-indexed flux-response, and paired-sampling evidence;
-- limitations, including model scope, solver/search limits, alternative optima, GPR mapping,
-  and the need for experimental validation;
 - links from every numerical claim and figure caption to source CSVs.
+
+The report presents these method-specific results without a **Recommended targets and strain
+proposal** section and without a standalone **Limitations** section. It must not promote a row in
+the summary, tables, or figures. Put method-specific assumptions and interpretation boundaries
+beside the analysis they qualify, and leave intervention selection to the user. Keep
+`07_validation/recommendations.csv` as a machine-readable validation artifact for compatibility;
+it is not a publication-report section or visual category.
 
 The manuscript renderer writes English labels, 300-DPI raster files, and editable PDF/SVG
 counterparts. It fails visibly on missing R packages, a nonzero renderer exit, missing source

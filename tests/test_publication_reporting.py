@@ -23,7 +23,6 @@ from cmm.reporting import (
 )
 from cmm.reporting.publication import (
     FigureRenderError,
-    _amplification_support_statement,
     _decode_renderer_stream,
     _renderer_environment,
     renderer_script_path,
@@ -842,25 +841,6 @@ def test_validator_aggregates_schema_integrity_and_metadata_errors(tmp_path):
     assert not result.valid and len(result.issues) >= 3
 
 
-def test_amplification_negative_result_uses_independent_method_support(tmp_path):
-    run = _make_run(tmp_path / "run", many_targets=True)
-    manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    _replace_artifact(
-        run,
-        manifest,
-        "recommendations",
-        "target,type,evidence,verdict,proposal_methods,validation_methods,growth_retained,"
-        "product_effect,artifact_flag,reason\n",
-    )
-    manifest_path.write_text(json.dumps(manifest))
-    validated = validate_run(run)
-    statement = _amplification_support_statement(validated, ())
-    assert "No independently proposed FSEOF or FVSEOF target" in statement
-    assert "method-specific forward-validation support rule" in statement
-    assert "shared target" not in statement
-
-
 @pytest.mark.parametrize(
     ("mutation", "match"),
     [
@@ -1073,27 +1053,23 @@ def test_r_renderer_writes_validated_vector_and_300_dpi_artwork(rendered_run):
         "04_single_knockout/room.csv",
         "00_summary.json",
         "scripts/production_config.json",
-        "04_single_knockout/consensus.csv",
-        "07_validation/recommendations.csv",
     ]
-    assert "Every D1-D5 row is a forward-validation candidate" in figure_two["caption"]
-    assert "final single-gene support" in figure_two["caption"]
+    assert "blue denotes D1-D5 analysis candidates" in figure_two["caption"]
+    assert "No combined target verdict is overlaid" in figure_two["caption"]
     knockout_svg = (run / "figures/fig02_single_knockout.svg").read_text()
-    assert "Validation candidate (D1-D5)" in knockout_svg
-    assert "Supported recommendation" in knockout_svg
+    assert "Analysis candidate (D1-D5)" in knockout_svg
+    assert "Supported recommendation" not in knockout_svg
     assert "Wild-type reference" in knockout_svg
     for rank in range(1, 6):
         assert knockout_svg.count(f">D{rank} ") == 2
     assert knockout_svg.count(">D3 g5</text>") == 2
     assert knockout_svg.count(">D5 g7</text>") == 2
-    assert "not a recommendation" in figure_two["caption"]
+    assert "recommendations.csv" not in figure_two["caption"]
 
     figure_four = rendered["fig04_amplification"]
-    assert "retained in flux-response validation" in figure_four["caption"]
-    assert (
-        "excluded from recommendation and forward validation"
-        not in figure_four["caption"]
-    )
+    assert "remain in flux-response validation" in figure_four["caption"]
+    assert "diagnostic status visible" in figure_four["caption"]
+    assert "recommendation eligibility" not in figure_four["caption"]
     amplification_svg = (run / "figures/fig04_amplification.svg").read_text()
     direct_label_styles = re.findall(
         r"<text[^>]+style='([^']+)'[^>]*>D\d+ [^<]+</text>",
@@ -1227,7 +1203,7 @@ def test_exhaustive_candidate_validation_is_complete_and_publication_readable(tm
     assert "all 9 completed" in figure_six["caption"]
     assert "g1;g1_alias" in linked
     assert "share one model intervention" in linked
-    assert "Candidate coverage is separate from recommendation status" in linked
+    assert "Coverage includes every declared validation candidate" in linked
     assert "Zero-reference knockout candidates" in linked
     assert "full feasible candidate-reaction domain" in linked
     assert "Reference candidate flux (mmol gDW⁻¹ h⁻¹)" in linked
@@ -1491,12 +1467,21 @@ def test_html_is_structured_deterministic_linked_and_standalone(rendered_run):
         "2. Setup",
         "3. Data and methods",
         "4. Results",
-        "5. Recommended targets and strain proposal",
-        "6. Limitations",
-        "7. References",
-        "8. Provenance",
+        "5. References",
+        "6. Provenance",
     ):
         assert heading in linked
+        assert heading in standalone
+    for heading in (
+        "5. Recommended targets and strain proposal",
+        "6. Limitations",
+    ):
+        assert heading not in linked
+        assert heading not in standalone
+    for section_number in range(1, 7):
+        assert f'id="section-{section_number}"' in linked
+    assert 'id="section-7"' not in linked
+    assert 'id="section-8"' not in linked
     assert 'src="figures/fig01_yield_envelope.png"' in linked
     assert 'style="width:89mm;max-width:100%"' in linked
     assert 'style="width:180mm;max-width:100%"' in linked
@@ -1523,23 +1508,24 @@ def test_html_is_structured_deterministic_linked_and_standalone(rendered_run):
     assert (
         "Optimized response" not in linked
     )  # axis text lives in vector/raster artwork
-    assert "confidence score" in linked
     assert "https://doi.org/10.1093/bioinformatics/btp704" in linked
     assert "https://doi.org/10.1093/bioinformatics/btac632" in linked
     assert "https://doi.org/10.1093/bioinformatics/btw555" in linked
     assert "https://doi.org/10.1074/jbc.R800048200" in linked
-    assert "single-gene knockout g2" in linked
-    assert "67.5% WT growth retained" in linked
-    assert "product-flux shift +3.8 mmol gDW⁻¹ h⁻¹" in linked
-    assert "amplification target R1" in linked
-    assert "1 growth-coupled reaction-level multi-knockout design" in linked
     assert "R1;R2" in linked
-    assert "50% WT growth retained" in linked
-    assert "WT growth retained (%)" in linked
-    assert "67.5%" in linked
-    assert "Conservative sampling Δ product flux" in linked
-    assert "Response Δ product flux" in linked
-    assert "Guaranteed product flux" in linked
+    assert "Guaranteed product (mmol gDW⁻¹ h⁻¹)" in linked
+    for synthesized_claim in (
+        "Recommendation verdict",
+        "Final support",
+        "Supported recommendation",
+        "Proposal methods",
+        "confidence score",
+        "WT growth retained (%)",
+        "Conservative sampling Δ product flux",
+        "Response Δ product flux",
+    ):
+        assert synthesized_claim not in linked
+        assert synthesized_claim not in standalone
     assert "sampling figure is restricted" in linked
     assert "not independent causal evidence" in linked
     assert "standard candidate-reaction-to-product flux-response definition" in linked
@@ -1561,14 +1547,20 @@ def test_html_is_structured_deterministic_linked_and_standalone(rendered_run):
     assert "g2 (Gene 2)" in linked
     assert "R2 — Reaction 2" in linked
     assert "R2: B --&gt; C" in linked
-    assert "Display rank is not a recommendation" in linked
+    assert (
+        "Display rank is a method-specific visualization rank, not a combined verdict"
+        in linked
+    )
     assert linked.count("all 5 canonical candidates") == 2
-    assert "Beneficial screen candidate (forward-tested)" in linked
-    assert "Display candidate (forward-tested)" in linked
+    assert "Beneficial outcome in this method" in linked
+    assert "Display-ranked outcome" in linked
     assert "Validated beneficial candidate" not in linked
     assert "Display only" not in linked
     assert "Method shortlist" not in linked
-    assert "Every D1–D5 display-ranked signature is a" in linked
+    assert (
+        "Every D1–D5 display-ranked signature is shown as a forward-analysis candidate"
+        in linked
+    )
     assert "forward-validation shortlist" not in linked
     assert "FSEOF independent top ten" in linked
     assert "FVSEOF independent top ten" in linked
@@ -1578,6 +1570,11 @@ def test_html_is_structured_deterministic_linked_and_standalone(rendered_run):
     assert "ineligible for recommendation or forward validation" not in linked
     assert "excluded from recommendation and forward validation" not in linked
     assert "retained 1 flagged candidate as diagnostic-only" in linked
+    assert (
+        "The report does not combine these outputs into a target recommendation or strain proposal"
+        in linked
+    )
+    assert "these hypotheses require experimental validation" in linked
     figure_manifest = (run / "figures/figure_manifest.json").read_text()
     assert "(s)" not in linked
     assert "(s)" not in standalone
@@ -1586,6 +1583,30 @@ def test_html_is_structured_deterministic_linked_and_standalone(rendered_run):
         "Medium: Applied</td><td>{&quot;EX_o2&quot;: 0.0, &quot;EX_substrate&quot;: 10.0}</td>"
         in linked
     )
+
+
+def test_post_render_audit_rejects_removed_publication_sections(rendered_run, tmp_path):
+    source_run, _ = rendered_run
+    run = tmp_path / "run"
+    shutil.copytree(source_run, run)
+    report_path = run / "report.html"
+    report = report_path.read_text(encoding="utf-8")
+    report = report.replace(
+        "</main>",
+        "<section><h2>5. Recommended targets and strain proposal</h2></section>"
+        "<section><h2>6. Limitations</h2></section></main>",
+    )
+    report_path.write_text(report, encoding="utf-8")
+
+    validation = validate_production_run(run)
+
+    assert not validation.valid
+    issues = "\n".join(validation.issues)
+    assert (
+        "forbidden publication heading 'Recommended targets and strain proposal'"
+        in issues
+    )
+    assert "forbidden publication heading 'Limitations'" in issues
 
 
 def test_optional_panels_are_explicit_without_blocking_source_validation(tmp_path):

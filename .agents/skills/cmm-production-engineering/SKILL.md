@@ -103,7 +103,12 @@ must accommodate the worst-case union before deduplication: twice the configured
 amplification count plus twice the configured per-method knockout display count. Reject an
 undersized enabled config instead of slicing either candidate universe.
 
-Call an intervention a recommendation only when it appears in the validated `recommendations.csv`; raw MOMA/ROOM, OptKnock, RobustKnock, FSEOF, and FVSEOF rows remain hypotheses. Do not combine a knockout and amplification target unless that combined intervention was separately simulated and validated.
+Keep `recommendations.csv` as a machine-readable validation artifact for workflow and schema
+compatibility, but do not render it as a recommendation section, summary conclusion, visual
+category, or strain proposal. The publication report presents the MOMA/ROOM, OptKnock,
+RobustKnock, FSEOF, FVSEOF, flux-response, and sampling results separately so the user can
+interpret them. Do not combine a knockout and amplification target unless that combined
+intervention was separately simulated and validated.
 
 Describe predictions as *in silico* hypotheses requiring experimental validation. Never turn flux amplification into an unvalidated wet-lab fold-change prescription.
 

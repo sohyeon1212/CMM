@@ -219,6 +219,10 @@ packages; compatible minima come from package metadata, while exact versions com
     uses the pre-deletion wild type: reference↔zero when its reference is nonzero, otherwise the
     full feasible domain as an exploratory response. Growth is the configured minimum-growth
     constraint and secondary `biomass_flux` output, not a Figure 5 axis.
+    Preserve `recommendations.csv` as a machine-readable validation artifact, but the canonical
+    publication report must not synthesize it into recommended targets, a strain proposal,
+    summary promotion, or a figure category. Present each method's results separately and leave
+    intervention selection to the user.
 
 ---
 
