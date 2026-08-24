@@ -8,7 +8,7 @@ when_to_use:
   - "use omics data to compare conditions and identify targets"
 role: standalone            # a complete study; not a sub-step of SC-01
 optional_next:
-  - "SC-01: when the goal is production, hand it the chosen condition's flux state"
+  - "SC-01: when the goal is production, hand it the resolved biological condition"
 requires:
   model: cobra model
   expression: gene x condition table with ids matching model.genes
@@ -71,24 +71,63 @@ GEO tables typically carry symbols or probe ids; *E. coli* models use b-numbers.
 
 ## Step 1 — Predict per-condition fluxes
 
-**Goal.** One flux state per condition, from the same model and medium.
+**Goal.** One flux state per expression column, under that state's fully declared external
+condition. Expression alone does not encode medium or aeration.
 
 **Call.**
 
 ```python
-from cmm.core import supports
+from dataclasses import asdict
+
+from cmm.core import apply_medium, require
 from cmm.omics import predict_condition_fluxes, read_expression_table
 
 expression = read_expression_table("expression.csv")     # gene x condition
-method = "eflux2" if supports("QP", model.solver.interface) else "lad"
+method = "eflux2"  # resolved in preflight; use "lad" only when explicitly selected
+require("QP" if method == "eflux2" else "LP", model.solver.interface,
+        feature=f"{method} expression integration")
 
-predicted = predict_condition_fluxes(model, expression, method=method)
-print(predicted.conditions())
-fluxes = {c: predicted.fluxes(c) for c in predicted.conditions()}
+# RUN_DEFINITIONS maps each expression column to its complete (Medium, Condition) pair from
+# preflight. Medium controls available uptake; Condition carries objective and bound overrides.
+integrated = {}
+resolved_inputs = {}
+expression_conditions = {str(name) for name in expression.columns}
+defined_conditions = set(RUN_DEFINITIONS)
+if defined_conditions != expression_conditions:
+    missing = sorted(expression_conditions - defined_conditions)
+    extra = sorted(defined_conditions - expression_conditions)
+    raise ValueError(f"run-definition mismatch: missing={missing}, extra={extra}")
+
+for name in map(str, expression.columns):
+    medium, condition = RUN_DEFINITIONS[name]
+    conditioned_model = model.copy()
+    applied_medium = apply_medium(conditioned_model, medium)
+    condition.apply_to(conditioned_model)
+    one = predict_condition_fluxes(
+        conditioned_model,
+        expression,
+        method=method,
+        conditions=[name],
+    )
+    integrated[name] = one.results[name]
+    resolved_inputs[name] = {
+        "medium": applied_medium.to_provenance(),
+        "condition": asdict(condition),
+    }
+
+fluxes = {
+    name: result.fluxes
+    for name, result in integrated.items()
+    if result.status == "optimal"
+}
 ```
 
-**Outputs.** `ConditionFluxes`; `.fluxes(condition)` raises if that condition did not solve
-optimally.
+**Outputs.** One `OmicsFluxResult` per independently conditioned model. If every expression
+column genuinely shares the same external bounds, one `predict_condition_fluxes(model,
+expression, method=method)` call may return a combined `ConditionFluxes`; its `.fluxes(name)`
+raises when that column did not solve optimally. Do not use that convenience call for columns
+with different media or oxygen bounds. Archive `resolved_inputs` beside the per-condition
+result metadata so model fingerprints are accompanied by the biological definition they hash.
 
 **Artifacts.** `02_integration/fluxes_<condition>.csv` per condition.
 
@@ -110,11 +149,13 @@ alone does not switch off respiration. On the GSE41189 aerobic/anaerobic pair, e
 alone gets the fermentation half right (formate 4.3×, acetate up 17%, oxidative
 phosphorylation down) and the TCA half wrong (up 13%), because the model still takes up 12.25
 mmol gDW⁻¹ h⁻¹ of O₂ in the "anaerobic" sample. Applying the oxygen condition as well —
-step 0's `CONDITION` — gives the expected physiology (TCA down 33×, fermentation up 3.3×).
-This is a property of the method, not a tuning knob: state which of the two you ran.
+the corresponding state's complete `RUN_DEFINITIONS` entry — gives the expected physiology
+(TCA down 33×, fermentation up 3.3×). This is a property of the method, not a tuning knob:
+state which external condition you applied.
 
-**Branch.** No QP → LAD, recorded as a substitution (`AGENTS.md` §3.3). Never pass
-`allow_l1_fallback=True` and call the result E-Flux2.
+**Branch.** No QP → pause before changing the claim. Use LAD only when the run definition
+explicitly selects that LP method and record the change; never choose it automatically from
+solver availability. Never pass `allow_l1_fallback=True` and call the result E-Flux2.
 
 **Failure → action.** A non-optimal condition means its expression-derived bounds are
 infeasible. Report which condition and stop for it; do not substitute another method for one
@@ -197,8 +238,10 @@ for rid in top:
 result the user asked about.
 
 **Failure → action.** If the top changes are scattered across unrelated subsystems with no
-exchange changes, the difference may be alternate-optima noise rather than biology. Verify with
-`random_flux_sampling` (SC-01 step 6) before building a story on it.
+exchange changes, treat the interpretation as inconclusive and inspect condition definitions,
+gene mapping, integration status, and method sensitivity. Plain `random_flux_sampling` samples
+the base model's feasible space; it does not preserve LAD/E-Flux2 constraints and therefore
+cannot validate an expression-derived flux difference.
 
 ---
 
@@ -209,29 +252,53 @@ exchange changes, the difference may be alternate-optima noise rather than biolo
 **Call.**
 
 ```python
-from cmm.core import Condition, ReactionBound
+from dataclasses import asdict
+
+from cmm.core import apply_medium
 from cmm.features import flux_response, fseof
 
-# The condition is the one fixed in preflight, not a per-step choice. Build it once and
-# pass it to every call that accepts it; `aerobic=` was removed in 0.4.0.
-CONDITION = Condition(
-    name="glucose_anaerobic",
-    bounds=(ReactionBound(reaction_id="EX_o2_e", lower_bound=0.0, upper_bound=0.0),),
-)
+# Reuse the exact complete run definition selected in step 1. Do not reconstruct only its
+# oxygen bound or fall back to the unconditioned source model.
+selected_medium, selected_condition = RUN_DEFINITIONS[CHOSEN_CONDITION]
+target_model = model.copy()
+selected_medium_application = apply_medium(target_model, selected_medium)
+selected_condition.apply_to(target_model)
+selected_run_definition = {
+    "medium": selected_medium_application.to_provenance(),
+    "condition": asdict(selected_condition),
+}
 
-scan = fseof(model, PRODUCT, condition=CONDITION, n_steps=10)
+scan = fseof(target_model, PRODUCT, condition=selected_condition, n_steps=10)
+verified = {}
 for candidate in scan.amplification_targets()[:10]:
-    verified = flux_response(model, candidate, response=PRODUCT, condition=CONDITION,
-                             biomass_fraction=0.3, n_steps=20)
+    verified[candidate] = flux_response(
+        target_model,
+        candidate,
+        response=PRODUCT,
+        condition=selected_condition,
+        biomass_fraction=0.3,
+        n_steps=20,
+    )
 ```
 
-**Decision rule.** Cross the FSEOF targets with step 2's ranked changes. A reaction that is
-both an amplification target **and** already up in the better-producing condition is the
-strongest candidate this scenario yields: the model and the data agree.
+Archive `selected_run_definition` with the target tables. Applying the full medium before the
+condition preserves every required nutrient and uptake closure from the selected state; passing
+the same condition to each service preserves its objective and explicit bound overrides.
 
-**Branch.** For a full target search, hand off to `SC-01` using the condition's flux state as
-its baseline (`SC-01` step 2 accepts LAD/E-Flux2 references directly). This scenario's value is
-supplying the *context*; SC-01 does the systematic search.
+**Decision rule.** Cross the FSEOF targets with step 2's ranked changes. A reaction that is
+both an amplification target **and** already up in the better-producing condition is a
+context-consistent intersection worth inspecting. The two signals are not independent—both
+depend on the same model, and one is expression-constrained—so this intersection is neither
+standalone validation nor an automatic recommendation. Report each `verified` response
+separately and label a candidate forward-supported only when target-product flux improves over
+its feasible scan under the declared biomass floor; retain flat, adverse, infeasible, and failed
+responses with their status.
+
+**Branch.** For a full target search, hand the resolved biological condition to `SC-01`; the
+canonical production workflow then builds its own supported FBA or pFBA reference. Passing an
+LAD/E-Flux2 flux state directly into `ProductionWorkflowConfig` is not currently a shipped
+handoff. Adding that boundary requires the typed config, provenance, schema, and validation work
+described in the [canonical-workflow tutorial](../tutorials/adding-a-canonical-workflow.md).
 
 **Artifacts.** `04_targets/fseof_trends.csv`, `04_targets/flux_response_<target>.csv`,
 `04_targets/context_consensus.csv`.
@@ -242,7 +309,9 @@ supplying the *context*; SC-01 does the systematic search.
 
 ## Step 5 — Report
 
-Follow `_reporting.md`. Scenario-specific requirements:
+Follow the reproducibility principles in `_reporting.md`. SC-02 is a public-service recipe, so
+its caller must define and validate its own artifact schema; `validate_production_run` does not
+validate this study. Scenario-specific requirements:
 
 - State the integration method (E-Flux2 or LAD) and the gene id overlap fraction up front.
   Every number depends on both.

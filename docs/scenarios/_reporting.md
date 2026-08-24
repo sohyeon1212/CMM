@@ -1,13 +1,15 @@
 ---
 id: _reporting
-title: Reporting — the artifact contract every scenario ends with
+title: Reporting principles and the canonical SC-01 artifact contract
 ---
 
 # Reporting contract
 
-A scenario run is finished when someone else could reproduce it from the directory it left
-behind. That means raw numbers, figures, provenance, and a narrative that references them —
-not a summary in chat.
+A study is finished when someone else could reproduce it from the directory it left behind.
+That means raw numbers, figures, provenance, and a narrative that references them—not a summary
+in chat. The principles below apply to every study, while the concrete directory, renderer, and
+validator in this document are the shipped SC-01 production contract. SC-02 and SC-03 are
+public-service recipes and do not automatically inherit this schema.
 
 ---
 
@@ -100,12 +102,15 @@ leak an absolute workstation path into a report intended for sharing.
       validate.py
   report.html
   report_standalone.html
+  report_validation.json               post-render integrity and coverage result
 ```
 
-This is the canonical SC-01 schema. Other scenarios keep their own numbered step directories,
-but the root control files, model, figure, script/config, and report rules are shared. One CSV
-per analysis is named for the quantity it holds; target-specific validation tables are listed
-by the two index files rather than discovered through fragile filename globs.
+This is the canonical SC-01 schema. A downstream study should follow the reproducibility
+principles but must declare its own outputs. A second installed workflow needs its own schema
+id/version, semantic roles, renderer, and validator; similar filenames do not make it
+schema-v2 production compatible. One CSV per SC-01 analysis is named for the quantity it holds;
+target-specific validation tables are listed by the two index files rather than discovered
+through fragile filename globs.
 
 The index files are coverage ledgers, not success-only summaries. `flux_response_index.csv`
 contains every unique MOMA/ROOM D1–D5 knockout candidate and every unique reaction in the

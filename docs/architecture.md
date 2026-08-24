@@ -18,17 +18,25 @@ same functions, and result objects carry enough metadata to reproduce a run.
   writes typed exports and provenance, and owns the `01_preflight`–`07_validation` run schema.
   It contains no second implementation of the scientific methods and adds no private ranking
   rule.
-- `cmm.reporting` reads a completed run, renders the Nature Genetics-inspired R figure/report
-  layer, and validates artifact and claim coverage. It never invokes a metabolic solver or
-  changes numerical results.
+- `cmm.reporting` currently reads a completed SC-01 run, renders its Nature Genetics-inspired
+  R figure/report layer, and validates production-specific artifact and claim coverage. It never
+  invokes a metabolic solver or changes numerical results.
 - `cmm.cli` is the designated thin adapter for `production-targets`, `report render`, and
-  `report validate`: those commands may perform config parsing and exit-code mapping only.
+  `report validate`: those commands currently target SC-01 and may perform config parsing and
+  exit-code mapping only.
 - `cmm.app` is the Qt shell. It validates files and UI state, dispatches long analyses to a
   worker, and renders service results.
 
 Only `cmm.app` depends on Qt. The scientific services, workflow, CLI, and validator are
 importable and testable in a headless process. The `nature-r` renderer depends on an external
 `Rscript` process and fails before rendering when a declared package is unavailable.
+
+SC-01 is currently the only shipped canonical workflow. SC-02 and SC-03 are scientific recipes
+over the public services, not installed workflow APIs, CLI commands, or validated schemas. A
+contributor adding another canonical workflow must define a separate schema id/version,
+renderer, validator, and public boundary rather than treating production-specific helpers as a
+generic engine. The complete extension sequence is in
+[Adding a canonical workflow to CMM](tutorials/adding-a-canonical-workflow.md).
 
 ## State and data flow
 
@@ -55,7 +63,7 @@ feature service directly. The workflow is composition and artifact ownership, no
 numerical method.
 
 `FluxState` is the shared complete reaction-flux vector used by MOMA, ROOM, MTA/rMTA, and
-transformation workflows. It rejects empty or non-finite state vectors and records its
+transformation analyses. It rejects empty or non-finite state vectors and records its
 origin. A source state must be regenerated after model, medium, bound, or expression changes.
 The GUI clears these derived states whenever a new model is loaded.
 
@@ -109,11 +117,13 @@ The following distinctions are intentional:
   The finite-difference "bottleneck" it previously reported was removed in 0.4.0 as
   grid-dependent and unpublished, and `feasible_range()` is FVA-derived rather than read off
   the scan grid.
-- Every analysis returns a frozen dataclass carrying `run_provenance`, with no exceptions as of
-  0.4.0: `fva` returns `FvaResult` rather than a bare `dict[str, FluxRange]` (it is still a
-  `Mapping`, so callers are unaffected), and `Medium.apply_to` returns `MediumApplication`,
-  which records the components the loaded model could not express instead of dropping them
-  silently.
+- Solver-backed services return serializable typed result containers carrying
+  `run_provenance` and stable frame exports. `fva` returns the mapping-compatible `FvaResult`,
+  while `BatchComparisonResult` preserves its legacy list behavior and adds metadata plus
+  `to_frame()`. Lightweight arithmetic helpers such as `flux_log_change` and `sign_flips`
+  intentionally return dictionaries or lists rather than pretending to be solver runs.
+  `Medium.apply_to` returns `MediumApplication`, which records components the loaded model could
+  not express instead of dropping them silently.
 - One convention states the environment of a run: `condition=`. The `aerobic=True|False`
   parameter was removed from `cmm.features.production` in 0.4.0 and `optknock`/`robustknock`
   gained `condition=`, so no service depends silently on the caller's model state.

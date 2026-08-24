@@ -25,6 +25,11 @@ Two document layers sit under this one. Read them on demand, not up front:
 Match the user's goal to a scenario and follow that file. Every scenario begins with
 `docs/scenarios/_preflight.md` and ends with `docs/scenarios/_reporting.md`.
 
+SC-01 is the only installed canonical workflow. SC-02 and SC-03 are complete scientific
+recipes over public services, not built-in workflow commands or production-schema runs. When
+following either recipe, preserve typed results and define the study's artifact contract rather
+than claiming compatibility with SC-01's renderer or validator.
+
 **Each scenario answers its own question and finishes on its own.** None is a mandatory
 prerequisite for another. They also combine, and the combinations below are the useful ones —
 but only run a second scenario when the user's goal actually needs it, and say why.
@@ -228,10 +233,11 @@ packages; compatible minima come from package metadata, while exact versions com
 
 ---
 
-## 4. Run contract
+## 4. Canonical SC-01 run contract
 
-Every scenario writes one self-contained directory. Full specification in
-`docs/scenarios/_reporting.md`; the shape is:
+The installed SC-01 workflow writes one self-contained directory. Reporting principles for
+downstream recipe-based studies and the full production specification are in
+`docs/scenarios/_reporting.md`; the canonical shape is:
 
 ```
 <run directory>/            explicit ProductionWorkflowConfig.output_dir — see _reporting.md
@@ -251,6 +257,7 @@ Every scenario writes one self-contained directory. Full specification in
   figures/                300 DPI PNG plus editable PDF/SVG
   report.html             the narrative, with figures placed inline
   report_standalone.html  the same, figures embedded, for sending to someone
+  report_validation.json  final integrity and coverage result
 ```
 
 Units are CMM's throughout: fluxes in mmol gDW⁻¹ h⁻¹, growth in h⁻¹, molar yield in mol/mol.
@@ -291,6 +298,8 @@ If you are modifying CMM itself rather than using it:
 
 - `docs/clean-room-policy.md` governs what may be brought in from other codebases: implement
   from behavior and public documentation, never copy source, fixtures, or UI forms.
+- `docs/tutorials/adding-a-canonical-workflow.md` is the contributor sequence for adding a
+  workflow-specific API, schema, reporter, validator, CLI boundary, documentation, and tests.
 - Quality gate, all of which must pass:
   ```bash
   QT_QPA_PLATFORM=offscreen uv run --frozen --all-extras pytest -q --cov=cmm --cov-branch --cov-fail-under=80

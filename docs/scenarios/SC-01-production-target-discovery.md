@@ -14,7 +14,7 @@ requires:
   product: "exchange reaction id, for example EX_succ_e"
   condition: "explicit medium, substrate uptake, oxygen/aeration bounds, and other changed bounds"
 optional_inputs_from:
-  - "SC-02: a condition-specific reference state"
+  - "SC-02: a resolved biological condition"
   - "SC-03: an exhaustive essentiality study"
 solver:
   canonical_workflow: "QP for MOMA-L2; MILP for ROOM and strain design"
@@ -144,13 +144,14 @@ Use the same condition object and resolved model state that every later step use
 
 ## Step 2 — Wild-type reference
 
-Use a deterministic pFBA reference unless an explicitly justified condition-specific
-reference is supplied by SC-02. Record wild-type growth and product flux and export the full
-reference state. MOMA, ROOM, and paired sampling must all refer to this same state and model
-fingerprint.
+Use the configured FBA or deterministic pFBA reference and record wild-type growth, product
+flux, and the complete state. MOMA, ROOM, and paired sampling must all refer to this same state
+and model fingerprint. SC-02 may supply the resolved biological condition, but the current
+`ProductionWorkflowConfig` does not accept an LAD/E-Flux2 flux state as its reference.
 
-An expression-derived reference changes the biological question. Do not mix pFBA, LAD, and
-E-Flux2 rows in one ranking as though they were replicate measurements.
+An expression-derived reference would change the biological question and requires a separate
+typed workflow boundary before it can be called canonical. Do not mix pFBA, LAD, and E-Flux2
+rows in one ranking as though they were replicate measurements.
 
 ## Step 3 — Single-knockout predictions
 

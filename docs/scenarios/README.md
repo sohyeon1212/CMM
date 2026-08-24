@@ -1,7 +1,10 @@
 # CMM scenarios
 
-Step-by-step metabolic-engineering pipelines for driving CMM from an AI coding CLI. Each
-scenario takes a goal and produces a report, publication figures, and raw data.
+Step-by-step metabolic-engineering recipes for driving CMM from an AI coding CLI. Every
+scenario defines a complete scientific question, but only SC-01 currently has an installed
+workflow API, CLI command, versioned artifact schema, R report, and validator. SC-02 and SC-03
+must be composed from the documented public services, and their caller owns the resulting
+artifact contract.
 
 Read `AGENTS.md` first for the router, the solver gate, and the rules. Read
 `docs/agent-reference.md` for signatures while writing the calls.
@@ -10,26 +13,29 @@ For a complete production request, use the auto-discoverable
 `.agents/skills/cmm-production-engineering/` skill and the canonical
 `cmm production-targets --config CONFIG` workflow. The detailed steps below explain the
 scientific roles and support narrow API calls; they are not a reason to invent a second,
-one-off orchestrator. To change workflow parameters or define a new research workflow, follow
-[Building a reproducible CMM workflow](../building-custom-workflows.md).
+one-off orchestrator. To change workflow parameters or compose a downstream study, follow
+[Building or customizing a CMM workflow](../building-custom-workflows.md). Contributors adding
+a second installed workflow should use the
+[canonical-workflow tutorial](../tutorials/adding-a-canonical-workflow.md).
 
 ## Index
 
-| ID | Goal | Requires | Minimum solver | Key outputs |
-|---|---|---|---|---|
-| [SC-01](SC-01-production-target-discovery.md) | Increase production of a target metabolite, and design a strain where it is guaranteed | confirmed model, product exchange, condition | **QP + MILP** for the full workflow; strain design also needs importable `straindesign` | MOMA/ROOM single-deletion candidates, OptKnock/RobustKnock designs, FSEOF/FVSEOF targets, forward validation |
-| [SC-02](SC-02-omics-context-engineering.md) | Explain and exploit a difference between conditions | model, expression table | LP (LAD) | per-condition fluxes, ranked differences, context targets |
-| [SC-03](SC-03-knockout-screening.md) | Screen every single deletion | model | LP (`moma_l1`) | essentiality classes, beneficial deletions |
+| ID | Delivery status | Goal | Requires | Minimum solver | Key outputs |
+|---|---|---|---|---|---|
+| [SC-01](SC-01-production-target-discovery.md) | Shipped canonical workflow | Increase production of a target metabolite, and design a strain where it is guaranteed | confirmed model, product exchange, condition | **QP + MILP** for the full workflow; strain design also needs importable `straindesign` | MOMA/ROOM single-deletion candidates, OptKnock/RobustKnock designs, FSEOF/FVSEOF targets, forward validation |
+| [SC-02](SC-02-omics-context-engineering.md) | Public-service recipe | Explain and exploit a difference between conditions | model, expression table | LP (LAD) | per-condition fluxes, ranked differences, context targets |
+| [SC-03](SC-03-knockout-screening.md) | Public-service recipe | Screen every single deletion | model | LP (FBA capacity) | capacity-based dependency classes; optional MOMA/ROOM product phenotypes |
 
-Every scenario is complete on its own: each answers its own question and ends with its own
-report. None is a prerequisite for another.
+Every scenario is scientifically complete on its own and none is a prerequisite for another.
+Only SC-01 supplies its report and artifact contract automatically. A caller following SC-02
+or SC-03 must export the typed results and define how that study is validated.
 
 Shared, used by all of them:
 
 - [`_preflight.md`](_preflight.md) — checks that run before any scenario. Skipping these is how
   a run produces a confident wrong answer instead of an error.
-- [`_reporting.md`](_reporting.md) — the artifact contract every scenario ends with: directory
-  layout, provenance, raw data, figures, and the `report.html` skeleton.
+- [`_reporting.md`](_reporting.md) — general reporting principles plus the concrete SC-01
+  artifact contract. A different canonical workflow needs its own schema and validator.
 
 ## How they fit together
 

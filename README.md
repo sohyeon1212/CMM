@@ -40,9 +40,11 @@ validation. Use `--analysis-only` to separate the solver run from R rendering. A
 complete until validation succeeds; unavailable methods and infeasible solutions remain
 visible rather than being silently omitted.
 
-See [Building a reproducible CMM workflow](docs/building-custom-workflows.md) for a complete
-generic config, the equivalent Python API, guidance for composing a new workflow, artifact and
-provenance contracts, and workflow-level tests. The scientific sequence is specified in
+See [Building or customizing a CMM workflow](docs/building-custom-workflows.md) for a complete
+generic config, the equivalent Python API, and the boundary between a downstream study and an
+installed workflow. Contributors can follow the separate
+[canonical-workflow tutorial](docs/tutorials/adding-a-canonical-workflow.md). The scientific
+sequence of the sole shipped workflow is specified in
 [SC-01 production target discovery](docs/scenarios/SC-01-production-target-discovery.md).
 
 ## Availability and implementation
@@ -96,8 +98,10 @@ Zenodo or an equivalent long-term repository and its DOI added to this section,
   sampling, recommendations, and the fixed schema-v2 artifact tree. FSEOF and FVSEOF contribute
   independent method-specific rankings; overlap is reported but is not required for a
   hypothesis to receive its own forward validation. Every unique MOMA/ROOM display-ranked
-  D1–D5 knockout candidate receives knockout-background flux response and matched paired
-  sampling, and every candidate in the independent FSEOF/FVSEOF top-10 union receives a
+  D1–D5 knockout candidate receives matched paired sampling. A representable single-reaction
+  signature also receives a pre-deletion wild-type reaction-to-product response scan;
+  multi-reaction signatures remain explicitly unavailable rather than being reduced to an
+  arbitrary axis. Every candidate in the independent FSEOF/FVSEOF top-10 union receives a
   flux-response scan. Loop-flagged or unresolved amplification targets are still scanned but
   remain ineligible for support/recommendation; non-runnable or failed analyses remain visible
   with status and reason rather than shortening those candidate sets. The workflow is available
@@ -292,6 +296,7 @@ biological prediction.
 ## Documentation
 
 - [Build or customize a reproducible workflow](docs/building-custom-workflows.md)
+- [Contributor tutorial: add a canonical workflow](docs/tutorials/adding-a-canonical-workflow.md)
 - [Desktop and Python tutorial](docs/TUTORIAL.md)
 - [Scientific validation and reproducibility](docs/VALIDATION.md)
 - [MTA/rMTA design and equations](docs/design-revert-metabolism.md)
