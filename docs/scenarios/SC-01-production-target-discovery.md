@@ -6,8 +6,8 @@ when_to_use:
   - "increase production of X"
   - "which genes should I over-express or knock out to make more X"
   - "design a strain where production is guaranteed, not merely possible"
-  - "생산 증대 표적을 찾아줘"
-  - "성장 공역 균주 설계"
+  - "find production-enhancing targets"
+  - "design a growth-coupled strain"
 role: spine
 requires:
   model: "path to the exact COBRA model"

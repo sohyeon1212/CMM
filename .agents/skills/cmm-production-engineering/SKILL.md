@@ -1,6 +1,6 @@
 ---
 name: cmm-production-engineering
-description: Run CMM's reproducible production-target workflow for a COBRA model and product exchange, including single-knockout, strain-design, amplification, validation, and publication-report requests. Use for prompts such as "engineer E. coli to produce succinate", "find knockout or over-expression targets", and their Korean equivalents. Do not use for a standalone FBA/FVA question or for omics-only comparison.
+description: Run CMM's reproducible production-target workflow for a COBRA model and product exchange, including single-knockout, strain-design, amplification, validation, and publication-report requests. Use for prompts such as "engineer E. coli to produce succinate" and "find knockout or over-expression targets". Do not use for a standalone FBA/FVA question or for omics-only comparison.
 ---
 
 # CMM production engineering

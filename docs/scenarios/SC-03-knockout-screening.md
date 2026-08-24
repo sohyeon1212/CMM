@@ -5,7 +5,7 @@ goal: Screen every single knockout for lethality, growth impact, and effect on a
 when_to_use:
   - "which genes are essential"
   - "screen all knockouts / single deletion study"
-  - "넉아웃 스크리닝, 필수 유전자"
+  - "screen knockouts and identify essential genes"
 role: standalone            # a complete study; not a sub-step of SC-01
 optional_next:
   - "SC-01: when the goal is production, hand it the beneficial-deletion candidates"

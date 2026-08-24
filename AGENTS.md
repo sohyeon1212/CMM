@@ -38,8 +38,10 @@ but only run a second scenario when the user's goal actually needs it, and say w
 | Screen deletions *for a production goal* | [`SC-03`](docs/scenarios/SC-03-knockout-screening.md) → `SC-01` | no — the screen feeds SC-01's candidates |
 | Find targets *in a specific condition* backed by expression data | [`SC-02`](docs/scenarios/SC-02-omics-context-engineering.md) → `SC-01` | no — SC-02 picks the condition, SC-01 searches it |
 
-Korean phrasings map the same way: 생산 증대·과발현/녹아웃 표적 → SC-01; 성장 공역·균주 설계
-→ SC-01 (4단계부터); 오믹스·조건 비교·발현 데이터 → SC-02; 넉아웃 스크리닝·필수 유전자 → SC-03.
+Equivalent natural-language intents map the same way: production enhancement and
+over-expression/knockout targets → SC-01; growth-coupled strain design → SC-01 (from step 4);
+omics analysis, condition comparison, or expression-data-backed target discovery → SC-02;
+knockout screening and essentiality → SC-03.
 
 How they relate:
 

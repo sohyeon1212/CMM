@@ -5,7 +5,7 @@ goal: Explain a metabolic difference between conditions or strains, and turn it 
 when_to_use:
   - "why does condition A produce more than B"
   - "what changes between these two strains / timepoints"
-  - "오믹스 데이터로 조건 비교하고 표적 찾기"
+  - "use omics data to compare conditions and identify targets"
 role: standalone            # a complete study; not a sub-step of SC-01
 optional_next:
   - "SC-01: when the goal is production, hand it the chosen condition's flux state"

@@ -78,7 +78,7 @@ ran it.
 
 Every `SC-*.md` uses the same shape so a pipeline can be followed without reading prose:
 
-- **YAML front matter** — id, goal, when to use (including Korean phrasings), required and
+- **YAML front matter** — id, goal, when to use (including common natural-language phrasings), required and
   optional inputs, solver requirements, step list, expected runtime.
 - **Objective** — what the run produces, plus measurable success criteria.
 - **Pipeline at a glance** — one row per step: question, method, output.

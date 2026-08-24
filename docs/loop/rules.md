@@ -68,8 +68,8 @@ stories reference the rule instead of rediscovering the cause. Format:
   hairballs). Curated Escher maps are JSON whose nodes carry hand-laid (x, y)
   coordinates and whose reactions carry bezier `segments`. Render THAT layout coloured by
   flux (`escher_flux_map`): identical biochemical layout, plus flux encoding. The map file is
-  user/BiGG data passed in by path — CMM bundles no maps. *(from: user — "왜 map이
-  안떠"; force-layout network map was a hairball, Escher-layout render matches the curated map)*
+  user/BiGG data passed in by path — CMM bundles no maps. *(from: user — "why isn't the map
+  showing?"; force-layout network map was a hairball, Escher-layout render matches the curated map)*
 - R14 — On a genome-scale model, the carbon source is whatever the *medium* allows: JS66's
   default medium has `EX_glc__D_e` lower_bound = 0 (no glucose), so auto-detect correctly
   returns the available carbon exchange (CO2). To analyse succinate-from-glucose you must open
