@@ -26,8 +26,9 @@ governs it:
 > California. All Rights Reserved.
 
 MIT permits redistribution provided the copyright notice and permission notice travel with the
-copy, which is what this file is for. (GitHub's licence detector reports "Other" for that
-repository only because the extra `This software is Copyright …` line stops its automatic
+copy. CMM reproduces the complete upstream notice in `LICENSE.escher.txt` beside the map and
+includes both files in its Python distributions. (GitHub's licence detector reports "Other" for
+that repository only because the extra `This software is Copyright …` line stops its automatic
 matcher; the text below that line is verbatim MIT.)
 
 The Escher *application* repository, `zakandrewking/escher`, is MIT as well but carries a
@@ -50,3 +51,4 @@ The map is a published, hand-drawn layout. Cite its paper in any work that uses 
 The file is redistributed **byte-for-byte as retrieved**; its `map_description` still carries
 the upstream "Last Modified Fri Dec 05 2014" stamp. CMM neither edits nor regenerates it.
 CMM's own licence (MIT) is in `LICENSE` at the repository root and covers CMM's code only.
+Repository-level third-party disclosures are collected in `THIRD_PARTY_NOTICES.md`.

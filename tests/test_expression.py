@@ -55,6 +55,7 @@ def test_gene_to_reaction_weights_missing_complex_subunit_drops_reaction():
     assert weights["R_OR"] == 5.0  # OR sums the available isozymes
 
 
+@pytest.mark.requires_qp
 def test_eflux2_runs_and_holds_objective(ecoli_core):
     weights = {r.id: 50.0 for r in ecoli_core.reactions if r.genes}
     result = eflux2(ecoli_core, weights)
@@ -66,6 +67,7 @@ def test_eflux2_runs_and_holds_objective(ecoli_core):
     )
 
 
+@pytest.mark.requires_qp
 def test_eflux2_does_not_mutate_model(ecoli_core):
     growth = ecoli_core.slim_optimize()
     weights = {r.id: 50.0 for r in ecoli_core.reactions if r.genes}
@@ -149,6 +151,7 @@ def test_lad_runs_on_any_solver(ecoli_core):
     assert ecoli_core.slim_optimize() == pytest.approx(0.8739, abs=1e-3)
 
 
+@pytest.mark.requires_qp
 def test_eflux2_min_direction_floor_branch(ecoli_core):
     # Exercise the min-objective floor branch (ub instead of lb): it must not raise.
     ecoli_core.objective_direction = "min"
@@ -162,6 +165,7 @@ def test_eflux2_empty_expression_returns_no_targets(ecoli_core):
     assert lad(ecoli_core, {}).status == "no_targets"
 
 
+@pytest.mark.requires_qp
 def test_integrate_expression_dispatch(ecoli_core):
     expr = {g.id: 20.0 for g in ecoli_core.genes}
     assert integrate_expression(ecoli_core, expr, method="eflux2").status == "optimal"

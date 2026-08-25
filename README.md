@@ -113,16 +113,45 @@ Zenodo or an equivalent long-term repository and its DOI added to this section,
 
 ## Reproducible installation
 
-CMM requires Python 3.10–3.12. Python dependencies are locked in `uv.lock`. R is optional for
-the scientific services, workflow analysis, CLI validation, and desktop application:
+CMM requires Python 3.10–3.12. Exact Python dependencies are recorded in `uv.lock`; Python 3.12
+is the preferred cross-platform interpreter. The source installer is the shortest editable setup:
+it resolves compatible dependencies from the project metadata, does not rely on the operating
+system's `python3`, and locates a newly bootstrapped `uv` directly even before the current shell's
+`PATH` is refreshed. Use the separate frozen command below when the lock must be enforced.
 
 ```bash
 git clone https://github.com/jyryu3161/CMM.git
 cd CMM
-uv sync --frozen --all-extras
+./install.sh --dev
+.venv/bin/cmm --version
+.venv/bin/python -m cmm.app
+```
+
+On Windows PowerShell, run `.\install.ps1 -Dev` and launch with
+`.\.venv\Scripts\python.exe -m cmm.app`. The installers accept an existing `uv >= 0.8.0` and
+print the version and executable they use. Only when `uv` is absent do they bootstrap the tested
+0.12.5 release. An older installed `uv` is rejected with pinned-upgrade instructions.
+
+For an exactly frozen CI or manuscript environment, use `uv` 0.12.5 with `uv.lock`. A fresh
+Astral bootstrap normally writes `uv` and a shell environment file under `$HOME/.local/bin`; load
+that file (or prepend the directory) before invoking `uv` in the same shell:
+
+```bash
+curl -LsSf https://astral.sh/uv/0.12.5/install.sh | sh
+[ -f "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"
+export PATH="$HOME/.local/bin:$PATH"
+uv --version  # must report uv 0.12.5 for this frozen path
+uv python install 3.12
+uv sync --python 3.12 --frozen --all-extras
 uv run cmm --version
 uv run python -m cmm.app
 ```
+
+For the equivalent manual PowerShell flow, bootstrap with
+`irm https://astral.sh/uv/0.12.5/install.ps1 | iex`, invoke
+`$env:USERPROFILE\.local\bin\uv.exe`, and confirm it reports 0.12.5 before running the
+`python install` and `sync --frozen` subcommands. R is optional for the scientific services,
+workflow analysis, CLI validation, and desktop application.
 
 Publication rendering additionally requires R. In a source checkout, `renv.lock` pins R 4.3.2
 and every renderer package. Restore it, then expose the project library to the current shell;
@@ -145,15 +174,17 @@ $env:R_LIBS_USER = ((Rscript --vanilla -e "renv::load(); cat(.libPaths()[1])") -
 uv run cmm report render RUN_DIR
 ```
 
-The Python wheel and sdist contain the checked-in R renderer but not the repository-root
-`renv.lock`. Distribution-only users can install its runtime packages directly:
+The Python wheel and sdist contain the checked-in R renderer. The sdist also contains
+`renv.lock`; a wheel-only installation does not. Wheel-only users can install the renderer's
+runtime packages directly:
 
 ```bash
 Rscript --vanilla -e "install.packages(c('jsonlite','ggplot2','ggrepel','patchwork','svglite','ragg'), repos='https://cloud.r-project.org')"
 ```
 
 That follows current CRAN rather than the publication lock. For an exactly reproducible
-manuscript render, restore `renv.lock` from the matching Git checkout or GitHub source archive.
+manuscript render, restore `renv.lock` from the matching Git checkout, sdist, or GitHub source
+archive.
 At runtime the renderer verifies that `Rscript` and its named packages can be loaded; those
 packages enforce their declared compatible dependency minima. The runtime records the actual
 versions in the figure manifest but does not reinterpret the repository lock. Exact versions
@@ -173,22 +204,48 @@ R 4.3 binary is unavailable. The normal matrix does not force a source-only rest
 the exact restored versions and renderer result regardless of whether each package arrived as
 a binary or was compiled from source.
 
-For a conventional editable installation:
+For a conventional editable installation, invoke a supported interpreter explicitly (on Windows,
+use `py -3.12` or the full path to Python 3.10–3.12):
 
 ```bash
-python -m pip install -e ".[desktop,design,solver-gurobi]"
-python -m cmm.app
+python3.12 -m pip install -e ".[desktop,design,solver-gurobi]"
+python3.12 -m cmm.app
 ```
 
-The cross-platform installers create `.venv` and install the desktop, strain-design, and
-Gurobi extras by default:
+The cross-platform source installers create new environments with a uv-managed Python 3.12, so
+an older system Python such as macOS 3.9.6 is not selected. They use an installed `uv >= 0.8.0`
+or bootstrap 0.12.5 when none is available. They install the desktop, strain-design, and Gurobi
+extras by default:
 
 ```bash
 ./install.sh                 # macOS / Linux / WSL
 # .\install.ps1             # Windows PowerShell
 ./install.sh --dev           # also install test, coverage, lint, and type-check tools
 ./install.sh --no-gurobi     # GLPK LP/MILP only
+CMM_PYTHON=3.11 ./install.sh # ask uv to install/use another supported version
+./install.sh --python /path/to/python3.12  # command-line override wins over CMM_PYTHON
 ```
+
+PowerShell accepts the corresponding `-Dev`, `-NoGurobi`, `-CoreOnly`, `-Python`, and
+`-VenvDir` options; its environment override is `$env:CMM_PYTHON = "3.11"`. A numeric override
+asks uv to install that managed version. A command or path must already identify an executable.
+Both installers reject Python outside 3.10–3.12 and never silently replace an existing virtual
+environment that conflicts with an explicit override. Reuse also requires `pyvenv.cfg` and an
+interpreter that reports `sys.prefix != sys.base_prefix`; an ordinary directory containing a
+Python executable is not trusted as a venv.
+
+If a checkout already has a legacy Python 3.9 `.venv`, preserve it while recovering. Either move
+it aside and let the installer create a fresh `.venv`, or install into a new path:
+
+```bash
+mv .venv .venv-python39-backup
+./install.sh
+# Alternatively, leave .venv untouched:
+./install.sh --venv .venv312
+```
+
+PowerShell equivalents are `Rename-Item .venv .venv-python39-backup; .\install.ps1` or
+`.\install.ps1 -VenvDir .venv312`. The installers do not delete or overwrite the old environment.
 
 Tagged wheels and source archives are published on the
 [GitHub Releases page](https://github.com/jyryu3161/CMM/releases). The current source version
@@ -301,21 +358,37 @@ biological prediction.
 - [Scientific validation and reproducibility](docs/VALIDATION.md)
 - [MTA/rMTA design and equations](docs/design-revert-metabolism.md)
 - [Architecture and solver contracts](docs/architecture.md)
-- [Scenario figures](docs/scenario-figures.md) — what each GUI capture shows, and how to regenerate them
+- [Contributor scenario-figure manifest](docs/scenario-figures.md) — GUI regression captures and regeneration commands, not publication evidence
+- [AI-assisted use and disclosure](docs/AI-USAGE.md)
 - [Release changes](CHANGELOG.md)
 
-For driving CMM from an AI coding CLI (Claude Code, Codex, …):
+For driving CMM from a repository-aware AI coding tool:
 
 - [Agent operating instructions](AGENTS.md) — the scenario router, solver gate, and run contract
 - [Metabolic-engineering scenarios](docs/scenarios/README.md) — step-by-step pipelines
 - [Function reference for agents](docs/agent-reference.md) — signatures and result objects
 
+The production skill under `.agents/skills/cmm-production-engineering/` is a tested
+Codex/OpenAI-compatible repository skill. Skill auto-discovery is host-dependent and is not
+claimed for other agent hosts; they can still follow `AGENTS.md`, the scenarios, and the public
+API directly. The skill ships in the GitHub/source checkout and sdist, but it is not a Python
+runtime dependency or an installed-wheel feature. Installing the wheel alone provides the
+workflow API and CLI, not the repository-level skill.
+
+The documentation and agent contract are reproducibility/source materials rather than numerical
+runtime dependencies. They ship in the sdist; the wheel contains the installed Python runtime,
+R renderer, and licensed map resources. `.github/workflows/` is GitHub-only maintenance
+automation: it is not imported by CMM, but a green run for the archived commit is part of the
+software-validation evidence.
+
 ## Citation and license
 
-CMM is open source under the [MIT License](LICENSE). Citation metadata are machine-readable
-in [CITATION.cff](CITATION.cff). The file intentionally still contains an organization-only
-placeholder: replace it with the final authors and ORCIDs, archive the exact release, and add
-the DOI before journal submission. Until then, cite the repository URL, version, and commit.
+CMM is open source under the [MIT License](LICENSE); external inspiration and redistributed
+material are recorded in [Third-party notices](THIRD_PARTY_NOTICES.md). Citation metadata are
+machine-readable in [CITATION.cff](CITATION.cff). The file intentionally still contains an
+organization-only placeholder: replace it with the final authors and ORCIDs, archive the exact
+release, and add the DOI before journal submission. Until then, cite the repository URL, version,
+and commit.
 A manuscript must also cite the original paper for every method it uses, as listed in
 [Scientific validation and reproducibility](docs/VALIDATION.md).
 

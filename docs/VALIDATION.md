@@ -10,6 +10,11 @@ CMM source code, documentation, and test data are freely available under the MIT
 the exact tagged release in Zenodo or an equivalent long-term repository and add its DOI to
 the README, `CITATION.cff`, and manuscript Availability and Implementation statement.
 
+The optional repository skill is an interface to the same numerical workflow, not a source of
+solver evidence. When AI assistance materially affects development, analysis, interpretation,
+or manuscript preparation, record and disclose it separately as described in
+[`AI-USAGE.md`](AI-USAGE.md).
+
 ## Reproduce the publication environment
 
 The repository tracks `uv.lock`, including hashes and resolutions for every supported Python
@@ -32,22 +37,29 @@ uv build
 uvx twine check dist/*
 ```
 
-The R commands are optional for Python-only use and assume a Git checkout or GitHub source
-archive, because the repository-root `renv.lock` is not installed by the Python wheel or
-sdist. Both Python distributions contain the R renderer itself; use the matching Git source
-and lock for a reproducible publication render.
+The R commands are optional for Python-only use and require the matching `renv.lock`. Git
+checkouts, GitHub source archives, and the sdist include that lock; the Python wheel does not.
+Both Python distributions contain the R renderer itself. A wheel-only user can install compatible
+renderer packages, but exact publication reproduction requires the lock from the same release.
 
-The Python matrix executes the locked `uv` environment on Linux (Python 3.10 and 3.12),
-Windows 3.12, and macOS 3.12. A separate publication-report matrix restores `renv.lock`,
-prints and checks every locked package version, and runs `test_publication_reporting.py` on
-Ubuntu, macOS, and Windows. The lock records R 4.3.2, so archived package versions may compile
-when a matching binary is unavailable: Linux and macOS jobs install the graphics build
-libraries, and the Windows job provisions matching Rtools43. `ggplot2` itself declares
-`NeedsCompilation: no`; the relevant compiled packages are `ragg`, `systemfonts`,
-`textshaping`, and `svglite`. The matrix permits both repository binaries and source builds
-and tests the restored result; it does not force a source-only installation. The build
-toolchains prepare and support source fallback without claiming that every matrix run actually
-compiled a package.
+The general Python matrix executes the locked solver-neutral/GLPK environment on Linux
+(Python 3.10, 3.11, and 3.12), Windows 3.12, and macOS 3.12. It deselects exactly the tests
+marked `requires_qp` or `requires_miqp`; a separate Linux 3.12 job installs Gurobi plus the
+desktop dependencies and runs that complete marked universe with offscreen Qt. It also runs the
+exact unmarked MILP node that solves both OptKnock and RobustKnock and checks deterministic seed
+forwarding. The current audited solver collection therefore contains 60 marked tests plus that
+one explicit MILP test, with no exception. A collection/JUnit identity guard fails if an audited
+node is omitted, skipped, duplicated, or replaced without review.
+
+A separate publication-report matrix restores `renv.lock`, prints and checks every locked
+package version, and runs `test_publication_reporting.py` on Ubuntu, macOS, and Windows. The
+lock records R 4.3.2, so archived package versions may compile when a matching binary is
+unavailable: Linux and macOS jobs install the graphics build libraries, and the Windows job
+provisions matching Rtools43. `ggplot2` itself declares `NeedsCompilation: no`; the relevant
+compiled packages are `ragg`, `systemfonts`, `textshaping`, and `svglite`. The matrix permits
+both repository binaries and source builds and tests the restored result; it does not force a
+source-only installation. The build toolchains prepare and support source fallback without
+claiming that every matrix run actually compiled a package.
 
 The current `renv.lock` records exact versions and CRAN sources but has no per-package `Hash`
 fields. A clean renv 1.1.4 restore/snapshot audit did not provide a safe Hash-only round trip:
@@ -55,15 +67,20 @@ the canonical snapshot omitted records that were not fully materialized in its i
 library. The lock therefore remains hashless rather than carrying hand-generated hashes.
 Regenerate hashes only from a complete R 4.3.2 project library and accept the result only when
 the package set and every R/package version are unchanged; until then, the three-OS complete
-version comparison is the explicit CI guard.
+version comparison is the explicit CI guard. That guard also parses every `Depends`, `Imports`,
+and `LinkingTo` entry, requires each hard dependency to be locked or supplied by base/recommended
+R, and requires the restored project's non-base package set to match the lock exactly. `renv`
+itself is locked, so CI permits no additional unpinned bootstrap package.
 
 QP/MIQP checks use small models that fit the bundled Gurobi restricted license
 (largest QP: 190 variables / 73 constraints, against that license's 200-variable limit for
-quadratic models); they are required tests, not environment-dependent skips. That 10-variable
-margin is deliberate and narrow — enlarging the E-Flux2 test model beyond 100 reactions would
-make these tests require a full license. Genome-scale LP validation uses GLPK. Pytest's ten
-slowest durations are retained in every CI log as a lightweight runtime regression record;
-solver/model/license details remain part of result provenance.
+quadratic models); all 60 capability-marked nodes are required tests, not environment-dependent
+skips. The additional audited MILP node exercises OptKnock, RobustKnock, and explicit seed
+forwarding under the same license. That 10-variable QP margin is deliberate and narrow —
+enlarging the E-Flux2 test model beyond 100 reactions would make these tests require a full
+license. Genome-scale LP validation uses GLPK. Pytest's ten slowest durations are retained in
+every CI log as a lightweight runtime regression record; solver/model/license details remain
+part of result provenance.
 
 ## Evidence matrix
 
@@ -461,9 +478,8 @@ model changes; they do not replace archival storage of the model file.
 
 ## Known limits
 
-- Under the bundled restricted Gurobi license, L2 MOMA and `rmta_continuous` are exercised only
-  on toy networks; `rmta_continuous` has **no test that solves its QP** — only a GLPK
-  capability-gate test — so the QP row claimed for it in the README is unverified. L2 MOMA on
+- Under the bundled restricted Gurobi license, L2 MOMA and `rmta_continuous` are exercised on
+  small deterministic networks, including a direct QP solve for `rmta_continuous`. L2 MOMA on
   `e_coli_core` (286 variables, because COBRApy adds one distance variable per reaction)
   exceeds the restricted license and requires a full one.
 - `fva` resolves `processes` to 1 below 500 analysed reactions, but leaves the pool to cobra's

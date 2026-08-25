@@ -130,8 +130,9 @@ def reference_state_pfba(
 ) -> FluxState:
     """Build a reference state from a parsimonious FBA (pFBA) solution.
 
-    pFBA yields a unique, minimal-total-flux distribution at the given fraction of the
-    optimum, which makes it a reproducible default reference for small models.
+    pFBA yields a minimal-total-flux distribution at the given fraction of the optimum. The
+    optimum need not be unique, but deterministic solver settings make it a practical default
+    reference for small models.
     """
 
     if not 0.0 < fraction_of_optimum <= 1.0:

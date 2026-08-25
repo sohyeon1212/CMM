@@ -30,6 +30,7 @@ def test_capability_matrix_is_consistent_for_active_solver(branched_model):
     assert name in solvers.available_solvers() or name  # name resolves to a string
 
 
+@pytest.mark.requires_miqp
 def test_solver_status_reports_gurobi_recommended(branched_model):
     status = solvers.solver_status(branched_model)
     assert status.name in ("gurobi", "cplex")

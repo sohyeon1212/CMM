@@ -764,7 +764,7 @@ def test_validate_schema_v2_integrity_and_pre_render_alias(tmp_path):
 def test_legacy_schema_v2_core_columns_validate_and_render_with_fallbacks(tmp_path):
     run = _make_run(tmp_path / "run")
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     legacy_screen = (
         "target_id,kind,status,objective,product_flux,selected,growth_fraction,"
         "blocked_reactions\n"
@@ -805,7 +805,7 @@ def test_legacy_schema_v2_core_columns_validate_and_render_with_fallbacks(tmp_pa
     assert isinstance(artifacts, dict)
     del artifacts["amplification_target_ranking"]
     del artifacts["variability_supported_amplification_targets"]
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     validated = validate_run(run)
     assert validated.manifest["schema_version"] == 2
@@ -815,9 +815,11 @@ def test_legacy_schema_v2_core_columns_validate_and_render_with_fallbacks(tmp_pa
         statuses = {item["id"]: item["status"] for item in figures.figures}
         assert statuses["fig02_single_knockout"] == "rendered"
         assert statuses["fig04_amplification"] == "rendered"
-        knockout_svg = (run / "figures/fig02_single_knockout.svg").read_text()
+        knockout_svg = (run / "figures/fig02_single_knockout.svg").read_text(
+            encoding="utf-8"
+        )
         assert knockout_svg.count(">D1 ") == 2
-        report = build_publication_report(run).report_html.read_text()
+        report = build_publication_report(run).report_html.read_text(encoding="utf-8")
         assert "FSEOF independent top ten" in report
         assert "R1" in report
 
@@ -825,11 +827,11 @@ def test_legacy_schema_v2_core_columns_validate_and_render_with_fallbacks(tmp_pa
 def test_validator_aggregates_schema_integrity_and_metadata_errors(tmp_path):
     run = _make_run(tmp_path / "run")
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     del manifest["artifacts"]["single_knockout_room"]
     manifest["artifacts"]["single_knockout_moma"]["sha256"] = "0" * 64
     del manifest["artifacts"]["production_envelope"]["metadata_path"]
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(RunValidationError) as raised:
         validate_run(run)
@@ -862,9 +864,9 @@ def test_validator_aggregates_schema_integrity_and_metadata_errors(tmp_path):
 def test_validator_rejects_manifest_boundary_errors(tmp_path, mutation, match):
     run = _make_run(tmp_path / "run")
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     mutation(manifest)
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(RunValidationError, match=match):
         validate_run(run)
 
@@ -873,14 +875,15 @@ def test_validator_rejects_scientifically_inconsistent_design(tmp_path):
     run = _make_run(tmp_path / "run")
     path = run / "05_strain_design" / "optknock.csv"
     path.write_text(
-        "knockouts,growth,max_product,guaranteed_product,growth_coupled\nR1,0.2,2,3,true\n"
+        "knockouts,growth,max_product,guaranteed_product,growth_coupled\nR1,0.2,2,3,true\n",
+        encoding="utf-8",
     )
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entry = manifest["artifacts"]["optknock"]
     entry["sha256"] = _digest(path)
     entry["size_bytes"] = path.stat().st_size
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(
         RunValidationError, match="guaranteed_product above max_product"
     ):
@@ -890,7 +893,7 @@ def test_validator_rejects_scientifically_inconsistent_design(tmp_path):
 def test_validator_aggregates_numeric_and_cross_method_scientific_failures(tmp_path):
     run = _make_run(tmp_path / "run")
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     _replace_artifact(
         run,
         manifest,
@@ -989,7 +992,7 @@ def test_validator_aggregates_numeric_and_cross_method_scientific_failures(tmp_p
         "Z,single_gene_knockout,x,support,x,x,true,increase,false,no validation\n"
         "A,amplification,x,support,x,x,true,increase,false,no validation\n",
     )
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(RunValidationError) as raised:
         validate_run(run)
@@ -1056,7 +1059,9 @@ def test_r_renderer_writes_validated_vector_and_300_dpi_artwork(rendered_run):
     ]
     assert "blue denotes D1-D5 analysis candidates" in figure_two["caption"]
     assert "No combined target verdict is overlaid" in figure_two["caption"]
-    knockout_svg = (run / "figures/fig02_single_knockout.svg").read_text()
+    knockout_svg = (run / "figures/fig02_single_knockout.svg").read_text(
+        encoding="utf-8"
+    )
     assert "Analysis candidate (D1-D5)" in knockout_svg
     assert "Supported recommendation" not in knockout_svg
     assert "Wild-type reference" in knockout_svg
@@ -1070,7 +1075,9 @@ def test_r_renderer_writes_validated_vector_and_300_dpi_artwork(rendered_run):
     assert "remain in flux-response validation" in figure_four["caption"]
     assert "diagnostic status visible" in figure_four["caption"]
     assert "recommendation eligibility" not in figure_four["caption"]
-    amplification_svg = (run / "figures/fig04_amplification.svg").read_text()
+    amplification_svg = (run / "figures/fig04_amplification.svg").read_text(
+        encoding="utf-8"
+    )
     direct_label_styles = re.findall(
         r"<text[^>]+style='([^']+)'[^>]*>D\d+ [^<]+</text>",
         amplification_svg,
@@ -1110,7 +1117,7 @@ def test_r_renderer_writes_validated_vector_and_300_dpi_artwork(rendered_run):
     )
     assert "target(s)" not in figure_five["caption"]
     assert "background(s)" not in figure_five["caption"]
-    response_svg = (run / "figures/fig05_flux_response.svg").read_text()
+    response_svg = (run / "figures/fig05_flux_response.svg").read_text(encoding="utf-8")
     assert "Amplification candidates (wild type)" in response_svg
     assert (
         "Knockout-derived candidate reaction scans (recorded backgrounds)"
@@ -1122,7 +1129,7 @@ def test_r_renderer_writes_validated_vector_and_300_dpi_artwork(rendered_run):
     assert ">Growth rate</text>" not in response_svg
     assert "EX_product" not in response_svg
     assert "BIOMASS" not in response_svg
-    renderer_source = renderer_script_path().read_text()
+    renderer_source = renderer_script_path().read_text(encoding="utf-8")
     assert (
         renderer_source.count(
             "ggplot2::aes(x = target_flux, y = response_flux, group = target)"
@@ -1140,7 +1147,9 @@ def test_r_renderer_writes_validated_vector_and_300_dpi_artwork(rendered_run):
 
     figure_six = rendered["fig06_sampling_shift"]
     assert "intentionally omits other reactions" in figure_six["caption"]
-    sampling_svg = (run / "figures/fig06_sampling_shift.svg").read_text()
+    sampling_svg = (run / "figures/fig06_sampling_shift.svg").read_text(
+        encoding="utf-8"
+    )
     assert "Product exchange" in sampling_svg
     assert "Biomass reaction" in sampling_svg
     assert "EX_product" not in sampling_svg
@@ -1179,7 +1188,7 @@ def test_exhaustive_candidate_validation_is_complete_and_publication_readable(tm
         "07_validation/random_sampling_index.csv",
     ]
 
-    response_svg = (run / "figures/fig05_flux_response.svg").read_text()
+    response_svg = (run / "figures/fig05_flux_response.svg").read_text(encoding="utf-8")
     for target in [
         *(f"F{value}" for value in range(1, 11)),
         *(f"V{value}" for value in range(1, 11)),
@@ -1188,11 +1197,13 @@ def test_exhaustive_candidate_validation_is_complete_and_publication_readable(tm
     for target in ("g1", "g2", "g5", "g6", "g7", "g8", "g9", "g10", "g11"):
         reaction = target.replace("g", "R")
         assert f">{target} ({reaction})</text>" in response_svg
-    sampling_svg = (run / "figures/fig06_sampling_shift.svg").read_text()
+    sampling_svg = (run / "figures/fig06_sampling_shift.svg").read_text(
+        encoding="utf-8"
+    )
     for target in ("g1", "g2", "g5", "g6", "g7", "g8", "g9", "g10", "g11"):
         assert sampling_svg.count(f">{target}</text>") == 2
 
-    linked = bundle.report.report_html.read_text()
+    linked = bundle.report.report_html.read_text(encoding="utf-8")
     assert "20/20" in linked
     assert linked.count("9/9") >= 2
     assert "29" in figure_five["caption"]
@@ -1232,7 +1243,7 @@ def test_exhaustive_indexes_require_every_signature_equivalent_gene_alias(
 ):
     run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     path = run / relative_path
     with path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -1246,7 +1257,7 @@ def test_exhaustive_indexes_require_every_signature_equivalent_gene_alias(
         + "".join(",".join(row[field] for field in fields) + "\n" for row in rows)
     )
     _replace_artifact(run, manifest, role, content)
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     result = validate_production_run(run)
     assert not result.valid
@@ -1257,7 +1268,7 @@ def test_exhaustive_indexes_require_every_signature_equivalent_gene_alias(
 def test_current_flux_response_scope_requires_wild_type_background(tmp_path):
     run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     for role in ("flux_response_validation_index", "flux_response_tidy"):
         _update_csv_artifact_rows(
             run,
@@ -1267,7 +1278,7 @@ def test_current_flux_response_scope_requires_wild_type_background(tmp_path):
             target="g1",
             updates={"background": "gene_knockout"},
         )
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     result = validate_production_run(run)
     assert not result.valid
@@ -1278,7 +1289,7 @@ def test_current_flux_response_scope_requires_wild_type_background(tmp_path):
 def test_current_flux_response_scope_requires_configured_product_response(tmp_path):
     run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     for role in ("flux_response_validation_index", "flux_response_tidy"):
         _update_csv_artifact_rows(
             run,
@@ -1288,7 +1299,7 @@ def test_current_flux_response_scope_requires_configured_product_response(tmp_pa
             target="g1",
             updates={"response_reaction": "BIOMASS"},
         )
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     result = validate_production_run(run)
     assert not result.valid
@@ -1298,7 +1309,7 @@ def test_current_flux_response_scope_requires_configured_product_response(tmp_pa
 def test_current_flux_response_scope_requires_finite_secondary_biomass(tmp_path):
     run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     _update_csv_artifact_rows(
         run,
         manifest,
@@ -1307,7 +1318,7 @@ def test_current_flux_response_scope_requires_finite_secondary_biomass(tmp_path)
         target="g1",
         updates={"biomass_flux": ""},
     )
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     result = validate_production_run(run)
     assert not result.valid
@@ -1317,7 +1328,7 @@ def test_current_flux_response_scope_requires_finite_secondary_biomass(tmp_path)
 def test_current_flux_response_index_cannot_be_downgraded_to_unscoped_tidy(tmp_path):
     run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     _update_csv_artifact_rows(
         run,
         manifest,
@@ -1332,7 +1343,7 @@ def test_current_flux_response_index_cannot_be_downgraded_to_unscoped_tidy(tmp_p
             "biomass_flux": "",
         },
     )
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     result = validate_production_run(run)
     assert not result.valid
@@ -1343,7 +1354,7 @@ def test_current_flux_response_index_cannot_be_downgraded_to_unscoped_tidy(tmp_p
 def test_exhaustive_indexes_report_failed_and_skipped_candidates(tmp_path):
     run = _make_run(tmp_path / "run", many_targets=True, exhaustive_validation=True)
     manifest_path = run / "00_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     response_index_path = run / "07_validation" / "flux_response_index.csv"
     with response_index_path.open(encoding="utf-8", newline="") as handle:
@@ -1371,7 +1382,7 @@ def test_exhaustive_indexes_report_failed_and_skipped_candidates(tmp_path):
     )
     _replace_artifact(run, manifest, "flux_response_validation_index", response_content)
     response_tidy_path = run / "07_validation" / "flux_response_tidy.csv"
-    response_lines = response_tidy_path.read_text().splitlines()
+    response_lines = response_tidy_path.read_text(encoding="utf-8").splitlines()
     _replace_artifact(
         run,
         manifest,
@@ -1407,7 +1418,7 @@ def test_exhaustive_indexes_report_failed_and_skipped_candidates(tmp_path):
         sampling_content,
     )
     sampling_tidy_path = run / "07_validation" / "sampling_tidy.csv"
-    sampling_lines = sampling_tidy_path.read_text().splitlines()
+    sampling_lines = sampling_tidy_path.read_text(encoding="utf-8").splitlines()
     _replace_artifact(
         run,
         manifest,
@@ -1419,7 +1430,7 @@ def test_exhaustive_indexes_report_failed_and_skipped_candidates(tmp_path):
         )
         + "\n",
     )
-    summary_payload = json.loads((run / "00_summary.json").read_text())
+    summary_payload = json.loads((run / "00_summary.json").read_text(encoding="utf-8"))
     summary_payload["validation_coverage"].update(
         {
             "flux_response_attempted": 28,
@@ -1436,7 +1447,7 @@ def test_exhaustive_indexes_report_failed_and_skipped_candidates(tmp_path):
         "summary",
         json.dumps(summary_payload, sort_keys=True) + "\n",
     )
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     validated = validate_run(run)
     summary = publication._validation_execution_summary(validated)
@@ -1575,7 +1586,7 @@ def test_html_is_structured_deterministic_linked_and_standalone(rendered_run):
         in linked
     )
     assert "these hypotheses require experimental validation" in linked
-    figure_manifest = (run / "figures/figure_manifest.json").read_text()
+    figure_manifest = (run / "figures/figure_manifest.json").read_text(encoding="utf-8")
     assert "(s)" not in linked
     assert "(s)" not in standalone
     assert "(s)" not in figure_manifest
@@ -1619,7 +1630,7 @@ def test_optional_panels_are_explicit_without_blocking_source_validation(tmp_pat
     assert statuses["fig05_flux_response"] == "skipped"
     assert statuses["fig06_sampling_shift"] == "skipped"
     report = build_publication_report(run)
-    document = report.report_html.read_text()
+    document = report.report_html.read_text(encoding="utf-8")
     assert "Validation panel unavailable" in document
     assert "sampler did not converge" in document
     assert validate_production_run(run).valid
@@ -1637,7 +1648,7 @@ def test_r_smoke_handles_empty_designs_and_independent_top_ten_amplification_tar
     assert statuses["fig04_amplification"] == "rendered"
     assert (run / "figures/fig03_strain_design.svg").stat().st_size > 1000
     figure_four = run / "figures/fig04_amplification.svg"
-    svg = figure_four.read_text()
+    svg = figure_four.read_text(encoding="utf-8")
     assert "Target-reaction flux" in svg
     assert "FSEOF: independent top ten" in svg
     assert "FVSEOF: independent top ten" in svg
@@ -1720,9 +1731,10 @@ def test_post_render_validator_detects_raster_embedded_svg_and_stale_record(
     run = tmp_path / "tampered"
     shutil.copytree(source, run)
     svg = run / "figures/fig01_yield_envelope.svg"
-    document = svg.read_text()
+    document = svg.read_text(encoding="utf-8")
     svg.write_text(
-        document.replace("</svg>", '<image href="data:image/png;base64,AA=="/></svg>')
+        document.replace("</svg>", '<image href="data:image/png;base64,AA=="/></svg>'),
+        encoding="utf-8",
     )
 
     result = validate_production_run(run)
@@ -1738,12 +1750,13 @@ def test_post_render_validator_detects_horizontal_svg_text_clipping(
     run = tmp_path / "tampered"
     shutil.copytree(source, run)
     svg = run / "figures/fig04_amplification.svg"
-    document = svg.read_text()
+    document = svg.read_text(encoding="utf-8")
     svg.write_text(
         document.replace(
             "</svg>",
             "<text x='520' y='10' textLength='20px'>clipped legend</text></svg>",
-        )
+        ),
+        encoding="utf-8",
     )
 
     result = validate_production_run(run)
@@ -1760,13 +1773,17 @@ def test_post_render_validator_detects_broken_link_and_standalone_relative_href(
     shutil.copytree(source, run)
     linked = run / "report.html"
     linked.write_text(
-        linked.read_text().replace("02_yield/theoretical_yield.csv", "missing.csv")
+        linked.read_text(encoding="utf-8").replace(
+            "02_yield/theoretical_yield.csv", "missing.csv"
+        ),
+        encoding="utf-8",
     )
     standalone = run / "report_standalone.html"
     standalone.write_text(
-        standalone.read_text().replace(
+        standalone.read_text(encoding="utf-8").replace(
             "</main>", '<a href="figures/local.csv">bad</a></main>'
-        )
+        ),
+        encoding="utf-8",
     )
 
     result = validate_production_run(run)
@@ -1781,7 +1798,10 @@ def test_post_render_validator_rejects_absolute_local_path_leak(rendered_run, tm
     shutil.copytree(source, run)
     standalone = run / "report_standalone.html"
     standalone.write_text(
-        standalone.read_text().replace("</main>", f"<p>{run.resolve()}</p></main>")
+        standalone.read_text(encoding="utf-8").replace(
+            "</main>", f"<p>{run.resolve()}</p></main>"
+        ),
+        encoding="utf-8",
     )
 
     result = validate_production_run(run)

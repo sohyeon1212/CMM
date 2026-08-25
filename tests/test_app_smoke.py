@@ -44,6 +44,7 @@ def _select_ko(window, ids):
     window._add_ko_targets(list(ids))
 
 
+@pytest.mark.requires_miqp
 def test_window_builds_and_drives_services(app):
     window = CmmMainWindow(build_demo_model())
 
@@ -158,6 +159,7 @@ def test_window_uses_constraint_based_branding(app):
     assert title.text() == expected
 
 
+@pytest.mark.requires_qp
 def test_omics_integration_in_gui(app):
     window = CmmMainWindow(build_demo_model())
     window.omics_method_combo.setCurrentText("eflux2")
@@ -189,6 +191,7 @@ def test_expression_vector_rejects_duplicates_and_negative_values(tmp_path):
         _read_expression_vector(str(negative))
 
 
+@pytest.mark.requires_miqp
 def test_revert_tab_runs_loaded_expressions(app):
     window = CmmMainWindow(build_demo_model())
     assert not window.revert_run_btn.isEnabled()
@@ -271,6 +274,7 @@ def test_strain_design_tab_present_and_disabled_without_exchanges(app):
     assert not window2.sd_run_btn.isEnabled()
 
 
+@pytest.mark.requires_qp
 def test_transformation_tab_runs(app):
     window = CmmMainWindow(build_demo_model())
     assert window._tab_index("Transform (A→B)") is not None
@@ -348,6 +352,7 @@ def test_export_table_csv(app, tmp_path):
     assert header.startswith("Reaction")
 
 
+@pytest.mark.requires_qp
 def test_comparison_gene_knockout(app):
     window = CmmMainWindow(build_demo_model())
     window._goto_tab("Comparison")
@@ -363,6 +368,7 @@ def test_comparison_gene_knockout(app):
     assert window.comparison_table.rowCount() > 0
 
 
+@pytest.mark.requires_qp
 def test_comparison_multi_knockout(app):
     window = CmmMainWindow(build_demo_model())
     window._goto_tab("Comparison")
@@ -382,6 +388,7 @@ def test_comparison_requires_a_selection(app):
     assert "Add one or more" in window.comparison_summary.text()
 
 
+@pytest.mark.requires_qp
 def test_comparison_batch_over_genes(app):
     window = CmmMainWindow(build_demo_model())
     window._goto_tab("Comparison")
@@ -785,7 +792,7 @@ def test_knockout_picker_is_independent_per_tab(app, ecoli_core):
     assert window._ko_targets("sample_ko") == ["ENO", "FBA"]
 
 
-def test_room_comparison_renders_a_switch_count_not_a_distance(app, ecoli_core):
+def test_room_comparison_renders_a_switch_count_not_a_distance(app):
     """Regression: ROOM's ``distance`` is None, and formatting it with ``:.4g`` raised.
 
     ``comparison.py`` split ``distance`` from the raw solver objective in 0.4.0, and ROOM's
@@ -795,12 +802,14 @@ def test_room_comparison_renders_a_switch_count_not_a_distance(app, ecoli_core):
     that path. The suite did not catch it because it only ever exercised MOMA.
     """
 
-    window = CmmMainWindow(ecoli_core)
+    # This is a GUI-labelling regression, so use the six-reaction demo instead of turning the
+    # check into a slow genome-scale MILP on the open-source CI solver.
+    window = CmmMainWindow(build_demo_model())
     window._goto_tab("Comparison")
     window.comparison_method_combo.setCurrentText("ROOM")
     window.template_combo.setCurrentText("pfba")
     window.ko_level_combo.setCurrentText("reaction")
-    _select_ko(window, ["PGI"])
+    _select_ko(window, ["R2"])
     window.run_comparison()  # must not raise
 
     summary = window.comparison_summary.text()
@@ -813,6 +822,7 @@ def test_room_comparison_renders_a_switch_count_not_a_distance(app, ecoli_core):
     assert window.comparison_table.rowCount() > 0
 
 
+@pytest.mark.requires_qp
 def test_moma_comparison_names_the_quantity_it_reports(app, ecoli_core):
     """MOMA-L2 reports Segrè Eq. (4)'s Euclidean distance, with the QP objective alongside."""
 

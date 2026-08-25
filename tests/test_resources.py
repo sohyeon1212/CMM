@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import Path
 
 import cobra
 import pytest
@@ -17,6 +18,8 @@ from cmm.resources import (
 
 CORE_MAP = BUNDLED_MAPS[0]
 ATTRIBUTION = CORE_MAP.parent / "ATTRIBUTION.md"
+ESCHER_LICENSE = CORE_MAP.parent / "LICENSE.escher.txt"
+THIRD_PARTY_NOTICES = Path(__file__).resolve().parents[1] / "THIRD_PARTY_NOTICES.md"
 
 
 def test_bundled_map_is_byte_identical_to_its_attributed_digest():
@@ -52,6 +55,33 @@ def test_attribution_records_the_chain_the_licence_claim_rests_on():
     assert "Copyright © 2019 The Regents of the University of California" in text
     assert "BiGG" in text  # the same map under terms that would not permit this
     assert "10.1371/journal.pcbi.1004321" in text  # King et al. 2015, the Escher paper
+    assert "LICENSE.escher.txt" in text
+
+
+def test_escher_license_notice_is_complete_and_bundled_beside_the_map():
+    text = ESCHER_LICENSE.read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+
+    assert text.startswith("The MIT License (MIT)\n")
+    assert "Copyright © 2019 The Regents of the University of California" in normalized
+    assert "Permission is hereby granted, free of charge" in normalized
+    assert (
+        "The above copyright notice and this permission notice shall be included"
+        in normalized
+    )
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in normalized
+
+
+def test_third_party_notice_pins_clean_room_behavioral_inspiration():
+    text = THIRD_PARTY_NOTICES.read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+
+    revision = "5b15a47f2d7150f545fbcacbfe381787fc0230dc"
+    assert f"mattpocock/skills/blob/{revision}/docs/productivity/grilling.md" in text
+    assert f"mattpocock/skills/blob/{revision}/LICENSE" in text
+    assert "Copyright (c) 2026 Matt Pocock" in normalized
+    assert "independently written" in normalized
+    assert "did not copy or adapt" in normalized
 
 
 def test_map_is_a_schema_1_escher_document():

@@ -23,6 +23,7 @@ def _two_condition_table(ecoli_core):
     )
 
 
+@pytest.mark.requires_qp
 def test_predict_condition_fluxes_eflux2(ecoli_core):
     table = _two_condition_table(ecoli_core)
     cf = predict_condition_fluxes(ecoli_core, table, method="eflux2")
@@ -103,6 +104,7 @@ def test_read_expression_table_detects_tsv(tmp_path):
     assert table.loc["g1", "c2"] == 20.0
 
 
+@pytest.mark.requires_qp
 def test_predict_condition_fluxes_carries_run_provenance(ecoli_core):
     """The multi-condition container states the run, not only the per-condition solves."""
 

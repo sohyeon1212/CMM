@@ -23,6 +23,7 @@ def test_direction_from_states():
     assert direction["R3"] == 0  # unchanged
 
 
+@pytest.mark.requires_qp
 def test_moma_transformation_ranks_disease_branch_first(branched_model):
     source, target = _states(branched_model)
     ranking = transformation_targets(branched_model, source, target, method="moma")
@@ -33,6 +34,7 @@ def test_moma_transformation_ranks_disease_branch_first(branched_model):
     assert scores["g3"] == pytest.approx(0, abs=1e-9)
 
 
+@pytest.mark.requires_miqp
 def test_mta_transformation_ranks_disease_branch_first(branched_model):
     source, target = _states(branched_model)
     ranking = transformation_targets(branched_model, source, target, method="mta")
@@ -40,6 +42,7 @@ def test_mta_transformation_ranks_disease_branch_first(branched_model):
     assert ranking.best().target_id == "g2"
 
 
+@pytest.mark.requires_qp
 def test_transformation_does_not_mutate_model(branched_model):
     source, target = _states(branched_model)
     growth = branched_model.slim_optimize()
@@ -72,6 +75,8 @@ def test_unknown_perturbation_raises(branched_model):
 # --- provenance and labelling (round 2) ------------------------------------
 
 
+@pytest.mark.requires_qp
+@pytest.mark.requires_miqp
 def test_both_paths_record_the_two_states_they_ran_between(branched_model):
     source, target = _states(branched_model)
     for method, formulation in (
@@ -90,6 +95,7 @@ def test_both_paths_record_the_two_states_they_ran_between(branched_model):
         assert metadata["formulation"] == formulation
 
 
+@pytest.mark.requires_qp
 def test_moma_path_carries_run_provenance_and_tie_structure(branched_model):
     source, target = _states(branched_model)
     ranking = transformation_targets(branched_model, source, target, method="moma")

@@ -83,6 +83,7 @@ INCLUDED_FEATURES = (
 PLANNED_FEATURES = (
     "dynamic_fba",
     "enzyme_constrained_modeling",
+    "fvseof_grouping_constraints",
 )
 
 EXCLUDED_FEATURES = (

@@ -27,4 +27,5 @@ CMM is implemented as a new codebase.
 - No legacy project extensions as primary file formats
 - No copied screenshots, icons, SVG maps, or bundled examples
 - No ported tests that encode old file layout or UI labels
-- New About dialog, settings directory, project archive manifest, and CLI command
+- New About dialog, settings directory, project archive manifest, and CLI command are designed
+  and implemented independently rather than copied from a legacy application

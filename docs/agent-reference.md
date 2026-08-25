@@ -421,10 +421,9 @@ breaks `S · v = 0` and the bounds, so the results would no longer be flux distr
 
 ```python
 from cmm.features import (
-    batch_comparison, gene_perturbations, knockout_comparison,
-    reaction_perturbations, reference_flux,
+    batch_comparison, blocked_reactions_for_genes, gene_perturbations,
+    knockout_comparison, reaction_perturbations, reference_flux,
 )
-from cmm.features._perturbation import blocked_reactions_for_genes
 
 reference_flux(model, method="pfba", *, gene_expression=None, name=None)   # -> FluxState
 knockout_comparison(model, reference, reaction_ids, *, method="moma_l2",
@@ -683,4 +682,5 @@ publication network figure.
 not. The concrete `production_target_workflow` and `publication_reporting` entries ship;
 generic `scenario_templates` and `scenario_file_formats` remain in `EXCLUDED_FEATURES`.
 As of this writing `PLANNED_FEATURES` is
-`("dynamic_fba", "enzyme_constrained_modeling")`. Check the tuples rather than assuming.
+`("dynamic_fba", "enzyme_constrained_modeling", "fvseof_grouping_constraints")`. Check the
+tuples rather than assuming.

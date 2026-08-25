@@ -1,79 +1,161 @@
 name: Release
 
-# Build the distribution and publish it as a GitHub Release whenever a version tag is pushed:
+# A tag push is the only release boundary. The tag must exactly match the package version:
 #
 #     git tag v0.5.0 && git push origin v0.5.0
 #
-# CMM is pure Python, so a single universal wheel (cmm-<version>-py3-none-any.whl) installs on
-# Windows, macOS, and Linux. No PyPI account or secrets are required — the artifacts are
-# attached to the GitHub Release and installed from there or directly from the repo:
-#
-#     pip install https://github.com/jyryu3161/CMM/releases/download/v0.5.0/cmm-0.5.0-py3-none-any.whl
-#     pip install "cmm[desktop,design] @ https://github.com/jyryu3161/CMM/releases/download/v0.5.0/cmm-0.5.0-py3-none-any.whl"
-#     pip install "git+https://github.com/jyryu3161/CMM.git@v0.5.0"
+# The reusable CI workflow first verifies the same tagged commit on every supported OS. The
+# distribution is then built with a read-only token and handed to a separate write-only publish
+# job. No PyPI account or long-lived repository secret is required.
 
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
-permissions:
-  contents: write  # required for softprops/action-gh-release to create the release
+permissions: {}
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
+  metadata:
+    name: Verify release tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@v6
-
-      - name: Install Qt offscreen system libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgl1 libegl1 libxkbcommon0 libdbus-1-3
-
-      - name: Install and verify the locked Python environment
-        run: |
-          uv sync --frozen --all-extras
-          uv run ruff check src tests
-          uv run ruff format --check src tests
-          uv run mypy \
-            src/cmm/core src/cmm/features src/cmm/omics \
-            src/cmm/workflows src/cmm/reporting
-          uvx --from cffconvert==2.0.0 cffconvert --validate
-          uv export --frozen --all-extras --no-emit-project -o "$RUNNER_TEMP/requirements-audit.txt"
-          uvx --from pip-audit==2.10.1 pip-audit \
-            -r "$RUNNER_TEMP/requirements-audit.txt" --disable-pip --require-hashes
-          QT_QPA_PLATFORM=offscreen uv run pytest -q --strict-markers
-
       - name: Verify tag matches the package version
-        if: github.event_name == 'push'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          uv run python - <<'PY'
+          python - <<'PY'
           import os
           import tomllib
           from pathlib import Path
 
-          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
           expected = f"v{version}"
           if os.environ["RELEASE_TAG"] != expected:
-              raise SystemExit(f"tag {os.environ['RELEASE_TAG']!r} does not match {expected!r}")
+              raise SystemExit(
+                  f"tag {os.environ['RELEASE_TAG']!r} does not match {expected!r}"
+              )
           PY
 
-      - name: Build sdist + wheel
-        run: uv build
+  cross-platform-ci:
+    name: Verify tagged commit
+    needs: metadata
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
 
-      - name: Verify the built distribution
+  build:
+    name: Build release distributions
+    needs: cross-platform-ci
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install the locked build environment
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build sdist and wheel
+        run: uv build --no-sources
+
+      - name: Verify the built distributions
         run: |
-          uvx twine check dist/*
+          uvx --from twine==7.0.0 twine check dist/*.whl dist/*.tar.gz
+          uv run --no-sync python - <<'PY'
+          import tarfile
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          sdists = list(Path("dist").glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sdists) != 1:
+              raise SystemExit(f"expected one wheel and one sdist, found {wheels=} {sdists=}")
+
+          wheel_required = {
+              "cmm/reporting/render_publication_figures.R",
+              "cmm/resources/LICENSE.escher.txt",
+          }
+          with ZipFile(wheels[0]) as archive:
+              wheel_names = set(archive.namelist())
+              missing = sorted(wheel_required - wheel_names)
+              if missing:
+                  raise SystemExit(f"wheel is missing required package data: {missing}")
+              empty = sorted(member for member in wheel_required if not archive.read(member).strip())
+              if empty:
+                  raise SystemExit(f"wheel contains empty required package data: {empty}")
+              if any("/.agents/" in f"/{name}" or name.endswith("/SKILL.md") for name in wheel_names):
+                  raise SystemExit("wheel must not install the repository-only agent skill")
+
+          sdist_required = {
+              "AGENTS.md",
+              "THIRD_PARTY_NOTICES.md",
+              "install.ps1",
+              "install.sh",
+              "renv.lock",
+              ".agents/skills/cmm-production-engineering/SKILL.md",
+              ".agents/skills/cmm-production-engineering/agents/openai.yaml",
+              ".agents/skills/cmm-production-engineering/references/clarification-interview.md",
+              "docs/AI-USAGE.md",
+          }
+          with tarfile.open(sdists[0], mode="r:gz") as archive:
+              members = [member for member in archive.getmembers() if member.isfile()]
+              relative = {
+                  member.name.split("/", 1)[1] if "/" in member.name else member.name: member
+                  for member in members
+              }
+              missing = sorted(sdist_required - set(relative))
+              if missing:
+                  raise SystemExit(f"sdist is missing publication-governance files: {missing}")
+              forbidden_paths = sorted(
+                  name
+                  for name in relative
+                  if name == "docs/analysis-2026-06-12.md"
+                  or name == "docs/loop"
+                  or name.startswith("docs/loop/")
+              )
+              if forbidden_paths:
+                  raise SystemExit(f"sdist contains internal review artifacts: {forbidden_paths}")
+              # Source distributions must be portable and free of workstation-local paths.
+              workstation_path_markers = (b"/users/", b":\\users\\")
+              nonportable_hits = []
+              for name, member in relative.items():
+                  stream = archive.extractfile(member)
+                  payload = stream.read() if stream is not None else b""
+                  lowered_name = name.lower().encode()
+                  lowered_payload = payload.lower()
+                  if any(
+                      marker in lowered_name or marker in lowered_payload
+                      for marker in workstation_path_markers
+                  ):
+                      nonportable_hits.append(name)
+              if nonportable_hits:
+                  raise SystemExit(
+                      "sdist contains nonportable workstation paths in: "
+                      f"{sorted(nonportable_hits)}"
+                  )
+          PY
           uv venv /tmp/cmm-wheel
           uv pip install --python /tmp/cmm-wheel/bin/python dist/*.whl
           /tmp/cmm-wheel/bin/python -m cmm.cli --version
@@ -85,9 +167,50 @@ jobs:
               raise SystemExit(f"installed wheel is missing its R renderer: {renderer}")
           PY
 
-      - name: Publish GitHub Release with artifacts
-        uses: softprops/action-gh-release@v2
+      - name: Generate release checksums
+        run: |
+          uv run --no-sync python - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+
+          distributions = sorted(
+              [*Path("dist").glob("*.whl"), *Path("dist").glob("*.tar.gz")],
+              key=lambda path: path.name,
+          )
+          if len(distributions) != 2:
+              raise SystemExit(f"expected exactly two distributions, found {distributions}")
+          checksums = "".join(
+              f"{sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+              for path in distributions
+          )
+          Path("dist/SHA256SUMS.txt").write_text(checksums, encoding="utf-8")
+          PY
+
+      - name: Upload verified distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: cmm-distributions-${{ github.ref_name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cmm-distributions-${{ github.ref_name }}
+          path: dist
+
+      - name: Publish GitHub Release with artifacts
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ github.ref_name }}
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true

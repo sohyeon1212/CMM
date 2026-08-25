@@ -32,6 +32,7 @@ def _official_mta_inputs():
 
 
 @pytest.mark.parametrize("alpha", [0.3, 0.4, 0.66, 0.8])
+@pytest.mark.requires_miqp
 def test_published_rmta_positive_control_is_stable_across_alpha(
     published_mta_model, alpha
 ):
@@ -65,6 +66,7 @@ def test_fseof_headline_targets_are_stable_across_scan_resolution(ecoli_core, n_
     assert {"FRD7", "FUM", "PPC"} <= targets
 
 
+@pytest.mark.requires_qp
 def test_eflux2_is_invariant_to_global_expression_units(ecoli_core):
     unit = {reaction.id: 1.0 for reaction in ecoli_core.reactions if reaction.genes}
     scaled = {reaction_id: 1000.0 for reaction_id in unit}

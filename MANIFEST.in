@@ -1,6 +1,13 @@
 include CHANGELOG.md
 include CITATION.cff
 include LICENSE
+include AGENTS.md
+include THIRD_PARTY_NOTICES.md
+include install.sh
+include install.ps1
 include uv.lock
+include renv.lock
+include src/cmm/resources/LICENSE.escher.txt
+recursive-include .agents *.md *.yaml
 recursive-include docs *.md *.png
 recursive-include tests *.py

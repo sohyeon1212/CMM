@@ -32,6 +32,7 @@ import re
 import numpy as np
 import pandas as pd
 import pytest
+from cobra import Metabolite, Model, Reaction
 from cobra.io import load_model
 
 from cmm.core import fba, fva, pfba, reference_state_pfba
@@ -111,6 +112,23 @@ SERVICES = (
     "robustknock",
 )
 
+_QP_SERVICES = {
+    "eflux2",
+    "moma",
+    "knockout_comparison_moma",
+    "batch_comparison",
+    "transformation_targets",
+}
+_MIQP_SERVICES = {"revert_targets"}
+SERVICE_CASES = tuple(
+    pytest.param(service, marks=pytest.mark.requires_qp)
+    if service in _QP_SERVICES
+    else pytest.param(service, marks=pytest.mark.requires_miqp)
+    if service in _MIQP_SERVICES
+    else service
+    for service in SERVICES
+)
+
 SUCC = "EX_succ_e"
 
 
@@ -132,6 +150,70 @@ def _direction_map(model, reference, source) -> DirectionMap:
         delta = reference.get(reaction.id) - source.get(reaction.id)
         directions[reaction.id] = 1 if delta > 1e-3 else (-1 if delta < -1e-3 else 0)
     return DirectionMap(directions=directions, metadata={"origin": "pfba delta"})
+
+
+def _comparison_model() -> Model:
+    """Small reroutable model for comparison provenance, including ROOM's MILP path."""
+
+    model = Model("provenance_comparison")
+    a = Metabolite("A_c", compartment="c")
+    b = Metabolite("B_c", compartment="c")
+    d = Metabolite("D_c", compartment="c")
+    p = Metabolite("P_c", compartment="c")
+
+    def reaction(reaction_id, stoichiometry, gene_rule="", upper_bound=1000.0):
+        item = Reaction(reaction_id, lower_bound=0.0, upper_bound=upper_bound)
+        item.add_metabolites(stoichiometry)
+        item.gene_reaction_rule = gene_rule
+        return item
+
+    model.add_reactions(
+        [
+            reaction("SUP_A", {a: 1.0}, upper_bound=10.0),
+            reaction("R1", {a: -1.0, b: 1.0}, "g1"),
+            reaction("R2", {b: -1.0, p: 1.0}, "g2"),
+            reaction("R3", {b: -1.0, d: 1.0}, "g3"),
+            reaction("R5", {d: -1.0, p: 1.0}, "g5"),
+            reaction("BIOMASS", {p: -1.0}, "gb"),
+        ]
+    )
+    model.objective = "BIOMASS"
+    return model
+
+
+def _strain_design_model() -> Model:
+    """Tiny growth-coupling model for deterministic strain-design provenance checks."""
+
+    model = Model("provenance_strain_design")
+    substrate = Metabolite("substrate_c", compartment="c")
+    precursor = Metabolite("precursor_c", compartment="c")
+    product = Metabolite("product_c", compartment="c")
+
+    def reaction(reaction_id, stoichiometry, gene_rule="", upper_bound=1000.0):
+        item = Reaction(reaction_id, lower_bound=0.0, upper_bound=upper_bound)
+        item.add_metabolites(stoichiometry)
+        item.gene_reaction_rule = gene_rule
+        return item
+
+    model.add_reactions(
+        [
+            reaction("SUPPLY", {substrate: 1.0}, upper_bound=10.0),
+            reaction(
+                "DIRECT",
+                {substrate: -1.0, precursor: 2.0},
+                "g_direct",
+            ),
+            reaction(
+                "COUPLED",
+                {substrate: -1.0, precursor: 1.0, product: 1.0},
+                "g_coupled",
+            ),
+            reaction("BIOMASS", {precursor: -1.0}, "g_biomass"),
+            reaction("PRODUCT", {product: -1.0}),
+        ]
+    )
+    model.objective = "BIOMASS"
+    return model
 
 
 def _metadata(service: str, model) -> dict[str, object]:
@@ -169,6 +251,14 @@ def _metadata(service: str, model) -> dict[str, object]:
         )
         return dict(predict_condition_fluxes(model, table, method="lad").metadata)
 
+    if service in {
+        "moma",
+        "room",
+        "knockout_comparison_moma",
+        "knockout_comparison_room",
+        "batch_comparison",
+    }:
+        model = _comparison_model()
     reference = reference_state_pfba(model)
     if service == "random_flux_sampling":
         return dict(
@@ -191,12 +281,12 @@ def _metadata(service: str, model) -> dict[str, object]:
     if service == "knockout_comparison_moma":
         return dict(
             knockout_comparison(
-                model, flux_reference, ["PGI"], method="moma_l2"
+                model, flux_reference, ["R2"], method="moma_l2"
             ).metadata
         )
     if service == "knockout_comparison_room":
         return dict(
-            knockout_comparison(model, flux_reference, ["PGI"], method="room").metadata
+            knockout_comparison(model, flux_reference, ["R2"], method="room").metadata
         )
     if service == "batch_comparison":
         perturbations = reaction_perturbations(
@@ -232,10 +322,11 @@ def _metadata(service: str, model) -> dict[str, object]:
     from cmm.features import optknock, robustknock
 
     search = optknock if service == "optknock" else robustknock
-    return dict(search(model, SUCC, max_knockouts=1, max_solutions=1).metadata)
+    model = _strain_design_model()
+    return dict(search(model, "PRODUCT", max_knockouts=1, max_solutions=1).metadata)
 
 
-@pytest.mark.parametrize("service", SERVICES)
+@pytest.mark.parametrize("service", SERVICE_CASES)
 def test_every_public_service_carries_the_provenance_block(service, core):
     metadata = _metadata(service, core)
 
@@ -296,3 +387,16 @@ def test_the_registry_covers_every_shipped_analysis_feature():
     assert not uncovered, (
         f"shipped features with no provenance test: {sorted(uncovered)}"
     )
+
+
+def test_feature_manifest_separates_the_documented_planned_services():
+    """The public roadmap and machine-readable feature manifest must name the same backlog."""
+
+    from cmm.features import INCLUDED_FEATURES, PLANNED_FEATURES
+
+    assert PLANNED_FEATURES == (
+        "dynamic_fba",
+        "enzyme_constrained_modeling",
+        "fvseof_grouping_constraints",
+    )
+    assert set(INCLUDED_FEATURES).isdisjoint(PLANNED_FEATURES)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from cobra import Metabolite, Model, Reaction
 
 # OptKnock/RobustKnock delegate the bilevel MILP to the optional ``straindesign`` package
 # (the ``design`` extra). Skip this module gracefully where it is not installed so CI on a
@@ -19,6 +20,62 @@ def anaerobic_ecoli(ecoli_core):
     ecoli_core.reactions.EX_o2_e.lower_bound = 0.0
     ecoli_core.reactions.EX_glc__D_e.lower_bound = -10.0
     return ecoli_core
+
+
+@pytest.fixture
+def restricted_license_strain_model():
+    """Five-reaction coupling problem, deliberately far below bundled-solver limits."""
+
+    model = Model("restricted_license_strain_design")
+    substrate = Metabolite("substrate_c", compartment="c")
+    precursor = Metabolite("precursor_c", compartment="c")
+    product_metabolite = Metabolite("product_c", compartment="c")
+
+    def reaction(reaction_id, stoichiometry, gene_rule="", upper_bound=1000.0):
+        item = Reaction(reaction_id, lower_bound=0.0, upper_bound=upper_bound)
+        item.add_metabolites(stoichiometry)
+        item.gene_reaction_rule = gene_rule
+        return item
+
+    model.add_reactions(
+        [
+            reaction("SUPPLY", {substrate: 1.0}, upper_bound=10.0),
+            reaction(
+                "DIRECT",
+                {substrate: -1.0, precursor: 2.0},
+                "g_direct",
+            ),
+            reaction(
+                "COUPLED",
+                {substrate: -1.0, precursor: 1.0, product_metabolite: 1.0},
+                "g_coupled",
+            ),
+            reaction("BIOMASS", {precursor: -1.0}, "g_biomass"),
+            reaction("PRODUCT", {product_metabolite: -1.0}),
+        ]
+    )
+    model.objective = "BIOMASS"
+    return model
+
+
+def test_restricted_license_strain_design_forwards_seed(
+    restricted_license_strain_model,
+):
+    """OptKnock and RobustKnock solve a tiny MILP and preserve the requested seed."""
+
+    for search in (optknock, robustknock):
+        result = search(
+            restricted_license_strain_model,
+            "PRODUCT",
+            max_knockouts=1,
+            max_solutions=2,
+            seed=17,
+        )
+        assert result.best() is not None
+        assert result.best().knockouts == ("DIRECT",)
+        assert result.best().guaranteed_product == pytest.approx(10.0)
+        assert result.metadata["seed"] == 17
+        assert result.metadata["parameters"]["strain_design_seed"] == 17
 
 
 def test_optknock_finds_growth_coupled_succinate_design(anaerobic_ecoli):

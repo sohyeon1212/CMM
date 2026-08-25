@@ -1,8 +1,5 @@
-"""Execute the three GUI scenario harnesses under pytest so they cannot break silently.
+"""Keep the three public GUI scenario harnesses from breaking silently.
 
-success-criteria G5/R2-G4 make the screenshot scenarios a PASS/FAIL gate ("any scenario
-errors or produces a blank capture" = FAIL), but nothing ran them in CI: a regression in
-``run_scenarios`` / ``run_gui_scenarios`` or a blank capture would not have failed pytest.
 These tests run each scenario offscreen, assert the captures are non-trivial, and pin the
 headline succinate claim (the anaerobic + byproduct-KO bound edit raises succinate ~0 -> ~10).
 """
@@ -44,6 +41,7 @@ def _assert_non_blank(paths) -> None:
         assert size > _MIN_PNG_BYTES, f"capture looks blank ({size} bytes): {path}"
 
 
+@pytest.mark.requires_miqp
 def test_screenshots_scenario_runs(app, tmp_path, monkeypatch):
     """Branched-demo scenario: load, FBA, FVA, flux slider, rMTA, MTA-MIQP (6 captures)."""
 
@@ -78,6 +76,7 @@ def test_succinate_design_increases_succinate():
     assert design > 5.0, f"engineered succinate not produced: {design}"
 
 
+@pytest.mark.requires_qp
 def test_genome_scale_scenario_runs(app, tmp_path, monkeypatch):
     """Genome-scale GUI scenario on the default textbook model: FBA, glucose edit, yield,
     envelope, E-Flux2 omics."""

@@ -3,10 +3,20 @@
 ## 0.5.0 — unreleased
 
 The flux map, which shipped in 0.4.0 but could not be reached from the application,
-is now a working part of it. Additive: nothing is removed and no result changes.
+is now a working part of it. Numerical APIs and result semantics are additive in this release;
+obsolete internal planning documents are removed from the public source tree.
 
 ### Added
 
+- **Source-checkout installation now uses a uv-managed Python 3.12 by default.** The shell and
+  PowerShell installers no longer inherit an unsupported operating-system Python such as the
+  Python 3.9.6 supplied by older macOS releases. They accept an explicit Python 3.10–3.12
+  override, validate existing virtual environments before reuse, and fail with recovery
+  guidance instead of silently replacing one.
+- **Publication and agent-interface provenance is explicit.** The source distribution now
+  includes the repository skill, installation scripts, Python and R lock files, third-party
+  notices, and AI-use guidance. The independently written clarification interview records its
+  public behavioral inspiration, and the complete Escher map license ships beside the map.
 - **The Flux Map tab is always available, and needs no file to get started.** It previously
   appeared only when the window was constructed with `map_path=`, which `python -m cmm.app`
   never passes — so the feature existed but no ordinary launch could reach it. The tab now
@@ -60,6 +70,9 @@ is now a working part of it. Additive: nothing is removed and no result changes.
 
 ### Changed
 
+- Internal planning ledgers, completion notes, and machine-specific analysis notes are no
+  longer part of the public source tree or source distribution. Generated SC-01 run bundles
+  remain user-owned analysis artifacts rather than release inputs.
 - CMM's public expansion is now **Constraint-based Metabolic Modeling** across package metadata,
   the README, citation metadata, documentation, and desktop title/header.
 - **The schematic carries a colorbar** instead of an `∝ |flux|` formula in the margin, drawn
@@ -288,10 +301,8 @@ yields, design rankings, expression-derived fluxes and one result field's meanin
 - `docs/architecture.md` no longer lists flux sampling and flux-response analysis as roadmap
   items; both ship, with method contracts, GUI tabs and figures. Dynamic FBA and
   enzyme-constrained modeling remain roadmap.
-- `docs/loop/success-criteria.md` no longer implies that `test_data/JS66_exp.csv` and
-  `test_data/JS66_v15.xml` are available. Neither file exists; the affected stories are marked
-  as verified at the time against data that is not in this repository, and no substitute has
-  been invented.
+- Internal development notes no longer imply that unavailable private expression/model fixtures
+  are part of the public repository. No substitute data has been invented.
 - `CITATION.cff` carries an explicit `TODO` for the manuscript's final authors, ORCIDs and
   release DOI. The organization-only author entry is not acceptable in the published record and
   no names have been invented in its place.

@@ -56,6 +56,7 @@ def test_fva_matches_cobra(ecoli_core):
         )
 
 
+@pytest.mark.requires_qp
 def test_moma_matches_cobra(branched_model):
     reference = cfa.pfba(branched_model)
     cmm_reference = FluxState(dict(reference.fluxes), name="wt")
@@ -91,6 +92,7 @@ def test_apply_medium_matches_cobra_medium(ecoli_core):
     assert ecoli_core.medium[GLC] == pytest.approx(10.0)
 
 
+@pytest.mark.requires_qp
 def test_eflux2_matches_direct_two_stage_qp(branched_model):
     weights = {
         reaction.id: 1.0 for reaction in branched_model.reactions if reaction.genes

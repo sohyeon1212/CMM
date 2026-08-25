@@ -33,7 +33,7 @@ can do in the window you can also script, and results are reproducible.
 
 ```bash
 git clone https://github.com/jyryu3161/CMM.git && cd CMM
-./install.sh                       # macOS / Linux  (.\install.ps1 on Windows PowerShell)
+./install.sh                       # macOS / Linux / WSL
 
 # launch on the built-in textbook model
 .venv/bin/python -m cmm.app        # Windows: .venv\Scripts\python -m cmm.app
@@ -41,6 +41,39 @@ git clone https://github.com/jyryu3161/CMM.git && cd CMM
 # or launch on your own SBML model
 .venv/bin/python -m cmm.app path/to/model.xml
 ```
+
+On Windows PowerShell, run `.\install.ps1` instead. Both installers accept an installed
+`uv >= 0.8.0`; only an absent `uv` triggers a pinned 0.12.5 bootstrap. The bootstrap binary is
+located directly under the user installation directories, so the one-command installer does not
+depend on the current shell refreshing `PATH`. Exact CI/manuscript reproduction separately uses
+uv 0.12.5 with `uv sync --frozen`.
+
+A new `.venv` uses uv-managed Python 3.12, so the installer never falls back to an older
+operating-system Python such as macOS 3.9.6. To select another supported interpreter, use a
+numeric request that uv can install or an existing executable:
+
+```bash
+CMM_PYTHON=3.11 ./install.sh
+./install.sh --python /path/to/python3.12
+```
+
+In PowerShell, use `$env:CMM_PYTHON = "3.11"; .\install.ps1` or
+`.\install.ps1 -Python C:\path\to\python.exe`. `--python`/`-Python` takes precedence over the
+environment variable. CMM accepts Python 3.10–3.12; an unsupported override fails before CMM is
+installed. An existing `.venv` is reused only when it has `pyvenv.cfg`, its interpreter reports
+that it is inside a venv, and it uses a supported Python. A version or identity conflict is
+reported instead of silently replacing that environment.
+
+For a legacy Python 3.9 `.venv`, preserve the old files and create a supported environment:
+
+```bash
+mv .venv .venv-python39-backup && ./install.sh
+# Or keep .venv in place and choose a new destination:
+./install.sh --venv .venv312
+```
+
+In PowerShell, use `Rename-Item .venv .venv-python39-backup; .\install.ps1` or
+`.\install.ps1 -VenvDir .venv312`. Neither installer deletes the old environment.
 
 Gurobi or CPLEX unlocks the full feature set. GLPK supports LP and MILP, so it can run
 FBA/pFBA/FVA/LAD/production scans plus ROOM and StrainDesign workflows. L2 MOMA and E-Flux2
@@ -94,8 +127,9 @@ This is the starting point for any model.
 2. **Run FBA.** The **Objective** label shows the optimum and status; the reaction table's
    *Flux* column and the *Simulation* result table both populate. On `e_coli_core` glucose
    aerobic the growth rate is **0.8739 h⁻¹**.
-3. **Run pFBA** for the unique minimal-total-flux distribution at the same growth (the status
-   bar reports the total `|flux|`, ≈518.4 on the textbook model).
+3. **Run pFBA** for a minimal-total-flux distribution at the same growth (the status bar reports
+   the total `|flux|`, ≈518.4 on the textbook model). Alternative distributions can tie at that
+   minimum, so pFBA is parsimonious but not necessarily mathematically unique.
 4. **Run FVA.** Set the **fraction** spin box (default 0.90 = hold 90 % of the optimum), then
    click **Run FVA**. Each reaction gets a `[min, max]` feasible range. FVA auto-runs FBA
    first if fluxes are stale.
@@ -187,7 +221,7 @@ flux cannot tell you whether the network *requires* that value. Sampling answers
 | Option | What it does | When to change it |
 |---|---|---|
 | **Mode** | `uniform` samples the whole feasible space defined by the model and medium — "what can this network do at all?". `around a reference` first narrows every reaction to a window around one predicted flux state, then samples inside that — "how much could this *prediction* vary?" | Use `uniform` to test whether a predicted flux is forced. Use `around a reference` to put an uncertainty range on a specific prediction. |
-| **Reference** | Which predicted flux state the windows are centred on: `pfba` (the unique minimal-total-flux solution) or `fba`. CMM computes that state for you from the current model and medium — you are choosing the *method*, not supplying numbers. **Greyed out in `uniform` mode**, which has no reference. | `pfba` unless you specifically want the plain FBA solution. |
+| **Reference** | Which predicted flux state the windows are centred on: `pfba` (a minimal-total-flux solution, which need not be unique) or `fba`. CMM computes that state for you from the current model and medium — you are choosing the *method*, not supplying numbers. **Greyed out in `uniform` mode**, which has no reference. | `pfba` unless you specifically want the plain FBA solution. |
 | **window ±%** | The half-width of each reaction's window, as a percentage of its reference flux. 20 confines each reaction to ±20% of its predicted value, intersected with its existing bounds; reactions at essentially zero flux get a small window around zero instead. **Greyed out in `uniform` mode.** | Narrow (5–10) to ask how tightly the prediction is determined; wide (30–50) to explore around it. |
 | **Samples** | How many flux distributions to draw. | ≥1000 for `optgp`. Fewer is faster but under-represents the space. |
 | **Sampler** | `optgp` (parallel-capable hit-and-run, needs a large sample count to mix well) or `achr` (artificial centering hit-and-run, single process, better convergence at small counts). | `achr` for quick runs under ~1000 samples; `optgp` for large ones. |
@@ -410,17 +444,26 @@ also scriptable and reproducible.
 ```python
 from cobra.io import load_model
 from cmm.core import fba, pfba, fva, apply_medium, solver_status
-from cmm.features.production import theoretical_yield, production_envelope, fseof, fvseof
-from cmm.features.comparison import (
-    moma, room, reference_flux, knockout_comparison, batch_comparison,
+from cmm.features import (
+    batch_comparison,
+    blocked_reactions_for_genes,
+    flux_response,
+    fseof,
+    fvseof,
+    gene_perturbations,
+    knockout_comparison,
+    moma,
+    optknock,
+    production_envelope,
+    random_flux_sampling,
+    reference_constrained_sampling,
+    reference_flux,
+    robustknock,
+    room,
+    theoretical_yield,
+    transformation_targets,
 )
-from cmm.features._perturbation import gene_perturbations, blocked_reactions_for_genes
-from cmm.features.response import flux_response
-from cmm.features.sampling import random_flux_sampling, reference_constrained_sampling
-from cmm.features.strain_design import optknock, robustknock
-from cmm.features.transformation import transformation_targets
-from cmm.omics.expression import integrate_expression
-from cmm.omics.conditions import predict_condition_fluxes, flux_log_change
+from cmm.omics import flux_log_change, integrate_expression, predict_condition_fluxes
 
 model = load_model("textbook")
 print(solver_status(model).summary())

@@ -18,6 +18,7 @@ def _setup(model):
     return reference, direction
 
 
+@pytest.mark.requires_miqp
 def test_rmta_ranks_disease_branch_gene_first(branched_model):
     reference, direction = _setup(branched_model)
     ranking = revert_targets(
@@ -35,6 +36,7 @@ def test_rmta_ranks_disease_branch_gene_first(branched_model):
     assert {"bTS", "mTS", "wTS"} <= set(best.detail)
 
 
+@pytest.mark.requires_miqp
 def test_rmta_reaction_perturbation_ranks_r2_first(branched_model):
     reference, direction = _setup(branched_model)
     ranking = revert_targets(
@@ -48,6 +50,7 @@ def test_rmta_reaction_perturbation_ranks_r2_first(branched_model):
     assert ranking.best().target_id == "R2"
 
 
+@pytest.mark.requires_miqp
 def test_ranking_is_deterministic(branched_model):
     reference, direction = _setup(branched_model)
     first = revert_targets(branched_model, None, reference, direction)
@@ -63,6 +66,7 @@ def test_published_robustness_score_equation_9():
     assert revert_module._robust_score(2.0, 3.0, 1.0) == pytest.approx(2.0)
 
 
+@pytest.mark.requires_miqp
 def test_non_robust_knockout_is_not_ranked_above_disease_target(branched_model):
     reference, direction = _setup(branched_model)
     target_rxns = revert_module._target_reactions(branched_model, reference)
@@ -83,6 +87,7 @@ def test_non_robust_knockout_is_not_ranked_above_disease_target(branched_model):
     assert scores.robust < disease_target_scores.robust
 
 
+@pytest.mark.requires_miqp
 def test_mta_single_method_also_ranks_g2_first(branched_model):
     reference, direction = _setup(branched_model)
     ranking = revert_targets(branched_model, None, reference, direction, method="mta")
@@ -90,6 +95,7 @@ def test_mta_single_method_also_ranks_g2_first(branched_model):
     assert ranking.metadata["alpha"] == 0.66
 
 
+@pytest.mark.requires_miqp
 def test_mta_miqp_requires_miqp_and_ranks_g2(branched_model):
     reference, direction = _setup(branched_model)
     ranking = revert_targets(
@@ -149,6 +155,7 @@ def _published_reference_and_direction():
     return reference, direction
 
 
+@pytest.mark.requires_miqp
 def test_mta_matches_official_cobra_toolbox_expected_signs(published_mta_model):
     reference, direction = _published_reference_and_direction()
     ranking = revert_targets(
@@ -166,6 +173,7 @@ def test_mta_matches_official_cobra_toolbox_expected_signs(published_mta_model):
     assert scores["g4"] > 0
 
 
+@pytest.mark.requires_miqp
 def test_rmta_matches_official_cobra_toolbox_positive_targets(published_mta_model):
     reference, direction = _published_reference_and_direction()
     gene_ranking = revert_targets(
@@ -243,6 +251,7 @@ def test_prepared_direction_carries_the_direction_provenance(branched_model):
     assert "n_impossible_masked" in prepared.metadata
 
 
+@pytest.mark.requires_miqp
 def test_revert_provenance_reports_what_was_skipped_and_how_tied(branched_model):
     reference, direction = _setup(branched_model)
     ranking = revert_targets(
@@ -262,6 +271,8 @@ def test_revert_provenance_reports_what_was_skipped_and_how_tied(branched_model)
     )
 
 
+@pytest.mark.requires_qp
+@pytest.mark.requires_miqp
 def test_continuous_heuristic_marks_its_own_csv(branched_model):
     reference, direction = _setup(branched_model)
     continuous = revert_targets(

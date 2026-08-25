@@ -2,6 +2,14 @@
 requires = ["setuptools>=77,<82", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.uv]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and (platform_machine == 'AMD64' or platform_machine == 'x86_64')",
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
 [project]
 name = "cmm"
 version = "0.5.0"
@@ -46,6 +54,7 @@ solver-gurobi = [
 ]
 dev = [
     "mypy>=1.14,<2",
+    "PyYAML>=6,<7",
     "pytest>=8,<10",
     "pytest-cov>=6,<8",
     "ruff>=0.15,<0.16",
@@ -62,13 +71,15 @@ where = ["src"]
 "cmm.reporting" = ["*.R"]
 # The bundled Escher map and its provenance/license record ship with the wheel; the map is
 # useless to an installed CMM if it stays behind in the source tree.
-"cmm.resources" = ["*.json", "ATTRIBUTION.md"]
+"cmm.resources" = ["*.json", "ATTRIBUTION.md", "LICENSE.escher.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "genome_scale: validation on a reconstruction with more than 2,000 reactions",
+    "requires_qp: requires a solver with quadratic-programming support",
+    "requires_miqp: requires a solver with mixed-integer quadratic-programming support",
 ]
 
 [tool.coverage.run]

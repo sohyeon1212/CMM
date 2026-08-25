@@ -34,3 +34,7 @@ temp_figures_new/
 # docs/scenarios/_reporting.md). These are the user's own analyses: raw CSVs, 300 DPI figures
 # and the report. A single SC-01 run is several megabytes and belongs to whoever ran it.
 results/
+
+# Root-level timestamped SC-01 run bundles (user-owned generated artifacts)
+/SC-01_*/
+/SC-01_*.zip

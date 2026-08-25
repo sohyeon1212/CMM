@@ -25,6 +25,7 @@ def test_reference_flux_fba_and_pfba(ecoli_core):
     )
 
 
+@pytest.mark.requires_qp
 def test_reference_flux_omics_templates(ecoli_core):
     expression = {g.id: 50.0 for g in ecoli_core.genes}
     for method in ("lad", "eflux2"):
@@ -37,6 +38,7 @@ def test_reference_flux_omics_requires_expression(ecoli_core):
         reference_flux(ecoli_core, "eflux2")
 
 
+@pytest.mark.requires_qp
 def test_moma_uses_chosen_template_as_reference(branched_model):
     # Different templates -> different MOMA reference -> different perturbed distance.
     fba_ref = reference_flux(branched_model, "fba")
@@ -84,6 +86,7 @@ def test_apply_perturbation_zeros_reactions(branched_model):
 # --- MOMA ------------------------------------------------------------------
 
 
+@pytest.mark.requires_qp
 def test_l2_moma_reroutes_after_knockout(branched_model):
     reference = reference_state_pfba(branched_model, name="wt")
     pert = reaction_perturbations(branched_model, ["R2"])[0]
@@ -110,6 +113,7 @@ def test_l1_moma_runs_as_lp(branched_model):
     assert branched_model.slim_optimize() == pytest.approx(10, abs=1e-6)
 
 
+@pytest.mark.requires_qp
 def test_moma_l2_distance_is_the_root_of_the_qp_objective(branched_model):
     """Segrè et al. Eq. (4) is D = sqrt(Sum d^2); the QP objective is the sum itself."""
 
@@ -133,6 +137,7 @@ def test_moma_l2_distance_is_the_root_of_the_qp_objective(branched_model):
     assert result.distance == pytest.approx(recomputed, abs=1e-6)
 
 
+@pytest.mark.requires_qp
 def test_comparison_exports_summary_and_fluxes_without_hand_transcription(
     branched_model,
 ):
@@ -165,6 +170,7 @@ def test_moma_l1_distance_is_the_lp_objective(branched_model):
     assert result.distance == pytest.approx(recomputed, abs=1e-6)
 
 
+@pytest.mark.requires_qp
 def test_comparison_records_its_reference(branched_model):
     reference = reference_state_pfba(branched_model, name="wt")
     result = moma(branched_model, reference, linear=False)
@@ -172,6 +178,7 @@ def test_comparison_records_its_reference(branched_model):
     assert result.metadata["reference_provenance"] == "pfba"
 
 
+@pytest.mark.requires_qp
 def test_infeasible_moma_keeps_the_distance_labelling(branched_model):
     reference = reference_state_pfba(branched_model, name="wt")
     with branched_model:
@@ -183,6 +190,7 @@ def test_infeasible_moma_keeps_the_distance_labelling(branched_model):
     assert result.distance != result.distance  # NaN: no solution, not "zero distance"
 
 
+@pytest.mark.requires_qp
 def test_moma_zero_distance_without_perturbation(branched_model):
     reference = reference_state_pfba(branched_model, name="wt")
     result = moma(branched_model, reference, linear=False)
@@ -264,6 +272,7 @@ def test_blocked_reactions_for_genes_joint(branched_model):
     assert blocked_reactions_for_genes(branched_model, []) == ()
 
 
+@pytest.mark.requires_qp
 def test_knockout_comparison_gene_and_reaction_agree(branched_model):
     from cmm.features._perturbation import blocked_reactions_for_genes
     from cmm.features.comparison import knockout_comparison
@@ -284,6 +293,7 @@ def test_knockout_comparison_gene_and_reaction_agree(branched_model):
     assert branched_model.reactions.R2.bounds == (0.0, 1000.0)
 
 
+@pytest.mark.requires_qp
 def test_knockout_comparison_multi_reaction(branched_model):
     from cmm.features.comparison import knockout_comparison
 
@@ -297,6 +307,7 @@ def test_knockout_comparison_multi_reaction(branched_model):
     ) == pytest.approx(0.0, abs=1e-6)
 
 
+@pytest.mark.requires_qp
 def test_batch_comparison_ranks_targets(branched_model):
     from cmm.features._perturbation import gene_perturbations
     from cmm.features.comparison import batch_comparison
@@ -357,6 +368,7 @@ def test_gene_perturbations_report_what_they_dropped(branched_model):
 # --- provenance of the perturbation-response family ------------------------
 
 
+@pytest.mark.requires_qp
 def test_comparison_results_carry_the_full_provenance_block(branched_model):
     """MOMA/ROOM report the same block as every other service, keeping the reference keys."""
 
@@ -399,6 +411,7 @@ def test_comparison_results_carry_the_full_provenance_block(branched_model):
     assert results["ko_room"].metadata["parameters"]["knockouts"] == ("R2",)
 
 
+@pytest.mark.requires_qp
 def test_knockout_comparison_fingerprints_the_model_it_actually_solved(branched_model):
     """The recorded fingerprint is the knocked-out model's, not the wild type's."""
 
@@ -420,6 +433,7 @@ def test_knockout_comparison_fingerprints_the_model_it_actually_solved(branched_
     assert model_fingerprint(branched_model) == wild_type
 
 
+@pytest.mark.requires_qp
 def test_batch_comparison_carries_one_provenance_block_for_the_screen(branched_model):
     """The screen's provenance lives on the container; the rows stay the numbers."""
 
@@ -498,6 +512,7 @@ def test_batch_comparison_carries_one_provenance_block_for_the_screen(branched_m
     assert set(frame["target_id"]) == {row.target_id for row in screen}
 
 
+@pytest.mark.requires_qp
 def test_batch_comparison_drops_the_column_the_method_cannot_fill(branched_model):
     """The mirror of the MOMA case: ROOM reports a switch count, not a distance.
 

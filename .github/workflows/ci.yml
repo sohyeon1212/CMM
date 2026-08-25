@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -17,21 +21,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-2025, macos-15]
         python-version: ["3.12"]
         # Also exercise the minimum supported Python (pyproject requires-python >= 3.10).
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             python-version: "3.10"
+          - os: ubuntu-24.04
+            python-version: "3.11"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          version: "0.12.5"
           enable-cache: true
           cache-dependency-glob: uv.lock
 
@@ -44,18 +53,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgl1 libegl1 libxkbcommon0 libdbus-1-3
 
-      - name: Install the locked publication environment
-        run: uv sync --frozen --all-extras --python ${{ matrix.python-version }}
+      # Keep the commercial solver outside the general matrix. Its bundled size-limited license
+      # changes cobra's default solver and cannot execute all CMM test models reliably.
+      - name: Install the locked open-source test environment
+        run: >-
+          uv sync --frozen
+          --extra desktop --extra design --extra dev
+          --python ${{ matrix.python-version }}
 
       - name: Lint (ruff)
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: |
-          uv run ruff check src tests
-          uv run ruff format --check src tests
+          uv run --no-sync ruff check src tests
+          uv run --no-sync ruff format --check src tests
 
       - name: Type check scientific services
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: >-
-          uv run mypy
+          uv run --no-sync mypy
           src/cmm/core src/cmm/features src/cmm/omics
           src/cmm/workflows src/cmm/reporting
 
@@ -63,7 +78,9 @@ jobs:
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: |
           uvx --from cffconvert==2.0.0 cffconvert --validate
-          uv export --frozen --all-extras --no-emit-project -o "$RUNNER_TEMP/requirements-audit.txt"
+          uv export --frozen \
+            --extra desktop --extra design --extra dev --extra solver-gurobi \
+            --no-emit-project -o "$RUNNER_TEMP/requirements-audit.txt"
           uvx --from pip-audit==2.10.1 pip-audit \
             -r "$RUNNER_TEMP/requirements-audit.txt" --disable-pip --require-hashes
 
@@ -71,7 +88,8 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: >-
-          uv run pytest -q -ra --strict-markers
+          uv run --no-sync pytest -q -ra --strict-markers
+          -m "not requires_qp and not requires_miqp"
           --durations=10
           --cov=cmm --cov-branch --cov-report=term-missing
           --cov-fail-under=80
@@ -79,20 +97,262 @@ jobs:
       - name: Build and verify publication renderer package data
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: |
-          uv build
-          uv run python - <<'PY'
+          uv build --no-sources
+          uv run --no-sync python - <<'PY'
+          import tarfile
           from pathlib import Path
           from zipfile import ZipFile
 
           wheels = list(Path("dist").glob("*.whl"))
+          sdists = list(Path("dist").glob("*.tar.gz"))
           if len(wheels) != 1:
               raise SystemExit(f"expected one wheel, found {wheels}")
+          if len(sdists) != 1:
+              raise SystemExit(f"expected one sdist, found {sdists}")
+
+          wheel_required = {
+              "cmm/reporting/render_publication_figures.R",
+              "cmm/resources/LICENSE.escher.txt",
+          }
           with ZipFile(wheels[0]) as archive:
-              member = "cmm/reporting/render_publication_figures.R"
-              if member not in archive.namelist():
-                  raise SystemExit(f"wheel is missing {member}")
-              if not archive.read(member).strip():
-                  raise SystemExit(f"wheel contains an empty {member}")
+              wheel_names = set(archive.namelist())
+              missing = sorted(wheel_required - wheel_names)
+              if missing:
+                  raise SystemExit(f"wheel is missing required package data: {missing}")
+              empty = sorted(member for member in wheel_required if not archive.read(member).strip())
+              if empty:
+                  raise SystemExit(f"wheel contains empty required package data: {empty}")
+              if any("/.agents/" in f"/{name}" or name.endswith("/SKILL.md") for name in wheel_names):
+                  raise SystemExit("wheel must not install the repository-only agent skill")
+
+          sdist_required = {
+              "AGENTS.md",
+              "THIRD_PARTY_NOTICES.md",
+              "install.ps1",
+              "install.sh",
+              "renv.lock",
+              ".agents/skills/cmm-production-engineering/SKILL.md",
+              ".agents/skills/cmm-production-engineering/agents/openai.yaml",
+              ".agents/skills/cmm-production-engineering/references/clarification-interview.md",
+              "docs/AI-USAGE.md",
+          }
+          with tarfile.open(sdists[0], mode="r:gz") as archive:
+              members = [member for member in archive.getmembers() if member.isfile()]
+              relative = {
+                  member.name.split("/", 1)[1] if "/" in member.name else member.name: member
+                  for member in members
+              }
+              missing = sorted(sdist_required - set(relative))
+              if missing:
+                  raise SystemExit(f"sdist is missing publication-governance files: {missing}")
+              forbidden_paths = sorted(
+                  name
+                  for name in relative
+                  if name == "docs/analysis-2026-06-12.md"
+                  or name == "docs/loop"
+                  or name.startswith("docs/loop/")
+              )
+              if forbidden_paths:
+                  raise SystemExit(f"sdist contains internal review artifacts: {forbidden_paths}")
+              # Source distributions must be portable and free of workstation-local paths.
+              workstation_path_markers = (b"/users/", b":\\users\\")
+              nonportable_hits = []
+              for name, member in relative.items():
+                  stream = archive.extractfile(member)
+                  payload = stream.read() if stream is not None else b""
+                  lowered_name = name.lower().encode()
+                  lowered_payload = payload.lower()
+                  if any(
+                      marker in lowered_name or marker in lowered_payload
+                      for marker in workstation_path_markers
+                  ):
+                      nonportable_hits.append(name)
+              if nonportable_hits:
+                  raise SystemExit(
+                      "sdist contains nonportable workstation paths in: "
+                      f"{sorted(nonportable_hits)}"
+                  )
+          PY
+
+  solver-smoke:
+    name: Restricted-license solver capability suite
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Qt offscreen system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libxkbcommon0 libdbus-1-3
+
+      # The complete QP/MIQP-marked collection includes service, GUI, and screenshot-scenario
+      # tests. One additional exact MILP node exercises both Gurobi-backed strain-design methods
+      # and seed forwarding. All current models fit Gurobi's bundled restricted license.
+      - name: Install the locked solver capability environment
+        run: >-
+          uv sync --frozen
+          --extra desktop --extra dev --extra design --extra solver-gurobi
+          --python 3.12
+
+      - name: Prove MOMA smoke tests use the six-reaction branched fixture
+        run: |
+          uv run --no-sync python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          expected = {
+              "tests/test_comparison.py": {
+                  "test_l2_moma_reroutes_after_knockout",
+                  "test_moma_l2_distance_is_the_root_of_the_qp_objective",
+              },
+              "tests/test_validation.py": {"test_moma_matches_cobra"},
+          }
+          for filename, function_names in expected.items():
+              module = ast.parse(Path(filename).read_text(encoding="utf-8"))
+              functions = {
+                  node.name: node
+                  for node in module.body
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+              }
+              for function_name in function_names:
+                  function = functions[function_name]
+                  fixtures = {argument.arg for argument in function.args.args}
+                  if "branched_model" not in fixtures or "ecoli_core" in fixtures:
+                      raise SystemExit(
+                          f"{filename}::{function_name} is not restricted to branched_model"
+                      )
+          PY
+
+      - name: Collect the complete solver capability test universe
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          uv run --no-sync pytest --collect-only -q --color=no --strict-markers \
+            -m "requires_qp or requires_miqp" \
+            > "$RUNNER_TEMP/solver-capability-marked-nodes.txt"
+          uv run --no-sync pytest --collect-only -q --color=no --strict-markers \
+            tests/test_strain_design.py::test_restricted_license_strain_design_forwards_seed \
+            > "$RUNNER_TEMP/solver-capability-milp-nodes.txt"
+          uv run --no-sync python - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          marked_collection = root / "solver-capability-marked-nodes.txt"
+          milp_collection = root / "solver-capability-milp-nodes.txt"
+          marked = {
+              line.strip()
+              for line in marked_collection.read_text(encoding="utf-8").splitlines()
+              if line.startswith("tests/") and "::" in line
+          }
+          milp = {
+              line.strip()
+              for line in milp_collection.read_text(encoding="utf-8").splitlines()
+              if line.startswith("tests/") and "::" in line
+          }
+          expected_marked_count = 60
+          expected_milp = {
+              "tests/test_strain_design.py::"
+              "test_restricted_license_strain_design_forwards_seed"
+          }
+          if len(marked) != expected_marked_count:
+              raise SystemExit(
+                  "solver capability collection changed: "
+                  f"expected {expected_marked_count} marked nodes, collected {len(marked)}; "
+                  "review every added or removed QP/MIQP test and update the audited count"
+              )
+          if milp != expected_milp:
+              raise SystemExit(
+                  "audited strain-design MILP collection changed: "
+                  f"expected {sorted(expected_milp)}, collected {sorted(milp)}"
+              )
+          expected = marked | milp
+          (root / "solver-capability-nodes.txt").write_text(
+              "".join(f"{node}\n" for node in sorted(expected)),
+              encoding="utf-8",
+          )
+          print(
+              f"audited solver capability collection: {len(marked)} marked + "
+              f"{len(milp)} explicit MILP = {len(expected)} tests"
+          )
+          PY
+
+      - name: Run every restricted-license solver capability test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          uv run --no-sync pytest -q -ra --strict-markers \
+            -m "requires_qp or requires_miqp" \
+            --durations=10 \
+            --junitxml="$RUNNER_TEMP/solver-capability-marked-results.xml"
+          uv run --no-sync pytest -q -ra --strict-markers \
+            tests/test_strain_design.py::test_restricted_license_strain_design_forwards_seed \
+            --junitxml="$RUNNER_TEMP/solver-capability-milp-results.xml"
+
+      - name: Prove every collected solver capability test executed
+        run: |
+          uv run --no-sync python - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          collection = root / "solver-capability-nodes.txt"
+          expected = {
+              line.strip()
+              for line in collection.read_text(encoding="utf-8").splitlines()
+              if line.startswith("tests/") and "::" in line
+          }
+          report_paths = (
+              root / "solver-capability-marked-results.xml",
+              root / "solver-capability-milp-results.xml",
+          )
+          suites = []
+          for report_path in report_paths:
+              report = ElementTree.parse(report_path)
+              suites.extend(report.getroot().iter("testsuite"))
+          if len(suites) != len(report_paths):
+              raise SystemExit(
+                  f"expected {len(report_paths)} pytest JUnit suites, found {len(suites)}"
+              )
+          cases = [case for suite in suites for case in suite.findall("testcase")]
+          executed_list = [
+              f"{case.attrib['classname'].replace('.', '/')}.py::{case.attrib['name']}"
+              for case in cases
+          ]
+          executed = set(executed_list)
+          unexecuted = sorted(expected - executed)
+          unexpected = sorted(executed - expected)
+          duplicate_count = len(executed_list) - len(executed)
+          skipped = [case for case in cases if case.find("skipped") is not None]
+          failed = [
+              case
+              for case in cases
+              if case.find("failure") is not None or case.find("error") is not None
+          ]
+          if unexecuted or unexpected or duplicate_count or skipped or failed:
+              raise SystemExit(
+                  "solver capability execution does not match its collection: "
+                  f"unexecuted={unexecuted}, unexpected={unexpected}, "
+                  f"duplicates={duplicate_count}, skipped={len(skipped)}, "
+                  f"failed={len(failed)}"
+              )
+          print(f"executed all {len(executed)} solver capability tests with no exceptions")
           PY
 
   publication-report:
@@ -101,20 +361,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          version: "0.12.5"
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      - uses: r-lib/actions/setup-r@v2
+      - uses: r-lib/actions/setup-r@d3c5be51b12e724e68f33216ca3c148b66d5f0b6 # v2
         with:
           r-version: renv
           # Linux/Windows use Posit binaries by default. `always` opts macOS into its binary
@@ -134,12 +397,16 @@ jobs:
 
       - name: Install R graphics system libraries (macOS)
         if: runner.os == 'macOS'
-        run: >-
-          brew install
-          freetype harfbuzz fribidi libpng jpeg-turbo libtiff webp pkg-config
+        run: |
+          brew install freetype harfbuzz fribidi libpng jpeg-turbo libtiff webp pkg-config
+          echo "CPPFLAGS=-I$(brew --prefix libpng)/include -I$(brew --prefix freetype)/include/freetype2" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L$(brew --prefix libpng)/lib -L$(brew --prefix freetype)/lib" >> "$GITHUB_ENV"
+          echo "CPATH=$(brew --prefix)/include" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$(brew --prefix libpng)/lib/pkgconfig:$(brew --prefix freetype)/lib/pkgconfig:$(brew --prefix harfbuzz)/lib/pkgconfig:$(brew --prefix fribidi)/lib/pkgconfig:$(brew --prefix jpeg-turbo)/lib/pkgconfig:$(brew --prefix libtiff)/lib/pkgconfig:$(brew --prefix webp)/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - name: Restore the locked R publication environment
-        uses: r-lib/actions/setup-renv@v2
+        uses: r-lib/actions/setup-renv@d3c5be51b12e724e68f33216ca3c148b66d5f0b6 # v2
 
       # The renderer intentionally invokes `Rscript --vanilla`. Export the restored project
       # library explicitly so that subprocess cannot fall back to an unrelated user library.
@@ -155,7 +422,7 @@ jobs:
       - name: Install focused Python test dependencies
         run: uv sync --frozen --extra dev --python 3.12
 
-      - name: Smoke-test the locked R renderer packages
+      - name: Verify locked R dependency closure and renderer packages
         shell: Rscript --vanilla {0}
         run: |
           packages <- c("jsonlite", "ggplot2", "ggrepel", "patchwork", "svglite", "ragg")
@@ -171,6 +438,75 @@ jobs:
           }
           lock <- jsonlite::read_json("renv.lock", simplifyVector = FALSE)
           locked_packages <- names(lock$Packages)
+          dependency_fields <- c("Depends", "Imports", "LinkingTo")
+          dependency_specs <- unlist(lapply(lock$Packages, function(record) {
+            fields <- intersect(dependency_fields, names(record))
+            unlist(record[fields], use.names = FALSE)
+          }), use.names = FALSE)
+          dependency_names <- unique(trimws(sub("\\s*\\(.*\\)\\s*$", "", dependency_specs)))
+
+          installed <- utils::installed.packages(lib.loc = .libPaths(), noCache = TRUE)
+          priorities <- installed[, "Priority"]
+          standard_packages <- unique(rownames(installed)[
+            !is.na(priorities) & priorities %in% c("base", "recommended")
+          ])
+          missing_dependencies <- setdiff(
+            dependency_names,
+            c("R", locked_packages, standard_packages)
+          )
+          if (length(missing_dependencies) > 0L) {
+            stop(
+              sprintf(
+                "renv.lock is not dependency-closed; missing hard dependency record(s): %s",
+                paste(sort(missing_dependencies), collapse = ", ")
+              ),
+              call. = FALSE
+            )
+          }
+
+          project_library <- normalizePath(.libPaths()[[1]], winslash = "/", mustWork = TRUE)
+          project_installed <- utils::installed.packages(
+            lib.loc = project_library,
+            noCache = TRUE
+          )
+          project_priorities <- project_installed[, "Priority"]
+          project_nonstandard <- unique(rownames(project_installed)[
+            is.na(project_priorities) |
+              !project_priorities %in% c("base", "recommended")
+          ])
+          # setup-renv bootstraps `renv`, but `renv` is itself lockfile-controlled. No unpinned
+          # bootstrap package is allowed in the active project library.
+          bootstrap_allowances <- character()
+          unexpected_packages <- setdiff(
+            project_nonstandard,
+            c(locked_packages, bootstrap_allowances)
+          )
+          missing_project_packages <- setdiff(
+            setdiff(locked_packages, standard_packages),
+            project_nonstandard
+          )
+          if (length(unexpected_packages) > 0L || length(missing_project_packages) > 0L) {
+            stop(
+              sprintf(
+                paste0(
+                  "restored project library differs from the non-base lock closure: ",
+                  "unexpected=%s; missing=%s"
+                ),
+                paste(sort(unexpected_packages), collapse = ", "),
+                paste(sort(missing_project_packages), collapse = ", ")
+              ),
+              call. = FALSE
+            )
+          }
+          cat(sprintf(
+            "R dependency closure: %d locked packages; %d hard dependencies; ",
+            length(locked_packages),
+            length(dependency_names)
+          ))
+          cat(sprintf(
+            "%d project non-base packages; 0 bootstrap allowances\n",
+            length(project_nonstandard)
+          ))
           locked_available <- vapply(
             locked_packages, requireNamespace, logical(1), quietly = TRUE
           )
@@ -232,4 +568,4 @@ jobs:
           }
 
       - name: Test schema validation and R publication rendering
-        run: uv run pytest -q -ra tests/test_publication_reporting.py
+        run: uv run --no-sync pytest -q -ra tests/test_publication_reporting.py
