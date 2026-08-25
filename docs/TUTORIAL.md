@@ -1,4 +1,4 @@
-# CMM Tutorial — Cellular Metabolic Modeling Platform
+# CMM Tutorial — Constraint-based Metabolic Modeling
 
 A hands-on guide to every feature of the CMM desktop platform and Python library, written
 against the shipped `e_coli_core` textbook model so you can follow along end to end. Each GUI
@@ -53,18 +53,18 @@ the active capabilities under **Config → Solver status…**.
 ## 3. The window at a glance
 
 ```
-┌───────────────────────────────────────────────────────────────────────┐
-│ CMM — Cellular Metabolic Modeling Platform (menu: File/Analysis/Model/Config)│
-│ model id · reactions · metabolites · genes · solver                        │
-├──────────────────────┬────────────────────────────────────────────────────┤
-│ MODEL PANEL          │ TABS                                               │
-│ - objective          │ Simulation | Comparison | Production | Strain Des. │
-│ - flux-range slider  │ Omics | Multi-condition | Flux Map |               │
-│ - reaction table     │ Revert Metabolism | Transform (A→B)                │
-│   (edit Lower/Upper) │   (active analysis + result table / figure)        │
-├──────────────────────┴────────────────────────────────────────────────────┤
-│ status bar                                                                 │
-└────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ CMM — Constraint-based Metabolic Modeling (menu: File/Analysis/Model/Config) │
+│ model id · reactions · metabolites · genes · solver                          │
+├─────────────────────┬────────────────────────────────────────────────────────┤
+│ MODEL PANEL         │ TABS                                                   │
+│ - objective         │ Simulation | Comparison | Production | Strain Des.     │
+│ - flux-range slider │ Omics | Multi-condition | Flux Map |                   │
+│ - reaction table    │ Revert Metabolism | Transform (A→B)                    │
+│  (edit Lower/Upper) │   (active analysis + result table / figure)            │
+├─────────────────────┴────────────────────────────────────────────────────────┤
+│ status bar                                                                   │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - The **reaction table** on the left lists every reaction with its Lower/Upper bounds and the
@@ -530,6 +530,6 @@ uv run ruff check src tests
 
 ---
 
-*Feature availability reflects CMM 0.4.0. See `docs/VALIDATION.md` for the publication
+*Feature availability reflects CMM 0.5.0. See `docs/VALIDATION.md` for the publication
 evidence and limitations, `docs/feature-roadmap.md` for planned additions, and
 `docs/architecture.md` for the layering contract.*

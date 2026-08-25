@@ -35,4 +35,4 @@ __all__ = [
 try:
     __version__ = _version("cmm")
 except PackageNotFoundError:  # pragma: no cover - source tree without an install
-    __version__ = "0.4.0"
+    __version__ = "0.5.0"

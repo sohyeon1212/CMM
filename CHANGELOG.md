@@ -47,6 +47,7 @@ is now a working part of it. Additive: nothing is removed and no result changes.
 
 ### Fixed
 
+- The source-tree fallback for `cmm.__version__` now matches the `0.5.0` package metadata.
 - **The flux map no longer drifts right, clip its title, or draw its colorbar as a hairline**
   when the GUI stretches the figure to a wide panel. `colorbar` re-anchors its parent axes to
   the right, so every bit of the shrinkage `set_aspect("equal")` applies was taken off the left
@@ -59,6 +60,8 @@ is now a working part of it. Additive: nothing is removed and no result changes.
 
 ### Changed
 
+- CMM's public expansion is now **Constraint-based Metabolic Modeling** across package metadata,
+  the README, citation metadata, documentation, and desktop title/header.
 - **The schematic carries a colorbar** instead of an `∝ |flux|` formula in the margin, drawn
   from the same truncated colormap span the arrows are coloured from.
 - The schematic's reaction count is capped at 25. Beyond that the cross-row arrows dominate and

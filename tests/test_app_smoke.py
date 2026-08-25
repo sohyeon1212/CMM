@@ -19,7 +19,7 @@ from cmm.app.screenshots import (  # noqa: E402
     build_demo_model,
 )
 from qtpy.QtCore import Qt  # noqa: E402
-from qtpy.QtWidgets import QApplication  # noqa: E402
+from qtpy.QtWidgets import QApplication, QLabel  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -147,6 +147,15 @@ def test_menu_bar_has_expected_menus(app):
     titles = [a.text().replace("&", "") for a in window.menuBar().actions()]
     for expected in ("Analysis", "Model", "Config"):
         assert expected in titles
+
+
+def test_window_uses_constraint_based_branding(app):
+    window = CmmMainWindow(build_demo_model())
+    expected = "CMM — Constraint-based Metabolic Modeling"
+    assert window.windowTitle() == expected
+    title = window.findChild(QLabel, "title")
+    assert title is not None
+    assert title.text() == expected
 
 
 def test_omics_integration_in_gui(app):

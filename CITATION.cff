@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use CMM in published work, cite this software and the method papers listed in docs/VALIDATION.md."
-title: "CMM: Cellular Metabolic Modeling Platform"
+title: "CMM — Constraint-based Metabolic Modeling"
 type: software
 version: 0.5.0
 # TODO(authors): replace the organization-only entry below with the manuscript's final

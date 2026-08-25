@@ -107,6 +107,7 @@ from cmm.visualization import (
 )
 
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_APP_TITLE = "CMM — Constraint-based Metabolic Modeling"
 
 # "Oxford Slate" — an academic / scientific-software palette: a deep-navy header with a
 # restrained steel-blue accent over a cool-paper canvas. Every interactive widget (menus,
@@ -410,7 +411,7 @@ class CmmMainWindow(QMainWindow):
         self._omics_conditions_order: list[str] = []
         # Guards re-entrant background runs (see _run_in_background).
         self._busy = False
-        self.setWindowTitle("CMM — Cellular Metabolic Modeling Platform")
+        self.setWindowTitle(_APP_TITLE)
         self.resize(1160, 760)
         # Qt QSS ``image: url(...)`` needs a real path; forward slashes work cross-platform.
         self.setStyleSheet(_STYLE.replace("__ASSETS__", _ASSETS_DIR.as_posix()))
@@ -747,7 +748,7 @@ class CmmMainWindow(QMainWindow):
         header.setObjectName("header")
         layout = QVBoxLayout(header)
         layout.setContentsMargins(16, 12, 16, 12)
-        title = QLabel("CMM — Cellular Metabolic Modeling Platform")
+        title = QLabel(_APP_TITLE)
         title.setObjectName("title")
         self.subtitle = QLabel("")
         self.subtitle.setObjectName("subtitle")

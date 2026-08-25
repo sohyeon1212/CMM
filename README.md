@@ -1,4 +1,4 @@
-# CMM — Cellular Metabolic Modeling Platform
+# CMM — Constraint-based Metabolic Modeling
 
 [![CI](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml/badge.svg)](https://github.com/jyryu3161/CMM/actions/workflows/ci.yml)
 
