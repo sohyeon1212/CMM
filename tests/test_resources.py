@@ -30,7 +30,7 @@ def test_bundled_map_is_byte_identical_to_its_attributed_digest():
     comment.
     """
 
-    recorded = re.search(r"`([0-9a-f]{64})`", ATTRIBUTION.read_text())
+    recorded = re.search(r"`([0-9a-f]{64})`", ATTRIBUTION.read_text(encoding="utf-8"))
     assert recorded, "ATTRIBUTION.md records no SHA-256 for the bundled map"
     actual = hashlib.sha256(CORE_MAP.read_bytes()).hexdigest()
     assert actual == recorded.group(1)
@@ -44,7 +44,7 @@ def test_attribution_records_the_chain_the_licence_claim_rests_on():
     LICENSE is MIT, and each link of that chain is recorded here rather than assumed.
     """
 
-    raw = ATTRIBUTION.read_text()
+    raw = ATTRIBUTION.read_text(encoding="utf-8")
     # The notice is a wrapped block quote, so match against it with the quote markers and
     # line breaks flattened rather than against however it happens to be laid out today.
     text = " ".join(raw.replace("\n>", " ").split())
