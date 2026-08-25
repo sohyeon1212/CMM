@@ -84,15 +84,26 @@ jobs:
           uvx --from pip-audit==2.10.1 pip-audit \
             -r "$RUNNER_TEMP/requirements-audit.txt" --disable-pip --require-hashes
 
-      - name: Test with branch coverage (offscreen Qt)
+      - name: Test the solver-neutral surface with branch coverage (offscreen Qt)
         env:
+          COVERAGE_FILE: ${{ runner.temp }}/.coverage.general
           QT_QPA_PLATFORM: offscreen
         run: >-
           uv run --no-sync pytest -q -ra --strict-markers
           -m "not requires_qp and not requires_miqp"
           --durations=10
           --cov=cmm --cov-branch --cov-report=term-missing
-          --cov-fail-under=80
+
+      - name: Upload Linux 3.12 solver-neutral coverage
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-general-linux-py312
+          path: ${{ runner.temp }}/.coverage.general
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 1
 
       - name: Build and verify publication renderer package data
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
@@ -202,33 +213,37 @@ jobs:
 
       # The complete QP/MIQP-marked collection includes service, GUI, and screenshot-scenario
       # tests. One additional exact MILP node exercises both Gurobi-backed strain-design methods
-      # and seed forwarding. All current models fit Gurobi's bundled restricted license.
+      # and seed forwarding. The AST gate below keeps every historically oversized smoke path on
+      # a real, deterministic six-reaction reroute that fits Gurobi's bundled restricted license.
       - name: Install the locked solver capability environment
         run: >-
           uv sync --frozen
           --extra desktop --extra dev --extra design --extra solver-gurobi
           --python 3.12
 
-      - name: Prove MOMA smoke tests use the six-reaction branched fixture
+      - name: Prove restricted solver smoke tests use six-reaction models
         run: |
           uv run --no-sync python - <<'PY'
           import ast
           from pathlib import Path
 
-          expected = {
+          expected_fixtures = {
               "tests/test_comparison.py": {
                   "test_l2_moma_reroutes_after_knockout",
                   "test_moma_l2_distance_is_the_root_of_the_qp_objective",
               },
               "tests/test_validation.py": {"test_moma_matches_cobra"},
           }
-          for filename, function_names in expected.items():
+          def module_functions(filename):
               module = ast.parse(Path(filename).read_text(encoding="utf-8"))
-              functions = {
+              return {
                   node.name: node
                   for node in module.body
                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
               }
+
+          for filename, function_names in expected_fixtures.items():
+              functions = module_functions(filename)
               for function_name in function_names:
                   function = functions[function_name]
                   fixtures = {argument.arg for argument in function.args.args}
@@ -236,6 +251,54 @@ jobs:
                       raise SystemExit(
                           f"{filename}::{function_name} is not restricted to branched_model"
                       )
+
+          app_functions = module_functions("tests/test_app_smoke.py")
+          app_function_name = "test_moma_comparison_names_the_quantity_it_reports"
+          app_function = app_functions[app_function_name]
+          app_fixtures = {argument.arg for argument in app_function.args.args}
+          app_calls = {
+              node.func.id
+              for node in ast.walk(app_function)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+          }
+          if "ecoli_core" in app_fixtures or "build_demo_model" not in app_calls:
+              raise SystemExit(
+                  f"tests/test_app_smoke.py::{app_function_name} is not restricted to "
+                  "build_demo_model"
+              )
+
+          provenance_functions = module_functions("tests/test_provenance_surface.py")
+          metadata_function = provenance_functions["_metadata"]
+          required_services = {"transformation_targets", "revert_targets"}
+          routed = False
+          for node in ast.walk(metadata_function):
+              if not isinstance(node, ast.If):
+                  continue
+              names = {
+                  child.value
+                  for child in ast.walk(node.test)
+                  if isinstance(child, ast.Constant) and isinstance(child.value, str)
+              }
+              calls = {
+                  child.func.id
+                  for statement in node.body
+                  for child in ast.walk(statement)
+                  if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+              }
+              if required_services <= names and "_directional_metadata" in calls:
+                  routed = True
+                  break
+          directional_function = provenance_functions["_directional_metadata"]
+          directional_calls = {
+              node.func.id
+              for node in ast.walk(directional_function)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+          }
+          if not routed or "_comparison_model" not in directional_calls:
+              raise SystemExit(
+                  "transformation_targets/revert_targets provenance cases are not routed "
+                  "through the six-reaction comparison model"
+              )
           PY
 
       - name: Collect the complete solver capability test universe
@@ -294,14 +357,17 @@ jobs:
 
       - name: Run every restricted-license solver capability test
         env:
+          COVERAGE_FILE: ${{ runner.temp }}/.coverage.solver
           QT_QPA_PLATFORM: offscreen
         run: |
           uv run --no-sync pytest -q -ra --strict-markers \
             -m "requires_qp or requires_miqp" \
             --durations=10 \
+            --cov=cmm --cov-branch --cov-report= \
             --junitxml="$RUNNER_TEMP/solver-capability-marked-results.xml"
           uv run --no-sync pytest -q -ra --strict-markers \
             tests/test_strain_design.py::test_restricted_license_strain_design_forwards_seed \
+            --cov=cmm --cov-branch --cov-append --cov-report= \
             --junitxml="$RUNNER_TEMP/solver-capability-milp-results.xml"
 
       - name: Prove every collected solver capability test executed
@@ -354,6 +420,16 @@ jobs:
               )
           print(f"executed all {len(executed)} solver capability tests with no exceptions")
           PY
+
+      - name: Upload restricted-solver coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-restricted-solver-linux-py312
+          path: ${{ runner.temp }}/.coverage.solver
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 1
 
   publication-report:
     name: R publication report / ${{ matrix.os }}
@@ -568,4 +644,67 @@ jobs:
           }
 
       - name: Test schema validation and R publication rendering
-        run: uv run --no-sync pytest -q -ra tests/test_publication_reporting.py
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/.coverage.publication
+        run: >-
+          uv run --no-sync pytest -q -ra tests/test_publication_reporting.py
+          --cov=cmm --cov-branch --cov-report=
+
+      - name: Upload locked-R publication coverage
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-publication-linux-py312
+          path: ${{ runner.temp }}/.coverage.publication
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 1
+
+  coverage:
+    name: Combined general, solver, and publication branch coverage
+    needs: [test, solver-smoke, publication-report]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every test partition to pass
+        env:
+          GENERAL_RESULT: ${{ needs.test.result }}
+          PUBLICATION_RESULT: ${{ needs.publication-report.result }}
+          SOLVER_RESULT: ${{ needs.solver-smoke.result }}
+        run: |
+          test "$GENERAL_RESULT" = "success"
+          test "$SOLVER_RESULT" = "success"
+          test "$PUBLICATION_RESULT" = "success"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Download all Linux coverage shards
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-*-linux-py312
+          path: ${{ runner.temp }}/coverage-data
+          merge-multiple: true
+
+      - name: Install locked coverage tooling
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Enforce combined branch coverage
+        run: |
+          test -s "$RUNNER_TEMP/coverage-data/.coverage.general"
+          test -s "$RUNNER_TEMP/coverage-data/.coverage.solver"
+          test -s "$RUNNER_TEMP/coverage-data/.coverage.publication"
+          uv run --no-sync coverage combine "$RUNNER_TEMP/coverage-data"
+          uv run --no-sync coverage report --show-missing --fail-under=80

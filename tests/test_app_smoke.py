@@ -238,7 +238,53 @@ def test_media_pfba_comparison_in_gui(app, ecoli_core):
     assert "infeasible" in window.comparison_summary.text()
 
 
-def test_fvseof_in_gui(app, ecoli_core):
+def test_fvseof_in_gui(app, ecoli_core, monkeypatch):
+    import threading
+
+    import cmm.app.main_window as main_window_module
+
+    # GLPK problem objects must be created and used by the same thread. Track both model
+    # reconstruction and the real FVSEOF call so this test cannot regress to handing the GUI's
+    # main-thread solver object to QThread (which aborts swiglpk on Windows rather than raising).
+    ecoli_core.solver = "glpk"
+    ecoli_core.tolerance = 1e-8
+    ecoli_core.solver.configuration.presolve = True
+    ecoli_core.solver.configuration.timeout = 17
+    ecoli_core.solver.configuration.tolerances.integrality = 2e-8
+    custom_constraint = ecoli_core.problem.Constraint(
+        ecoli_core.reactions.PGI.flux_expression,
+        ub=999.0,
+        name="_gui_worker_constraint",
+    )
+    ecoli_core.add_cons_vars([custom_constraint])
+    ui_model = ecoli_core
+    main_tid = threading.get_ident()
+    state = {}
+    real_from_json = main_window_module.from_json
+    real_fvseof = main_window_module.fvseof
+
+    def tracked_from_json(document):
+        state["rebuild_tid"] = threading.get_ident()
+        return real_from_json(document)
+
+    def tracked_fvseof(model, *args, **kwargs):
+        state["solve_tid"] = threading.get_ident()
+        state["detached"] = model is not ui_model
+        state["solver"] = main_window_module.active_solver(model)
+        state["tolerance"] = model.tolerance
+        state["integrality"] = model.solver.configuration.tolerances.integrality
+        state["presolve"] = model.solver.configuration.presolve
+        state["timeout"] = model.solver.configuration.timeout
+        state["objective_direction"] = model.objective_direction
+        state["glucose_bounds"] = model.reactions.EX_glc__D_e.bounds
+        state["custom_constraint_ub"] = model.solver.constraints[
+            "_gui_worker_constraint"
+        ].ub
+        return real_fvseof(model, *args, **kwargs)
+
+    monkeypatch.setattr(main_window_module, "from_json", tracked_from_json)
+    monkeypatch.setattr(main_window_module, "fvseof", tracked_fvseof)
+
     window = CmmMainWindow(ecoli_core)
     window.tabs.setCurrentIndex(window._tab_index("Production"))
     window.product_combo.setCurrentText("EX_succ_e")
@@ -247,6 +293,19 @@ def test_fvseof_in_gui(app, ecoli_core):
     assert (
         "FVSEOF" in window.yield_label.text() or "robust" in window.yield_label.text()
     )
+    assert state["rebuild_tid"] == state["solve_tid"] != main_tid
+    assert state["detached"] is True
+    assert state["solver"] == "glpk"
+    assert state["tolerance"] == pytest.approx(1e-8)
+    assert state["integrality"] == pytest.approx(2e-8)
+    assert state["presolve"] is True
+    assert state["timeout"] == 17
+    assert state["objective_direction"] == "max"
+    assert state["glucose_bounds"] == (-10.0, 1000.0)
+    assert state["custom_constraint_ub"] == 999.0
+    # Worker cleanup releases only its thread-local GLPK environment; the UI model remains
+    # usable on the main thread after the background solve.
+    assert window.model.slim_optimize(error_value=None) is not None
 
 
 def test_menu_bar_has_file_menu(app):
@@ -823,15 +882,17 @@ def test_room_comparison_renders_a_switch_count_not_a_distance(app):
 
 
 @pytest.mark.requires_qp
-def test_moma_comparison_names_the_quantity_it_reports(app, ecoli_core):
+def test_moma_comparison_names_the_quantity_it_reports(app):
     """MOMA-L2 reports Segrè Eq. (4)'s Euclidean distance, with the QP objective alongside."""
 
-    window = CmmMainWindow(ecoli_core)
+    # Labelling is independent of network scale.  The six-reaction branched model still
+    # exercises a nonzero L2 reroute while fitting Gurobi's bundled restricted license.
+    window = CmmMainWindow(build_demo_model())
     window._goto_tab("Comparison")
     window.comparison_method_combo.setCurrentText("MOMA (L2)")
     window.template_combo.setCurrentText("pfba")
     window.ko_level_combo.setCurrentText("reaction")
-    _select_ko(window, ["PGI"])
+    _select_ko(window, ["R2"])
     window.run_comparison()
 
     summary = window.comparison_summary.text()

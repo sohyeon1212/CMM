@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import html
 import math
+import sys
 import warnings
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from pathlib import Path
 
 from cobra import Model
+from cobra.io import from_json, to_json
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from qtpy.QtCore import QEvent, QEventLoop, QObject, Qt, QThread, QTimer, Signal
@@ -276,9 +278,10 @@ class _AnalysisWorker(QObject):
 
     finished = Signal()
 
-    def __init__(self, fn):
+    def __init__(self, fn, cleanup=None):
         super().__init__()
         self._fn = fn
+        self._cleanup = cleanup
         self.result = None
         self.error: Exception | None = None
 
@@ -290,6 +293,12 @@ class _AnalysisWorker(QObject):
         ) as exc:  # captured and re-raised on the UI thread by the caller
             self.error = exc
         finally:
+            if self._cleanup is not None:
+                try:
+                    self._cleanup()
+                except Exception as exc:
+                    if self.error is None:
+                        self.error = exc
             self.finished.emit()
 
 
@@ -550,7 +559,7 @@ class CmmMainWindow(QMainWindow):
 
     # -- background execution -----------------------------------------------
 
-    def _run_in_background(self, compute, *, label: str = "Working…"):
+    def _run_in_background(self, compute, *, label: str = "Working…", cleanup=None):
         """Run ``compute()`` off the UI thread and return its result synchronously.
 
         The heavy solve runs on a worker thread while a nested event loop keeps the window
@@ -566,7 +575,7 @@ class CmmMainWindow(QMainWindow):
             return compute()
 
         self._busy = True
-        worker = _AnalysisWorker(compute)
+        worker = _AnalysisWorker(compute, cleanup)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -600,6 +609,82 @@ class CmmMainWindow(QMainWindow):
         if worker.error is not None:
             raise worker.error
         return worker.result
+
+    def _run_model_in_background(self, compute, *, label: str = "Working…"):
+        """Run a solve against a solver object created inside the worker thread.
+
+        GLPK's re-entrant build permits independent problem objects in different threads, but
+        explicitly forbids a thread from accessing a problem object created by another thread.
+        A ``cobra.Model`` owns such a solver object, so passing ``self.model`` directly to a
+        worker is unsupported and can make GLPK abort the whole process (observed on Windows
+        during FVSEOF's repeated FVA solves).
+
+        Serialize the standard COBRA model state on the UI thread and reconstruct it in the
+        worker. Preserve the active solver, objective direction, model tolerance, and public
+        solver configuration so the detached solve has the same scientific inputs. The worker
+        model is intentionally disposable: GUI edits remain on ``self.model`` and service
+        context-manager mutations cannot leak back into it.
+        """
+
+        model_json = to_json(self.model)
+        solver_name = active_solver(self.model)
+        solver_interface = self.model.solver.interface
+        solver_json = self.model.solver.to_json()
+        default_solver_name = active_solver()
+        objective_direction = self.model.objective_direction
+        model_tolerance = self.model.tolerance
+        configuration = self.model.solver.configuration
+        solver_parameters = {
+            name: getattr(configuration, name)
+            for name in ("presolve", "timeout", "verbosity", "lp_method", "qp_method")
+            if hasattr(configuration, name)
+        }
+        solver_tolerances = configuration.tolerances.to_dict()
+
+        def _compute_with_worker_model():
+            worker_model = from_json(model_json)
+            glpk_problems = []
+            if active_solver(worker_model) in {"glpk", "glpk_exact"}:
+                glpk_problems.append(worker_model.solver.problem)
+            # COBRA JSON carries the biological network but not custom optlang constraints.
+            # Rebuild the complete solver formulation in this thread, then attach it to the
+            # detached COBRA objects so programmatic models keep those scientific constraints.
+            worker_model._solver = solver_interface.Model.from_json(solver_json)
+            if solver_name in {"glpk", "glpk_exact"}:
+                glpk_problems.append(worker_model.solver.problem)
+            worker_model.objective_direction = objective_direction
+            worker_model.tolerance = model_tolerance
+            worker_configuration = worker_model.solver.configuration
+            for name, value in solver_parameters.items():
+                setattr(worker_configuration, name, value)
+            for name, value in solver_tolerances.items():
+                setattr(worker_configuration.tolerances, name, value)
+            try:
+                return compute(worker_model)
+            finally:
+                if sys.platform != "win32" and glpk_problems:
+                    # The swiglpk Linux/macOS wheels explicitly disable GLPK re-entrancy, so
+                    # glp_free_env would also destroy the UI model's process-wide environment.
+                    # Release only the detached problems that this helper created.
+                    from swiglpk import glp_delete_prob
+
+                    for problem in glpk_problems:
+                        glp_delete_prob(problem)
+
+        cleanup = None
+        if sys.platform == "win32" and {solver_name, default_solver_name} & {
+            "glpk",
+            "glpk_exact",
+        }:
+            # swiglpk's Windows wheel builds GLPK with TLS. Its re-entrancy contract requires
+            # every worker to release that thread-local environment before termination; this
+            # does not touch the UI thread's separate environment or original model.
+            from swiglpk import glp_free_env
+
+            cleanup = glp_free_env
+        return self._run_in_background(
+            _compute_with_worker_model, label=label, cleanup=cleanup
+        )
 
     # -- File menu (open / export) ------------------------------------------
 
@@ -1324,9 +1409,9 @@ class CmmMainWindow(QMainWindow):
         self.sd_run_btn.setEnabled(False)
         try:
             search = optknock if method == "optknock" else robustknock
-            result = self._run_in_background(
-                lambda: search(
-                    self.model,
+            result = self._run_model_in_background(
+                lambda worker_model: search(
+                    worker_model,
                     product,
                     max_knockouts=max_ko,
                     max_solutions=max_sol,
@@ -1694,10 +1779,10 @@ class CmmMainWindow(QMainWindow):
         if not target or target not in self.model.reactions:
             return
         try:
-            detected = self._run_in_background(
-                lambda: fva(self.model, reactions=[target], fraction_of_optimum=0.0)[
-                    target
-                ],
+            detected = self._run_model_in_background(
+                lambda worker_model: fva(
+                    worker_model, reactions=[target], fraction_of_optimum=0.0
+                )[target],
                 label="Detecting the target's flux range…",
             )
         except Exception as exc:
@@ -1736,9 +1821,9 @@ class CmmMainWindow(QMainWindow):
             target_min = self.fr_min_spin.value()
             target_max = self.fr_max_spin.value()
 
-            result = self._run_in_background(
-                lambda: flux_response(
-                    self.model,
+            result = self._run_model_in_background(
+                lambda worker_model: flux_response(
+                    worker_model,
                     target,
                     response,
                     n_steps=steps,
@@ -1866,13 +1951,14 @@ class CmmMainWindow(QMainWindow):
             ),
         )
 
-    def _reference_under(self, condition: Condition | None, method: str):
+    @staticmethod
+    def _reference_under(model: Model, condition: Condition | None, method: str):
         """Build a reference flux state with the condition applied, then restore the model."""
 
-        with self.model:
+        with model:
             if condition is not None:
-                condition.apply_to(self.model)
-            return reference_flux(self.model, method)
+                condition.apply_to(model)
+            return reference_flux(model, method)
 
     def run_sampling(self) -> None:
         """Draw a flux ensemble and summarize how much each reaction actually varies."""
@@ -1890,12 +1976,14 @@ class CmmMainWindow(QMainWindow):
             if around_reference:
                 reference_method = self.sample_reference_combo.currentText()
                 half_width = self.sample_window_spin.value() / 100.0
-                result = self._run_in_background(
-                    lambda: reference_constrained_sampling(
-                        self.model,
+                result = self._run_model_in_background(
+                    lambda worker_model: reference_constrained_sampling(
+                        worker_model,
                         # The reference must come from the knocked-out model: a wild-type
                         # reference would put deleted reactions outside their own windows.
-                        self._reference_under(condition, reference_method),
+                        self._reference_under(
+                            worker_model, condition, reference_method
+                        ),
                         n=n,
                         condition=condition,
                         method=method,
@@ -1907,9 +1995,9 @@ class CmmMainWindow(QMainWindow):
                     label="Sampling around the reference…",
                 )
             else:
-                result = self._run_in_background(
-                    lambda: random_flux_sampling(
-                        self.model,
+                result = self._run_model_in_background(
+                    lambda worker_model: random_flux_sampling(
+                        worker_model,
                         n=n,
                         condition=condition,
                         method=method,
@@ -2403,14 +2491,16 @@ class CmmMainWindow(QMainWindow):
             ["Reaction", "Reference flux", "Perturbed flux"]
         )
 
-        def _compute():
-            reference = reference_flux(self.model, template, gene_expression=expression)
+        def _compute(worker_model):
+            reference = reference_flux(
+                worker_model, template, gene_expression=expression
+            )
             if level == "gene":
-                reaction_ids = blocked_reactions_for_genes(self.model, targets)
+                reaction_ids = blocked_reactions_for_genes(worker_model, targets)
             else:
                 reaction_ids = tuple(targets)
             result = knockout_comparison(
-                self.model,
+                worker_model,
                 reference,
                 reaction_ids,
                 method=method_key,
@@ -2419,7 +2509,7 @@ class CmmMainWindow(QMainWindow):
             return reference, result, reaction_ids
 
         try:
-            reference, result, reaction_ids = self._run_in_background(
+            reference, result, reaction_ids = self._run_model_in_background(
                 _compute, label=f"Running {method_label}…"
             )
         except Exception as exc:
@@ -2573,14 +2663,16 @@ class CmmMainWindow(QMainWindow):
             (r.id for r in self.model.reactions if r.objective_coefficient != 0), None
         )
 
-        def _compute():
-            reference = reference_flux(self.model, template, gene_expression=expression)
+        def _compute(worker_model):
+            reference = reference_flux(
+                worker_model, template, gene_expression=expression
+            )
             if level == "gene":
-                perts = gene_perturbations(self.model, selected or None)
+                perts = gene_perturbations(worker_model, selected or None)
             else:
-                perts = reaction_perturbations(self.model, selected or None)
+                perts = reaction_perturbations(worker_model, selected or None)
             rows = batch_comparison(
-                self.model,
+                worker_model,
                 reference,
                 perts,
                 method=method_key,
@@ -2591,7 +2683,7 @@ class CmmMainWindow(QMainWindow):
 
         self.status_label.setText(f"Running batch {method_label} ({level})…")
         try:
-            reference, rows = self._run_in_background(
+            reference, rows = self._run_model_in_background(
                 _compute, label=f"Batch {method_label} over {level}s…"
             )
         except Exception as exc:
@@ -3045,8 +3137,8 @@ class CmmMainWindow(QMainWindow):
             self.run_fba()
         fraction = self.fva_fraction_spin.value()
         try:
-            ranges = self._run_in_background(
-                lambda: fva(self.model, fraction_of_optimum=fraction),
+            ranges = self._run_model_in_background(
+                lambda worker_model: fva(worker_model, fraction_of_optimum=fraction),
                 label="Running FVA…",
             )
         except Exception as exc:
@@ -3543,9 +3635,9 @@ class CmmMainWindow(QMainWindow):
             condition = self._production_condition()
             label = self.anaerobic_combo.currentText()
             substrate = self._current_substrate()
-            envelope = self._run_in_background(
-                lambda: production_envelope(
-                    self.model,
+            envelope = self._run_model_in_background(
+                lambda worker_model: production_envelope(
+                    worker_model,
                     product,
                     substrate=substrate,
                     condition=condition,
@@ -3566,8 +3658,10 @@ class CmmMainWindow(QMainWindow):
         def _do():
             product = self._current_product()
             condition = self._production_condition()
-            result = self._run_in_background(
-                lambda: fseof(self.model, product, n_steps=10, condition=condition),
+            result = self._run_model_in_background(
+                lambda worker_model: fseof(
+                    worker_model, product, n_steps=10, condition=condition
+                ),
                 label="Running FSEOF…",
             )
             if result.metadata.get("max_product", 0.0) <= 1e-9:
@@ -3603,8 +3697,8 @@ class CmmMainWindow(QMainWindow):
             condition = self._production_condition()
             # n_steps is left at the library default (10), which is Park et al.'s stated
             # minimum; the GUI used to force 8, undercutting it.
-            result = self._run_in_background(
-                lambda: fvseof(self.model, product, condition=condition),
+            result = self._run_model_in_background(
+                lambda worker_model: fvseof(worker_model, product, condition=condition),
                 label="Running FVSEOF…",
             )
             if result.metadata.get("max_product", 0.0) <= 1e-9:
@@ -3740,13 +3834,13 @@ class CmmMainWindow(QMainWindow):
         method = self.omics_method_combo.currentText()
         table = self._omics_table_df
 
-        def _compute():
+        def _compute(worker_model):
             return predict_condition_fluxes(
-                self.model, table, method=method, conditions=conditions
+                worker_model, table, method=method, conditions=conditions
             )
 
         try:
-            predictions = self._run_in_background(
+            predictions = self._run_model_in_background(
                 _compute,
                 label=f"Computing {method} for {len(conditions)} condition(s)…",
             )
@@ -3907,9 +4001,9 @@ class CmmMainWindow(QMainWindow):
         perturbation = self.perturbation_combo.currentText()
         alpha = self.alpha_spin.value()
 
-        def _compute():
+        def _compute(worker_model):
             source_result = integrate_expression(
-                self.model,
+                worker_model,
                 source_expression,
                 method="eflux2",
                 objective_fraction=1.0,
@@ -3921,10 +4015,13 @@ class CmmMainWindow(QMainWindow):
                 )
             reference = source_result.to_flux_state("source_expression_state")
             direction = differential_expression(
-                self.model, source_expression, target_expression, reference=reference
+                worker_model,
+                source_expression,
+                target_expression,
+                reference=reference,
             )
             return revert_targets(
-                self.model,
+                worker_model,
                 None,
                 reference,
                 direction,
@@ -3934,7 +4031,7 @@ class CmmMainWindow(QMainWindow):
             )
 
         try:
-            ranking = self._run_in_background(
+            ranking = self._run_model_in_background(
                 _compute, label=f"Running revert ({method})…"
             )
         except (
@@ -4088,15 +4185,15 @@ class CmmMainWindow(QMainWindow):
         source_expr = self._transform_source_expression
         target_expr = self._transform_target_expression
 
-        def _compute():
+        def _compute(worker_model):
             source_state = integrate_expression(
-                self.model, source_expr, method=omics_method
+                worker_model, source_expr, method=omics_method
             ).to_flux_state("source")
             target_state = integrate_expression(
-                self.model, target_expr, method=omics_method
+                worker_model, target_expr, method=omics_method
             ).to_flux_state("target")
             return transformation_targets(
-                self.model,
+                worker_model,
                 source_state,
                 target_state,
                 method=method,
@@ -4105,7 +4202,7 @@ class CmmMainWindow(QMainWindow):
             )
 
         try:
-            ranking = self._run_in_background(
+            ranking = self._run_model_in_background(
                 _compute, label=f"Running transformation ({method})…"
             )
         except (

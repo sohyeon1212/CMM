@@ -144,10 +144,10 @@ def _expression(model) -> dict[str, float]:
     return {gene.id: float(rng.uniform(1.0, 100.0)) for gene in model.genes}
 
 
-def _direction_map(model, reference, source) -> DirectionMap:
+def _direction_map(model, target, source) -> DirectionMap:
     directions = {}
     for reaction in model.reactions:
-        delta = reference.get(reaction.id) - source.get(reaction.id)
+        delta = target.get(reaction.id) - source.get(reaction.id)
         directions[reaction.id] = 1 if delta > 1e-3 else (-1 if delta < -1e-3 else 0)
     return DirectionMap(directions=directions, metadata={"origin": "pfba delta"})
 
@@ -216,6 +216,36 @@ def _strain_design_model() -> Model:
     return model
 
 
+def _directional_metadata(service: str) -> dict[str, object]:
+    """Exercise transform/revert provenance on a real reroute small enough for restricted MIQP."""
+
+    model = _comparison_model()
+    source = reference_state_pfba(model, name="source")  # pFBA uses the short R2 branch
+    with model:
+        model.reactions.R2.upper_bound = 0.0
+        target = reference_state_pfba(model, name="target")  # forced R3 -> R5 reroute
+    targets = [gene.id for gene in model.genes]
+
+    if service == "transformation_targets":
+        return dict(
+            transformation_targets(
+                model, source, target, method="moma", targets=targets
+            ).metadata
+        )
+    if service == "revert_targets":
+        return dict(
+            revert_targets(
+                model,
+                None,
+                source,
+                _direction_map(model, target, source),
+                targets=targets,
+                method="rmta",
+            ).metadata
+        )
+    raise AssertionError(f"unsupported directional provenance service: {service}")
+
+
 def _metadata(service: str, model) -> dict[str, object]:
     """Run one service with the smallest arguments that still exercise it."""
 
@@ -250,6 +280,9 @@ def _metadata(service: str, model) -> dict[str, object]:
             }
         )
         return dict(predict_condition_fluxes(model, table, method="lad").metadata)
+
+    if service in {"transformation_targets", "revert_targets"}:
+        return _directional_metadata(service)
 
     if service in {
         "moma",
@@ -293,28 +326,6 @@ def _metadata(service: str, model) -> dict[str, object]:
             model, [r.id for r in model.reactions][:3]
         )
         return dict(batch_comparison(model, flux_reference, perturbations).metadata)
-
-    with model:
-        model.reactions.EX_o2_e.lower_bound = -5.0
-        source = reference_state_pfba(model, name="source")
-    targets = [gene.id for gene in model.genes][:6]
-    if service == "transformation_targets":
-        return dict(
-            transformation_targets(
-                model, source, reference, method="moma", targets=targets
-            ).metadata
-        )
-    if service == "revert_targets":
-        return dict(
-            revert_targets(
-                model,
-                None,
-                reference,
-                _direction_map(model, reference, source),
-                targets=targets,
-                method="rmta",
-            ).metadata
-        )
 
     # OptKnock/RobustKnock delegate the bilevel MILP to the optional ``straindesign``
     # package, as in ``tests/test_strain_design.py``.

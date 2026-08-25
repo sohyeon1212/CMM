@@ -61,6 +61,15 @@ both repository binaries and source builds and tests the restored result; it doe
 source-only installation. The build toolchains prepare and support source fallback without
 claiming that every matrix run actually compiled a package.
 
+The 80% branch-coverage requirement applies to the union of the public runtime surfaces, not to
+each capability-limited shard in isolation. The Linux 3.12 general job, restricted-license
+solver job, and locked-R publication job each upload their coverage data only after their tests
+pass. A final coverage job combines those three datasets and enforces `--fail-under=80`. It also
+depends on the complete cross-platform matrices, so combining coverage does not make an OS test
+optional. This partition preserves the solver-neutral matrix and exact R lock checks while
+preventing expected QP/MIQP deselection or R-package skips from being misreported as a product-
+wide coverage regression.
+
 The current `renv.lock` records exact versions and CRAN sources but has no per-package `Hash`
 fields. A clean renv 1.1.4 restore/snapshot audit did not provide a safe Hash-only round trip:
 the canonical snapshot omitted records that were not fully materialized in its isolated

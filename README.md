@@ -345,6 +345,13 @@ uvx --from cffconvert==2.0.0 cffconvert --validate
 uv build && uvx twine check dist/*
 ```
 
+CI keeps every Linux, Windows, and macOS test shard required, but evaluates the 80% branch-
+coverage policy once over the combined Linux 3.12 evidence from the solver-neutral suite, the
+restricted-license QP/MIQP suite, and the locked-R publication suite. Capability-specific
+deselection or an unavailable R installation therefore cannot turn a successful platform test
+shard into a misleading coverage failure, while the combined public and publication surface
+must still meet the same threshold.
+
 The exact evidence, method contracts, references, provenance schema, and limitations are in
 [Scientific validation and reproducibility](docs/VALIDATION.md). Passing these checks
 supports implementation correctness; it does not constitute wet-lab validation of a new
