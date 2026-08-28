@@ -77,7 +77,7 @@ without it — see the run contract in `AGENTS.md`.
 
 ### Complete transformation workflow — `cmm.workflows.transformation`
 
-Use this boundary for an end-to-end SC-04 request — "which knockout moves this state toward
+Use this boundary for an end-to-end SC-02 request — "which knockout moves this state toward
 that one" — and the individual functions below when the request names one analysis.
 
 ```python

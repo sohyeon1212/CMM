@@ -145,7 +145,10 @@ def _run_transformation(args: argparse.Namespace) -> int:
     summary = result.summary()
     payload: dict[str, object] = {"run_directory": str(result.run_directory)}
     if not args.analysis_only:
-        from cmm.reporting import render_transformation_report
+        from cmm.reporting import (
+            render_transformation_report,
+            validate_transformation_run,
+        )
 
         report = render_transformation_report(
             result.run_directory, highlight=args.highlight
@@ -154,6 +157,9 @@ def _run_transformation(args: argparse.Namespace) -> int:
         # The copy to send someone: the linked page loses every figure once it is moved.
         payload["report_standalone_html"] = str(report.report_standalone_html)
         payload["figures"] = [str(path) for path in report.figures]
+        # A rendered page is not a finished run. Same gate the CLI's report subcommand applies.
+        validation = validate_transformation_run(result.run_directory)
+        payload["validation"] = _validation_payload(validation)
     print(
         json.dumps(
             {
@@ -171,22 +177,60 @@ def _run_transformation(args: argparse.Namespace) -> int:
     return 0
 
 
+def _workflow_of(run_dir: str | Path) -> str:
+    """Read the run's own workflow id, so the caller never has to name it.
+
+    A run directory already says what it is. Asking for a flag would make it possible to
+    validate a transformation run against the production gate, which reports a long list of
+    missing production artifacts instead of the one useful fact.
+    """
+
+    manifest = Path(run_dir).expanduser().resolve() / "00_manifest.json"
+    if not manifest.is_file():
+        return "unknown"
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return "unknown"
+    return (
+        str(payload.get("workflow", "unknown"))
+        if isinstance(payload, dict)
+        else "unknown"
+    )
+
+
 def _run_report(args: argparse.Namespace) -> int:
-    from cmm.reporting import render_production_report, validate_production_run
+    from cmm.reporting import (
+        render_production_report,
+        render_transformation_report,
+        validate_production_run,
+        validate_transformation_run,
+    )
+
+    transformation = _workflow_of(args.run_dir) == "transformation_target_discovery"
 
     if args.report_command == "render":
+        if transformation:
+            report = render_transformation_report(args.run_dir)
+            print(report.report_html)
+            print(report.report_standalone_html)
+            return 0
         bundle = render_production_report(args.run_dir, renderer=args.renderer)
         print(bundle.report.report_html)
         print(bundle.report.report_standalone_html)
         return 0
 
-    validation = validate_production_run(args.run_dir)
+    validation = (
+        validate_transformation_run(args.run_dir)
+        if transformation
+        else validate_production_run(args.run_dir)
+    )
     payload = _validation_payload(validation)
     if args.as_json:
         print(json.dumps(payload, indent=2))
     elif validation.valid:
-        validated = validation.raise_for_errors()
-        print(f"valid schema-v2 production run: {validated.root}")
+        kind = "transformation" if transformation else "production"
+        print(f"valid schema-v2 {kind} run: {Path(args.run_dir).resolve()}")
         for warning in validation.warnings:
             print(f"warning: {warning}")
     else:

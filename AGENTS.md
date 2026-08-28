@@ -125,9 +125,10 @@ The canonical SC-01 workflow is stricter: its single-knockout comparison require
 ROOM so the two requested methods stay comparable. It fails its capability gate when QP or
 MILP is missing; it does not silently replace MOMA-L2 with MOMA-L1. OptKnock/RobustKnock also
 require importable `straindesign`; require Java only if the selected backend reports that it
-needs it. The `nature-r` report renderer separately requires `Rscript` and loadable renderer
-packages; compatible minima come from package metadata, while exact versions come from
-`renv.lock` and are asserted in CI.
+needs it. Both workflows' report renderers require `Rscript` and loadable renderer packages; compatible
+minima come from package metadata, while exact versions come from `renv.lock` and are asserted
+in CI. That gate is on rendering only — either workflow's `--analysis-only` mode writes its
+full run bundle without R.
 
 ---
 

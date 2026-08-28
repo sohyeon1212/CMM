@@ -7,18 +7,10 @@ schema, a dedicated validator, a publication renderer, a thin CLI, and regressio
 
 > **Current shipped boundary**
 >
-> CMM ships two canonical workflows, and they are worth reading against each other because
-> they answer the same structural questions differently:
->
-> | | SC-01 production | SC-04 transformation |
-> |---|---|---|
-> | renderer | R, via `renderer="nature-r"` | pure Python + matplotlib |
-> | validator | `validate_production_run` | none yet |
-> | reproduce/render/validate scripts | written into `scripts/` | not written |
->
-> **Neither is the template.** SC-01 is the fuller reference — it is the one with a validator
-> and a scripts directory — while SC-04 shows the smaller shape a workflow can take when its
-> panels have no R counterpart. Names such as `MyWorkflowConfig`, `MyWorkflowResult`,
+> CMM ships two canonical workflows, SC-01 production-target discovery and SC-02
+> transformation-target discovery. Both implement the full contract this tutorial describes —
+> an R renderer, a dedicated validator, and a replayable `scripts/` directory — so either can
+> be read as a reference. Names such as `MyWorkflowConfig`, `MyWorkflowResult`,
 > `run_my_workflow`, `render_my_workflow_report`, and `validate_my_workflow_run` below are
 > deliberately generic placeholders. They are not installed, importable, or available as CLI
 > commands in the current package.
@@ -796,7 +788,7 @@ predictions remain *in silico* hypotheses until independently tested.
 ## Reference implementation and supporting documents
 
 - [SC-01 production-target discovery](../scenarios/SC-01-production-target-discovery.md)
-- [SC-04 transformation-target discovery](../scenarios/SC-04-transformation-target-discovery.md)
+- [SC-02 transformation-target discovery](../scenarios/SC-02-transformation-target-discovery.md)
 - [Production workflow source](../../src/cmm/workflows/production.py)
 - [Transformation workflow source](../../src/cmm/workflows/transformation.py)
 - [Transformation report renderer](../../src/cmm/reporting/transformation.py)

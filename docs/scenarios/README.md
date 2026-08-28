@@ -7,7 +7,7 @@ capability gates. Read the section here when a result needs interpreting.
 | Workflow | Run it from | Read this for |
 |---|---|---|
 | Production targets | `.agents/skills/cmm-production-engineering/` | [SC-01](SC-01-production-target-discovery.md) |
-| Transformation targets | `.agents/skills/cmm-transformation-engineering/` | [SC-04](SC-04-transformation-target-discovery.md) |
+| Transformation targets | `.agents/skills/cmm-transformation-engineering/` | [SC-02](SC-02-transformation-target-discovery.md) |
 
 Read `docs/agent-reference.md` for signatures when writing narrow API calls. To change workflow
 parameters or compose a downstream study, follow
@@ -20,7 +20,7 @@ a second installed workflow should use the
 | ID | Goal | Requires | Minimum solver | Key outputs |
 |---|---|---|---|---|
 | [SC-01](SC-01-production-target-discovery.md) | Increase production of a target metabolite, and design a strain where it is guaranteed | confirmed model, product exchange, condition | **QP + MILP**; strain design also needs importable `straindesign` | MOMA/ROOM single-deletion candidates, OptKnock/RobustKnock designs, FSEOF/FVSEOF targets, forward validation |
-| [SC-04](SC-04-transformation-target-discovery.md) | Rank knockouts that move a source metabolic state toward a target state | confirmed model, source and target expression, condition | **MIQP** — no LP or QP substitute exists | ranked candidates with their transformation scores, the MOMA baseline, optional epsilon sensitivity |
+| [SC-02](SC-02-transformation-target-discovery.md) | Rank knockouts that move a source metabolic state toward a target state | confirmed model, source and target expression, condition | **MIQP** — no LP or QP substitute exists | ranked candidates with their transformation scores, the MOMA baseline, optional epsilon sensitivity |
 
 Each is scientifically complete on its own and neither is a prerequisite for the other. Both
 supply their report and artifact contract automatically.
@@ -38,7 +38,7 @@ Both workflows share the same preflight and reporting contracts:
 
 ```
    _preflight ─┬─►  production skill  ─►  SC-01 numbers  ─┬─► _reporting
-               └─►  transformation skill ─► SC-04 numbers ─┘
+               └─►  transformation skill ─► SC-02 numbers ─┘
 ```
 
 - **SC-01 is the spine of a production goal.** Its single-knockout step evaluates every
@@ -47,7 +47,7 @@ Both workflows share the same preflight and reporting contracts:
   These outputs answer different questions and remain separate tables and figure panels.
 - **A coupling-only request enters SC-01 at the strain-design step** and skips single-deletion
   and amplification analyses unless the user asks for them.
-- **SC-04 asks the inverse question.** Instead of pushing flux toward a product it ranks the
+- **SC-02 asks the inverse question.** Instead of pushing flux toward a product it ranks the
   knockout that best moves one measured state toward another. It is complete on its own and is
   not a step of SC-01.
 - **Neither workflow silently downgrades.** A missing QP, MILP, MIQP, importable

@@ -15,16 +15,23 @@ obsolete internal planning documents are removed from the public source tree.
   MIQP, transformation score and Equation 9 are `revert_targets`, the MOMA baseline is
   `transformation_targets`, and the reference state is E-Flux2 or LAD. Six stages write the
   same schema-v2 run bundle SC-01 does, so one manifest format and one path-discovery surface
-  serve both. Shipped with [`SC-04`](docs/scenarios/SC-04-transformation-target-discovery.md)
+  serve both. Shipped with [`SC-02`](docs/scenarios/SC-02-transformation-target-discovery.md)
   and the `cmm-transformation-engineering` skill, whose interview confirms on every run which
   file is the source — nothing in the model can detect a swap, and the reversed run is a
   correct answer to a different question.
-- **A report renderer for transformation runs**, `cmm.reporting.render_transformation_report`,
-  wired into `cmm transformation-targets` unless `--analysis-only` is passed. Three matplotlib
-  figures — score against rank, transformation rank against the MOMA baseline, and rank against
-  epsilon — and a self-contained HTML page, built in Python with no R dependency, since the
-  production report's `nature-r` backend draws panels a transformation run has no counterpart
-  for. The page states in its own body what a reader would otherwise have to dig out of the
+- **A report renderer and a completion gate for transformation runs.**
+  `cmm.reporting.render_transformation_report` draws three panels — score against rank,
+  transformation rank against the MOMA baseline, and rank against epsilon — through
+  `render_transformation_figures.R`, the same checked-in R/ggplot2 path SC-01 uses, and writes
+  the same artifact pair: a linked `report.html` and a `report_standalone.html` carrying every
+  figure as a data URI, with 300-DPI PNG plus editable SVG and PDF for each panel.
+  `validate_transformation_run` is the completion gate: it checks each declared artifact
+  against its recorded hash and size, that the ranking is ordered 1..N by descending score,
+  that a skipped stage records why, and that the standalone page carries every image it
+  references. A page that opens is not evidence a run finished, and each of those failures
+  looks like success in a browser. `cmm report render` and `cmm report validate` read the
+  run's own manifest to tell the two workflows apart, so neither has to be told which it is.
+  The page states in its own body what a reader would otherwise have to dig out of the
   provenance: that the reference state is not the published iMAT one, that epsilon was chosen
   rather than derived, that the candidate
   count is the denominator of any percentile claim, and that source and target are an input

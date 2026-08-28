@@ -347,6 +347,7 @@ _STAGE_DIRECTORIES = (
     "05_transformation",
     "06_validation",
     "model",
+    "scripts",
 )
 
 
@@ -752,6 +753,103 @@ def run_transformation_target_discovery(
     return _export(result, genes, model)
 
 
+def _write_reproduction_scripts(
+    writer: Any,
+    result: TransformationWorkflowResult,
+    *,
+    root: Path,
+    model_relative: str,
+) -> None:
+    """Write the three entry points that make the directory replayable on its own.
+
+    Months later the run directory is all that survives; a bundle that cannot say how to
+    re-run, re-render or re-check itself leaves that to whoever finds it.
+    """
+
+    from dataclasses import asdict
+
+    from cmm.workflows._bundle import _jsonable
+
+    config_payload = cast(dict[str, object], _jsonable(asdict(result.config)))
+    config_payload["model_path"] = f"../{model_relative}"
+    config_payload["output_dir"] = f"../../{root.name}__reproduced"
+    config_payload["overwrite"] = False
+    writer.json(
+        "scripts/transformation_config.json",
+        config_payload,
+        stage="scripts",
+        role="reproduction_config",
+    )
+    writer.text(
+        "scripts/reproduce.py",
+        """#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from dataclasses import replace
+from pathlib import Path
+
+from cmm.workflows.transformation import (
+    TransformationWorkflowConfig,
+    run_transformation_target_discovery,
+)
+
+HERE = Path(__file__).resolve().parent
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Reproduce this CMM transformation run")
+    parser.add_argument("--output-dir", type=Path, help="Override the sibling output directory")
+    args = parser.parse_args()
+    config = TransformationWorkflowConfig.from_json(HERE / "transformation_config.json")
+    if args.output_dir is not None:
+        config = replace(config, output_dir=args.output_dir.resolve(), overwrite=False)
+    result = run_transformation_target_discovery(config)
+    print(result.run_directory)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""",
+        stage="scripts",
+        role="reproduce_script",
+        executable=True,
+    )
+    writer.text(
+        "scripts/render.py",
+        """#!/usr/bin/env python3
+from pathlib import Path
+
+from cmm.reporting import render_transformation_report
+
+RUN_DIR = Path(__file__).resolve().parents[1]
+report = render_transformation_report(RUN_DIR)
+print(report.report_standalone_html)
+""",
+        stage="scripts",
+        role="render_script",
+        executable=True,
+    )
+    writer.text(
+        "scripts/validate.py",
+        """#!/usr/bin/env python3
+import json
+from pathlib import Path
+
+from cmm.reporting import validate_transformation_run
+
+RUN_DIR = Path(__file__).resolve().parents[1]
+report = validate_transformation_run(RUN_DIR)
+print(json.dumps({"valid": report.valid, "issues": report.issues, "warnings": report.warnings}, indent=2))
+raise SystemExit(0 if report.valid else 1)
+""",
+        stage="scripts",
+        role="validate_script",
+        executable=True,
+    )
+
+
 def _moma_baseline(model, reference, target_expression, candidates, config):
     """The MOMA comparison Yizhak et al. report as markedly inferior to MTA.
 
@@ -970,6 +1068,10 @@ def _export(
         "00_provenance.json", dict(result.provenance), stage="root", role="provenance"
     )
     writer.json("00_summary.json", result.summary(), stage="root", role="summary")
+
+    _write_reproduction_scripts(
+        writer, result, root=root, model_relative=model_relative
+    )
 
     manifest_record = ArtifactRecord(
         path="00_manifest.json",

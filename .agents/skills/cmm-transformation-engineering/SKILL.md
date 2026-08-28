@@ -51,7 +51,13 @@ artifacts.
 
 ```bash
 cmm transformation-targets --config CONFIG
+cmm transformation-targets --config CONFIG --analysis-only
+cmm report render RUN_DIR
+cmm report validate RUN_DIR --json
 ```
+
+Without `--analysis-only`, `transformation-targets` runs the analysis, renders the report and
+validates the run. `cmm report` reads the run's own manifest to tell the two workflows apart.
 
 The CLI config is UTF-8 JSON loaded by `TransformationWorkflowConfig.from_json`; relative model
 and output paths resolve from the config file's directory. The equivalent Python boundary is
@@ -68,6 +74,9 @@ Use direct documented CMM analyses only when the user narrows the request to one
 - **rMTA costs about three solves per candidate against MTA's one.** Say so before launching a
   genome-scale run, and let the user choose rather than picking for them.
 - E-Flux2 needs QP; LAD runs on any LP solver. Neither choice relaxes the MIQP requirement.
+- **The report renderer needs `Rscript` and its packages.** That gate is on rendering only —
+  `--analysis-only` writes the full run bundle without R. Treat a missing package or a nonzero
+  R exit as a report failure, not something to work around by drawing the figures another way.
 - Run the workflow preflight before expensive analyses. Never silently change a method.
 
 ## Disclose what is not the published pipeline
@@ -96,6 +105,12 @@ single-measurement data, and say that the published test was not applied.
 
 ## Validate before handoff
 
+Run `validate_transformation_run` and do not call the run complete while it reports errors. A
+report that opens is not evidence the run finished — it can cite figures that are absent or a
+CSV that changed after the render, and both look like success in a browser. Then inspect the
+standalone HTML rather than `report.html`: that is the copy a reader receives, and a figure
+missing from it is blank space with no error. Each figure needs SVG and PDF beside its PNG.
+
 - **The candidate count is the denominator of any "ranked in the top *N*%" statement.** Report
   how the set was built — blocked removed, essential removed, coupled sets or blocked-reaction
   signatures — alongside the count. Never quote a percentile without it.
@@ -109,9 +124,6 @@ single-measurement data, and say that the published test was not applied.
 - For rMTA, report `bTS`, `mTS` and `wTS` per candidate, not only `rTS`. Equation 9 branches on
   their signs and a reader cannot reconstruct which branch fired from the combined score.
 - Preserve infeasible and lethal knockouts as results with their status, not as omissions.
-- Open the **standalone** report, not just `report.html`, and confirm every figure renders.
-  That is the copy the user forwards, and a missing figure in it is blank space with no error.
-  Each figure must also have SVG and PDF beside its 300-DPI PNG.
 
 Describe predictions as *in silico* hypotheses requiring experimental validation. rMTA is a
 prioritisation robustified by its worst-case term, not a proof. Reactions ranked near the true
@@ -133,7 +145,7 @@ et al. (2019) additionally for rMTA. Neither originates in CMM.
 For details, read only the relevant sections of:
 
 - [`AGENTS.md`](../../../AGENTS.md) for routing and shipped-feature boundaries.
-- [`SC-04`](../../../docs/scenarios/SC-04-transformation-target-discovery.md) for scientific
+- [`SC-02`](../../../docs/scenarios/SC-02-transformation-target-discovery.md) for scientific
   roles and interpretation.
 - [`_reporting.md`](../../../docs/scenarios/_reporting.md) for the artifact contract.
 - [`agent-reference.md`](../../../docs/agent-reference.md) for public signatures.

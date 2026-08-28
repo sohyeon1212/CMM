@@ -416,7 +416,10 @@ def test_refusing_to_overwrite_a_non_empty_directory(tmp_path, transformation_in
 def test_report_renders_figures_and_states_what_it_must(
     tmp_path, transformation_inputs
 ):
-    from cmm.reporting import render_transformation_report
+    from cmm.reporting import (
+        render_transformation_report,
+        validate_transformation_run,
+    )
 
     model_path, source, target = transformation_inputs
     output = tmp_path / "run"
@@ -437,9 +440,9 @@ def test_report_renders_figures_and_states_what_it_must(
 
     assert report.report_html.is_file()
     names = {path.name for path in report.figures}
-    assert "ranking.png" in names
-    assert "ranking_vs_moma.png" in names
-    assert "epsilon_sensitivity.png" in names
+    assert "fig01_transformation_ranking.png" in names
+    assert "fig02_ranking_vs_moma.png" in names
+    assert "fig03_epsilon_sensitivity.png" in names
     for path in report.figures:
         assert path.stat().st_size > 0
         # Editable vector output beside the raster: a figure that exists only as a PNG has to
@@ -451,7 +454,12 @@ def test_report_renders_figures_and_states_what_it_must(
     # and says nothing about it. The standalone copy is the one that survives being sent.
     standalone = report.report_standalone_html.read_text(encoding="utf-8")
     assert "data:image/png;base64," in standalone
-    assert "figures/" not in standalone
+    assert "src='figures/" not in standalone
+
+    # A rendered page is not a finished run; the gate is what says so.
+    validation = validate_transformation_run(result.run_directory)
+    assert validation.valid, validation.issues
+    assert validation.phase == "post-render"
 
     page = report.report_html.read_text(encoding="utf-8")
     # A reader must not have to open the provenance file to learn any of these.
@@ -522,3 +530,93 @@ def test_report_refuses_a_directory_with_no_manifest(tmp_path):
 
     with pytest.raises(TransformationReportError, match="no 00_manifest.json"):
         render_transformation_report(tmp_path)
+
+
+@pytest.mark.requires_miqp
+def test_completion_gate_catches_the_failures_a_browser_shows_as_success(
+    tmp_path, transformation_inputs
+):
+    """Each of these renders as a page that opens, which is why the gate exists."""
+
+    import re
+    import shutil
+
+    from cmm.reporting import render_transformation_report, validate_transformation_run
+
+    model_path, source, target = transformation_inputs
+    config = TransformationWorkflowConfig(
+        model_path=model_path,
+        source_expression_path=source,
+        target_expression_path=target,
+        output_dir=tmp_path / "run",
+        method="mta",
+        perturbation="reaction",
+        epsilon=0.01,
+        direction=DirectionConfig(top_n_changed=20),
+        candidates=CandidateConfig(explicit=("PGI", "PFK", "TPI")),
+    )
+    result = run_transformation_target_discovery(config)
+    render_transformation_report(result.run_directory)
+    assert validate_transformation_run(result.run_directory).valid
+
+    def mutated(name: str, mutate) -> tuple[bool, tuple[str, ...]]:
+        copy = tmp_path / name
+        shutil.rmtree(copy, ignore_errors=True)
+        shutil.copytree(result.run_directory, copy)
+        mutate(copy)
+        report = validate_transformation_run(copy)
+        return report.valid, report.issues
+
+    # A CSV edited after the run: every number the report quotes is now unattributable.
+    valid, issues = mutated(
+        "edited",
+        lambda root: (root / "05_transformation/transformation_ranking.csv").write_text(
+            (root / "05_transformation/transformation_ranking.csv")
+            .read_text()
+            .replace("PGI", "XXX"),
+            encoding="utf-8",
+        ),
+    )
+    assert not valid and any("sha256" in issue for issue in issues)
+
+    # A figure the manifest still claims was drawn. The page shows an empty box.
+    valid, issues = mutated(
+        "no_png",
+        lambda root: (root / "figures/fig01_transformation_ranking.png").unlink(),
+    )
+    assert not valid and any("missing non-empty png" in issue for issue in issues)
+
+    # The standalone copy pointing at a file that will not travel with it.
+    valid, issues = mutated(
+        "delinked",
+        lambda root: (root / "report_standalone.html").write_text(
+            re.sub(
+                r"src='data:image/png;base64,[^']*'",
+                "src='figures/fig01_transformation_ranking.png'",
+                (root / "report_standalone.html").read_text(encoding="utf-8"),
+                count=1,
+            ),
+            encoding="utf-8",
+        ),
+    )
+    assert not valid and any("does not carry" in issue for issue in issues)
+
+
+def test_report_refuses_a_production_run_directory(tmp_path):
+    from cmm.reporting import validate_transformation_run
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "00_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "workflow": "production_target_discovery",
+                "artifacts": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = validate_transformation_run(run)
+    assert not report.valid
+    assert any("not a transformation_target_discovery run" in i for i in report.issues)

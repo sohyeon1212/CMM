@@ -1,5 +1,5 @@
 ---
-id: SC-04
+id: SC-02
 title: Transformation target discovery
 goal: Find knockouts that move a source metabolic state toward a target state
 when_to_use:
@@ -17,12 +17,13 @@ optional_inputs_from:
   - "a resolved biological condition from an omics comparison"
 solver:
   canonical_workflow: "MIQP for MTA and rMTA; there is no LP or QP substitute"
-renderer: "matplotlib figures (PNG/SVG/PDF) and linked plus self-contained HTML, built in Python; no R dependency"
+renderer: "nature-r, the same R/ggplot2 path SC-01 uses; PNG/SVG/PDF figures plus linked and self-contained HTML"
 steps: [preflight, reference, direction, candidates, transformation, validation]
+completion_gate: "validate_transformation_run; a rendered page is not a finished run"
 runtime: "minutes on a core model; hours on a genome-scale model, and about 3x that for rMTA"
 ---
 
-# SC-04 — Transformation target discovery
+# SC-02 — Transformation target discovery
 
 ## Objective
 
@@ -154,10 +155,13 @@ derivation. Both source papers report such an analysis.
 ## Report
 
 `cmm transformation-targets` renders the report unless `--analysis-only` is given; the same
-page is available as `cmm.reporting.render_transformation_report(run_dir, highlight=…)`. It
-draws three figures — score against rank, transformation rank against the MOMA baseline, and
-rank against epsilon when a sweep was configured — each as PNG, SVG and PDF, and writes two
-copies of the page beside them:
+page is available as `cmm.reporting.render_transformation_report(run_dir, highlight=…)`.
+
+Figures come from `render_transformation_figures.R`, the same checked-in R/ggplot2 path SC-01
+uses; the two workflows draw different panels, so each has its own script. Three panels are
+drawn — score against rank, transformation rank against the MOMA baseline, and rank against
+epsilon when a sweep was configured — each as PNG, SVG and PDF, with two copies of the page
+beside them:
 
 | file | figures | use |
 |---|---|---|
@@ -167,8 +171,24 @@ copies of the page beside them:
 **Send the standalone copy.** The linked one renders every figure as blank space once it leaves
 the run directory, and nothing on the page says so.
 
-Unlike SC-01's `nature-r` backend this renderer is pure Python, because the panels a
-transformation run needs have no counterpart in a production report.
+### The completion gate
+
+```bash
+cmm report validate RUN_DIR --json
+```
+
+`validate_transformation_run` is what says the run finished. A page that opens is not evidence:
+it can point at figures that are gone, quote a CSV that was edited after the run, or be stale
+with respect to the figures beside it. Each of those looks like success in a browser. The gate
+checks every declared artifact against its recorded hash and size, that the ranking is ordered
+1..N by descending score, that a skipped stage records why, that every rendered figure has a
+non-empty PNG, SVG and PDF, and that the standalone page carries every image it references.
+
+`cmm report render` and `cmm report validate` read the run's own `00_manifest.json` to decide
+which workflow it belongs to, so neither needs to be told.
+
+**R is required to render, not to analyse.** `Rscript` and the renderer packages are needed for
+the report; `--analysis-only` produces the full run bundle without them.
 
 ## What the report must state
 

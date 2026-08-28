@@ -1,6 +1,6 @@
 # Building or customizing a CMM workflow
 
-CMM ships **two canonical workflows**: SC-01 production-target discovery and SC-04
+CMM ships **two canonical workflows**: SC-01 production-target discovery and SC-02
 transformation-target discovery. Each binds a scientific question to an exact model, explicit
 conditions, solver requirements, typed numerical results, provenance, a report renderer, and an
 artifact directory. An analysis recipe composed over public services is a legitimate way to
@@ -364,7 +364,7 @@ Follow the complete contributor tutorial:
 
 - [Adding a canonical workflow to CMM](tutorials/adding-a-canonical-workflow.md)
 
-That tutorial uses SC-01 and SC-04 as its two shipped references and generic `MyWorkflow...`
+That tutorial uses SC-01 and SC-02 as its two shipped references and generic `MyWorkflow...`
 names for non-installed skeletons. It covers the scientific contract, typed public services, config and
 result types, orchestration, schema and manifest, dedicated validation and R reporting, CLI and
 package exports, documentation, tests, and release criteria.

@@ -1,8 +1,10 @@
 """Report rendering for transformation-target runs.
 
-Figures are matplotlib and the page is built here in Python, so this renderer has no R
-dependency — the production report's ``nature-r`` backend draws production-specific panels
-(yield, envelope, strain design) that have no counterpart in a transformation run.
+Figures come from a checked-in R script and the page is assembled here, which is exactly how
+the production report is built. The two workflows draw different panels, so they have separate
+R scripts, but a reader gets the same artifact contract from either: a linked page, a
+standalone page carrying its figures, a 300-dpi raster plus editable vector per figure, and a
+``report_validation.json`` recording whether the run passed its completion gate.
 
 The page is deliberately opinionated about what it must say. A transformation ranking is easy
 to over-read: it is produced from a reference state that is not the published one, with an
@@ -15,10 +17,20 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import hashlib
 import html
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
+
+from cmm.reporting.schema import ValidationReport
+from cmm.reporting._rscript import (
+    FigureManifest,
+    invoke_renderer,
+    load_figure_manifest,
+    relative_path,
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +43,10 @@ class TransformationReport:
     #: Every figure inlined as a data URI. This is the copy to send someone: the relative-path
     #: copy loses all of its figures the moment it leaves the run directory, and says nothing.
     report_standalone_html: Path
+    #: What the R renderer produced, and what it declined to draw with a stated reason.
+    figure_manifest: Path
+    #: The completion gate's verdict, written beside the report so it travels with the run.
+    report_validation: Path
     figures: tuple[Path, ...]
 
 
@@ -98,26 +114,81 @@ def _table(
     )
 
 
-def render_transformation_report(
+_FIGURE_ORDER = (
+    "fig01_transformation_ranking",
+    "fig02_ranking_vs_moma",
+    "fig03_epsilon_sensitivity",
+)
+#: Only the ranking is unconditional. The MOMA baseline and the epsilon sweep are configurable
+#: stages, and a run that switched one off is a valid run whose figure is legitimately absent —
+#: the manifest records why, which is what keeps "absent" distinguishable from "broken".
+_REQUIRED_FIGURES = frozenset({"fig01_transformation_ranking"})
+
+
+def renderer_script_path() -> Path:
+    """Return the checked-in R renderer used by :func:`render_transformation_figures`."""
+
+    return Path(__file__).with_name("render_transformation_figures.R")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def render_transformation_figures(
     run_dir: str | Path,
     *,
     highlight: str | None = None,
-    top_n: int = 15,
-) -> TransformationReport:
-    """Render figures and a self-contained HTML page from a transformation run bundle.
+    rscript: str | Path = "Rscript",
+    renderer: str | Path | None = None,
+    output_dir: str = "figures",
+) -> FigureManifest:
+    """Render the run's artwork with checked-in R code and return its manifest."""
 
-    ``highlight`` names a candidate to mark throughout — the knockout under test in a
-    validation run, or the one a user came to check.
-    """
-
-    from cmm.visualization.figures import (
-        epsilon_sensitivity_figure,
-        save_figure,
-        transformation_ranking_figure,
-        transformation_vs_moma_figure,
+    root = _validated_root(run_dir)
+    script = (
+        Path(renderer) if renderer is not None else renderer_script_path()
+    ).expanduser()
+    script = script.resolve()
+    figures_dir = relative_path(
+        root,
+        output_dir,
+        label="figure output directory",
+        error_type=TransformationReportError,
+    )
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    figure_manifest_path = figures_dir / "figure_manifest.json"
+    invoke_renderer(
+        script=script,
+        script_sha256=_sha256(script) if script.is_file() else "unknown",
+        run_dir=root,
+        manifest_path=root / "00_manifest.json",
+        figures_dir=figures_dir,
+        figure_manifest_path=figure_manifest_path,
+        rscript=rscript,
+        error_type=TransformationReportError,
+        label="R transformation renderer",
+        # Which candidate to mark is a reading choice, so it reaches R the same way the font
+        # does rather than being written into the run bundle.
+        extra_environment={"CMM_TRANSFORMATION_HIGHLIGHT": highlight or ""},
+    )
+    return load_figure_manifest(
+        figure_manifest_path,
+        root,
+        required=_REQUIRED_FIGURES,
+        order=_FIGURE_ORDER,
+        error_type=TransformationReportError,
     )
 
-    root = Path(run_dir).resolve()
+
+def _validated_root(run_dir: str | Path) -> Path:
+    """Resolve a run directory, refusing anything that is not a transformation bundle."""
+
+    root = Path(run_dir).expanduser().resolve()
     manifest_path = root / "00_manifest.json"
     if not manifest_path.is_file():
         raise TransformationReportError(f"no 00_manifest.json in {root}")
@@ -126,6 +197,13 @@ def render_transformation_report(
         raise TransformationReportError(
             f"{root} is a {manifest.get('workflow')!r} run, not a transformation run"
         )
+    return root
+
+
+def _load_bundle(root: Path) -> dict[str, Any]:
+    """Read every table and sidecar the page is built from, in one place."""
+
+    manifest = _read_json(root / "00_manifest.json")
     artifacts = manifest["artifacts"]
 
     def path_for(role: str) -> Path | None:
@@ -146,8 +224,6 @@ def render_transformation_report(
             )
         return path
 
-    summary = _read_json(required_path("summary"))
-    provenance = _read_json(required_path("provenance"))
     ranking = _read_csv(required_path("transformation_ranking"))
     if not ranking:
         raise TransformationReportError("the run contains an empty ranking")
@@ -170,83 +246,129 @@ def render_transformation_report(
         row["epsilon"] = float(row["epsilon"])
         row["rank"] = int(row["rank"])
 
-    figures_dir = root / "figures"
-    figures_dir.mkdir(exist_ok=True)
-    written: list[Path] = []
+    return {
+        "manifest": manifest,
+        "artifacts": artifacts,
+        "summary": _read_json(required_path("summary")),
+        "provenance": _read_json(required_path("provenance")),
+        "ranking": ranking,
+        "baseline": baseline,
+        "sweep": sweep,
+    }
 
-    def emit(figure, stem: str) -> None:
-        """Write one panel as raster and as vector.
 
-        The PNG is what the page shows; the SVG and PDF are what a manuscript needs, and a
-        figure that only exists as a raster has to be redrawn to be used anywhere else.
-        """
+def render_transformation_report(
+    run_dir: str | Path,
+    *,
+    highlight: str | None = None,
+    top_n: int = 15,
+    rscript: str | Path = "Rscript",
+    renderer: str | Path | None = None,
+) -> TransformationReport:
+    """Render figures through R, then build both report variants and the validation record.
 
-        for suffix in ("png", "svg", "pdf"):
-            path = save_figure(figure, figures_dir / f"{stem}.{suffix}")
-            if suffix == "png":
-                written.append(path)
+    ``highlight`` names a candidate to mark throughout — the knockout under test in a
+    validation run, or the one a user came to check.
+    """
 
-    emit(
-        transformation_ranking_figure(ranking, highlight=highlight, top_n=10), "ranking"
+    root = _validated_root(run_dir)
+    figure_manifest = render_transformation_figures(
+        root, highlight=highlight, rscript=rscript, renderer=renderer
     )
-    if baseline:
-        emit(
-            transformation_vs_moma_figure(ranking, baseline, highlight=highlight),
-            "ranking_vs_moma",
-        )
-    if sweep:
-        emit(
-            epsilon_sensitivity_figure(sweep, highlight=highlight),
-            "epsilon_sensitivity",
-        )
+    bundle = _load_bundle(root)
 
     html_text = _compose(
         root=root,
-        summary=summary,
-        provenance=provenance,
-        ranking=ranking,
-        baseline=baseline,
-        sweep=sweep,
-        figures=written,
+        summary=bundle["summary"],
+        provenance=bundle["provenance"],
+        artifacts=bundle["artifacts"],
+        ranking=bundle["ranking"],
+        baseline=bundle["baseline"],
+        sweep=bundle["sweep"],
+        figure_manifest=figure_manifest,
         highlight=highlight,
         top_n=top_n,
+        standalone=False,
     )
     report_path = root / "report.html"
     report_path.write_text(html_text, encoding="utf-8")
+
+    standalone_text = _compose(
+        root=root,
+        summary=bundle["summary"],
+        provenance=bundle["provenance"],
+        artifacts=bundle["artifacts"],
+        ranking=bundle["ranking"],
+        baseline=bundle["baseline"],
+        sweep=bundle["sweep"],
+        figure_manifest=figure_manifest,
+        highlight=highlight,
+        top_n=top_n,
+        standalone=True,
+    )
     standalone_path = root / "report_standalone.html"
-    standalone_path.write_text(_standalone(html_text, root), encoding="utf-8")
+    standalone_path.write_text(_assert_embedded(standalone_text), encoding="utf-8")
+
+    rendered = tuple(
+        root / str(figure["outputs"]["png"])
+        for figure in figure_manifest.figures
+        if figure.get("status") == "rendered"
+    )
+    validation_path = _write_report_validation(root, figure_manifest)
     return TransformationReport(
         run_directory=root,
         report_html=report_path,
         report_standalone_html=standalone_path,
-        figures=tuple(written),
+        figure_manifest=figure_manifest.path,
+        report_validation=validation_path,
+        figures=rendered,
     )
 
 
-def _standalone(html_text: str, root: Path) -> str:
-    """Rewrite the page so every figure travels inside it.
+def _write_report_validation(root: Path, figure_manifest: FigureManifest) -> Path:
+    """Record what was rendered, so a later validator can detect a stale report."""
 
-    ``report.html`` points at ``figures/*.png`` by relative path, which is right for reading the
-    run in place and useless the moment the file is sent to someone: the images resolve against
-    wherever the copy landed, and a browser renders the missing ones as blank space without
-    saying anything. This produces the copy that survives being detached from its directory.
+    rendered = [
+        figure["id"]
+        for figure in figure_manifest.figures
+        if figure.get("status") == "rendered"
+    ]
+    unavailable = {
+        str(figure["id"]): str(figure.get("reason", ""))
+        for figure in figure_manifest.figures
+        if figure.get("status") != "rendered"
+    }
+    payload = {
+        "schema_version": 2,
+        "workflow": "transformation_target_discovery",
+        "render": "succeeded",
+        "figures_rendered": rendered,
+        "figures_unavailable": unavailable,
+        "renderer": dict(figure_manifest.renderer),
+    }
+    path = root / "report_validation.json"
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
-    Raises if any relative reference survives, because that is precisely the failure that is
-    invisible in the rendered output.
+
+def _assert_embedded(html_text: str) -> str:
+    """Refuse to write a standalone page that would render with a figure missing.
+
+    This is the failure the reporting contract singles out as invisible: a relative ``src``
+    resolves against wherever the copy landed, so the browser draws blank space and reports
+    nothing. Checking the image sources — not the whole document — is the point, because the
+    page deliberately prints artifact paths as text and those must stay readable.
     """
 
-    out = html_text
-    for png in sorted((root / "figures").glob("*.png")):
-        encoded = base64.b64encode(png.read_bytes()).decode("ascii")
-        out = out.replace(
-            f"src='figures/{png.name}'", f"src='data:image/png;base64,{encoded}'"
-        )
-    if "figures/" in out:
-        raise ValueError(
-            "standalone report still references a figure by relative path; "
-            "it would render with that figure silently missing"
-        )
-    return out
+    for source in re.findall(r"<img[^>]*\ssrc='([^']*)'", html_text):
+        if not source.startswith("data:image/png;base64,"):
+            raise TransformationReportError(
+                f"standalone report references an image it does not carry: {source[:60]}"
+            )
+    return html_text
 
 
 def _compose(
@@ -254,18 +376,72 @@ def _compose(
     root: Path,
     summary: Mapping[str, Any],
     provenance: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
     ranking: Sequence[Mapping[str, Any]],
     baseline: Sequence[Mapping[str, Any]],
     sweep: Sequence[Mapping[str, Any]],
-    figures: Sequence[Path],
+    figure_manifest: FigureManifest,
     highlight: str | None,
     top_n: int,
+    standalone: bool,
 ) -> str:
+    """Build one variant of the page.
+
+    The two variants differ only in how they reference things that live outside the file:
+    ``standalone`` embeds each figure as a data URI and renders artifact paths as plain
+    filenames, because a dead link is worse than no link once the page has been moved.
+    """
+
     e = html.escape
     method = str(summary.get("method", "?")).upper()
     construction = summary.get("candidate_construction") or {}
     direction = summary.get("direction_construction") or {}
-    figure_names = {path.name for path in figures}
+    by_id = {str(figure["id"]): figure for figure in figure_manifest.figures}
+
+    def panel(figure_id: str) -> str:
+        """Render one figure, or say plainly why it is not there."""
+
+        figure = by_id.get(figure_id)
+        if figure is None:
+            return ""
+        label = e(str(figure.get("label", figure_id)))
+        caption = e(str(figure.get("caption", "")))
+        if figure.get("status") != "rendered":
+            reason = e(str(figure.get("reason", "no reason recorded")))
+            return f"<div class='note'><strong>{label} was not drawn.</strong> {reason}</div>"
+        png = root / str(figure["outputs"]["png"])
+        if standalone:
+            encoded = base64.b64encode(png.read_bytes()).decode("ascii")
+            source = f"data:image/png;base64,{encoded}"
+        else:
+            source = e(str(figure["outputs"]["png"]))
+        alt = e(str(figure.get("alt", caption)))
+        vectors = " ".join(
+            f"<code>{e(str(figure['outputs'][suffix]))}</code>"
+            for suffix in ("svg", "pdf")
+            if suffix in figure.get("outputs", {})
+        )
+        return (
+            f"<figure><img src='{source}' alt='{alt}'>"
+            f"<figcaption><b>{label}.</b> {caption} "
+            f"<span class='meta'>Editable vector: {vectors}</span></figcaption></figure>"
+        )
+
+    def sources(*roles: str) -> str:
+        """Name the artifacts a section was read from, so no number is unattributable."""
+
+        available = [
+            str(artifacts[role]["path"]) for role in roles if role in artifacts
+        ]
+        if not available:
+            return ""
+        rendered = " ".join(
+            f"<code>{e(path)}</code>"
+            if standalone
+            else f"<a href='{e(path)}'><code>{e(path)}</code></a>"
+            for path in available
+        )
+        return f"<p class='meta'>Source: {rendered}</p>"
 
     parts: list[str] = [
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
@@ -277,8 +453,44 @@ def _compose(
         "state toward the <b>target</b> state.</p>",
     ]
 
-    # --- what was asked ----------------------------------------------------------------
-    parts.append("<h2>1. What was asked</h2>")
+    # --- 1. Summary --------------------------------------------------------------------
+    parts.append("<h2>1. Summary</h2>")
+    top = ranking[0]
+    parts.append(
+        f"<p>{method} scored <b>{len(ranking)}</b> knockout candidates. The highest-scoring "
+        f"candidate is <b>{e(str(top.get('target_id')))}</b> at "
+        f"{_number(top.get('score'))}. <b>This candidate count is the denominator of any "
+        "&ldquo;ranked in the top <i>N</i>%&rdquo; statement about this run</b>, so it belongs "
+        "beside any percentile quoted from it.</p>"
+    )
+    parts.append(
+        "<div class='note'><strong>The direction is an input, not a finding.</strong> "
+        "The same pair of files asks a different question when exchanged: "
+        "source&nbsp;→&nbsp;target asks which perturbation <em>produces</em> the second state, "
+        "and the reverse asks which <em>reverts</em> it. Nothing in the model detects a swap."
+        "</div>"
+    )
+    parts.append(
+        "<div class='note'><strong>The reference state is not the published one.</strong> "
+        f"{e(str(provenance.get('reference_state_deviation', '')))}. iMAT places no objective "
+        "on growth, so the ranking below is conditioned on the estimator that was used.</div>"
+    )
+    parts.append(
+        "<div class='note'><strong>Epsilon was chosen, not derived.</strong> It is how far a "
+        "reaction's flux must move from v_ref before the move counts, measured in this model's "
+        "flux units. The source papers derive it per data set from a sampled reference "
+        "distribution, which CMM does not reproduce."
+        + (
+            " Section 4 reports how far the ranking moves across other values."
+            if sweep
+            else " No sensitivity sweep was run, so this run does not show whether the value "
+            "decided the answer."
+        )
+        + "</div>"
+    )
+
+    # --- 2. Setup ----------------------------------------------------------------------
+    parts.append("<h2>2. Setup</h2>")
     parts.append(
         _table(
             [
@@ -298,26 +510,24 @@ def _compose(
                 {"field": "condition", "value": provenance.get("condition") or "none"},
                 {"field": "method", "value": provenance.get("method")},
                 {"field": "knockout level", "value": provenance.get("perturbation")},
+                {
+                    "field": "reference state (v_ref)",
+                    "value": provenance.get("reference_method"),
+                },
+                {"field": "alpha", "value": provenance.get("alpha")},
+                {"field": "epsilon", "value": provenance.get("epsilon")},
             ],
             ["field", "value"],
         )
     )
-    parts.append(
-        "<div class='note'><strong>The direction is an input, not a finding.</strong> "
-        "The same pair of files asks a different question when exchanged: source&nbsp;→&nbsp;target "
-        "asks which perturbation <em>produces</em> the second state, and the reverse asks which "
-        "<em>reverts</em> it. Nothing in the model detects a swap.</div>"
-    )
+    parts.append(sources("workflow_configuration", "preflight"))
 
-    # --- how it was set up -------------------------------------------------------------
-    parts.append("<h2>2. How the run was set up</h2>")
+    # --- 3. Data and methods -----------------------------------------------------------
+    parts.append("<h2>3. Data and methods</h2>")
+    parts.append("<h3>Which reactions were asked to change</h3>")
     parts.append(
         _table(
             [
-                {
-                    "setting": "reference state (v_ref)",
-                    "value": provenance.get("reference_method"),
-                },
                 {
                     "setting": "significance test",
                     "value": direction.get("significance"),
@@ -343,43 +553,27 @@ def _compose(
                     "value": direction.get("changed_ranking")
                     or direction.get("ranking"),
                 },
-                {"setting": "alpha", "value": provenance.get("alpha")},
-                {"setting": "epsilon", "value": provenance.get("epsilon")},
             ],
             ["setting", "value"],
         )
     )
     parts.append(
-        "<div class='note'><strong>The reference state is not the published one.</strong> "
-        f"{e(str(provenance.get('reference_state_deviation', '')))}. iMAT places no objective "
-        "on growth, so the ranking below is conditioned on the estimator that was used.</div>"
-    )
-    parts.append(
-        "<div class='note'><strong>Epsilon was chosen, not derived.</strong> It is how far a "
-        "reaction's flux must move from v_ref before the move counts, measured in this model's "
-        "flux units. The source papers derive it per data set from a sampled reference "
-        "distribution, which CMM does not reproduce."
-        + (
-            " Section 6 reports how far the ranking moves across other values."
-            if sweep
-            else " No sensitivity sweep was run, so this run does not show whether the value "
-            "decided the answer."
+        sources(
+            "source_reference_fluxes",
+            "gene_differential_expression",
+            "reaction_direction_map",
         )
-        + "</div>"
     )
-
-    # --- candidates ---------------------------------------------------------------------
-    parts.append("<h2>3. Candidate universe</h2>")
-    rows = [
-        {"step": k.replace("_", " "), "value": v}
-        for k, v in construction.items()
-        if not isinstance(v, dict)
-    ]
-    parts.append(_table(rows, ["step", "value"]))
+    parts.append("<h3>Candidate universe</h3>")
     parts.append(
-        f"<p><b>{len(ranking)}</b> candidates were scored. "
-        "<b>This count is the denominator of any &ldquo;ranked in the top <i>N</i>%&rdquo; "
-        "statement about this run</b>, so it belongs beside any percentile quoted from it.</p>"
+        _table(
+            [
+                {"step": k.replace("_", " "), "value": v}
+                for k, v in construction.items()
+                if not isinstance(v, dict)
+            ],
+            ["step", "value"],
+        )
     )
     coupling = construction.get("coupling")
     if isinstance(coupling, Mapping):
@@ -390,17 +584,12 @@ def _compose(
             "which is stronger than the partial coupling the source paper uses: it can split "
             "one of their sets but never merge two.</p>"
         )
+    parts.append(sources("transformation_candidates"))
 
-    # --- ranking -------------------------------------------------------------------------
-    parts.append("<h2>4. Ranking</h2>")
-    if "ranking.png" in figure_names:
-        parts.append(
-            "<figure><img src='figures/ranking.png' alt='transformation score by rank'>"
-            "<figcaption>Transformation score against rank. The band marks the leading "
-            "candidates; a score that decays smoothly rather than falling away means the cut "
-            "between &ldquo;top&rdquo; and &ldquo;rest&rdquo; is a choice, not a "
-            "boundary.</figcaption></figure>"
-        )
+    # --- 4. Results --------------------------------------------------------------------
+    parts.append("<h2>4. Results</h2>")
+    parts.append("<h3>Ranking</h3>")
+    parts.append(panel("fig01_transformation_ranking"))
     columns = ["rank", "target_id", "score"]
     for optional in ("bTS", "mTS", "wTS"):
         if optional in ranking[0]:
@@ -412,22 +601,18 @@ def _compose(
             "the components are reported alongside the combined score: which branch fired "
             "cannot be recovered from the score alone.</p>"
         )
+    parts.append(sources("transformation_ranking"))
 
-    # --- MOMA baseline -------------------------------------------------------------------
-    parts.append("<h2>5. MOMA baseline</h2>")
+    parts.append("<h3>MOMA baseline</h3>")
     if baseline:
-        if "ranking_vs_moma.png" in figure_names:
-            parts.append(
-                "<figure><img src='figures/ranking_vs_moma.png' alt='transformation rank "
-                "against MOMA rank'><figcaption>Each candidate's rank under the two methods. "
-                "Points on the diagonal are candidates the two agree on.</figcaption></figure>"
-            )
+        parts.append(panel("fig02_ranking_vs_moma"))
         parts.append(
             "<p>Yizhak et al. compare their method against a MOMA baseline and report it as "
             "<i>markedly inferior</i> for this task. The comparison is here because a ranking "
             "that merely reproduces MOMA's ordering has not shown that its signal comes from "
             "the method rather than from the inputs.</p>"
         )
+        parts.append(sources("moma_baseline"))
     else:
         parts.append(
             "<div class='note'><strong>Not run.</strong> Without it this run does not "
@@ -435,19 +620,17 @@ def _compose(
             "as inferior.</div>"
         )
 
-    # --- epsilon sweep --------------------------------------------------------------------
+    parts.append("<h3>Epsilon sensitivity</h3>")
     if sweep:
-        parts.append("<h2>6. Epsilon sensitivity</h2>")
-        if "epsilon_sensitivity.png" in figure_names:
-            parts.append(
-                "<figure><img src='figures/epsilon_sensitivity.png' alt='rank against "
-                "epsilon'><figcaption>How each leading candidate's rank moves with epsilon. "
-                "A candidate whose rank is flat across the sweep was not produced by the value "
-                "chosen.</figcaption></figure>"
-            )
+        parts.append(panel("fig03_epsilon_sensitivity"))
+        parts.append(sources("epsilon_sensitivity"))
+    else:
+        parts.append(
+            "<div class='note'><strong>Not run.</strong> Epsilon was chosen rather than "
+            "derived, so nothing here shows whether that choice decided the ranking.</div>"
+        )
 
-    # --- limits ----------------------------------------------------------------------------
-    parts.append("<h2>Interpretation limits</h2>")
+    parts.append("<h3>Interpretation limits</h3>")
     parts.append(
         "<ul>"
         "<li>These are <i>in silico</i> hypotheses that prioritise experiments. They do not "
@@ -462,16 +645,365 @@ def _compose(
         "rather than meaningful.</li>"
         "</ul>"
     )
+
+    # --- 5. References -----------------------------------------------------------------
+    parts.append("<h2>5. References</h2>")
     parts.append(
-        "<h2>Methods to cite</h2><p>MTA — Yizhak K, Gabay O, Cohen H, Ruppin E (2013) "
+        "<p>MTA — Yizhak K, Gabay O, Cohen H, Ruppin E (2013) "
         "<i>Nature Communications</i> <b>4</b>:2632. rMTA — Valc&aacute;rcel LV <i>et al.</i> "
         "(2019) <i>Bioinformatics</i> <b>35</b>(21):4350&ndash;4355. The MOMA baseline is "
         "defined in the same 2013 paper. Neither method originates in CMM.</p>"
     )
+
+    # --- 6. Provenance -----------------------------------------------------------------
+    parts.append("<h2>6. Provenance</h2>")
+    renderer = figure_manifest.renderer
     parts.append(
-        f"<p class='meta'>Run directory <code>{e(str(root))}</code>. "
-        "Every number here is read from that bundle's CSVs; "
+        _table(
+            [
+                {"field": "run directory", "value": root.name},
+                {"field": "model fingerprint", "value": provenance.get("model_id")},
+                {"field": "solver", "value": provenance.get("solver")},
+                {"field": "figure renderer", "value": renderer.get("engine")},
+                {"field": "R", "value": renderer.get("r")},
+                {"field": "renderer sha256", "value": renderer.get("script_sha256")},
+            ],
+            ["field", "value"],
+        )
+    )
+    parts.append("<h3>Artifact inventory</h3>")
+    parts.append(
+        _table(
+            [
+                {
+                    "role": role,
+                    "path": str(entry.get("path", "—")),
+                    "status": str(entry.get("status", "—")),
+                }
+                for role, entry in sorted(artifacts.items())
+            ],
+            ["role", "path", "status"],
+        )
+    )
+    parts.append(
+        "<p class='meta'>Every number on this page is read from that inventory&rsquo;s CSVs; "
         "<code>00_manifest.json</code> is the only path-discovery surface.</p>"
     )
     parts.append("</body></html>")
     return "\n".join(parts)
+
+
+# --------------------------------------------------------------------------------------
+# Completion gate
+# --------------------------------------------------------------------------------------
+
+#: Roles the workflow always writes. A run missing one of these did not finish, whatever else
+#: is present. The optional roles below are configurable stages, so their absence is a choice.
+_REQUIRED_ROLES: Mapping[str, tuple[str, ...]] = {
+    "provenance": (),
+    "summary": (),
+    "workflow_configuration": (),
+    "model": (),
+    "preflight": ("check", "status"),
+    "source_reference_fluxes": ("reaction_id", "flux"),
+    "reaction_direction_map": ("reaction_id", "direction"),
+    "transformation_candidates": ("target_id",),
+    "transformation_ranking": ("target_id", "score", "rank"),
+}
+_OPTIONAL_ROLES: Mapping[str, tuple[str, ...]] = {
+    "gene_differential_expression": ("gene_id",),
+    "moma_baseline": ("target_id", "moma_score", "rank"),
+    "epsilon_sensitivity": ("epsilon", "target_id", "rank"),
+}
+
+
+def validate_transformation_run(
+    run_dir: str | Path,
+    *,
+    manifest_name: str = "00_manifest.json",
+) -> ValidationReport:
+    """Check that a transformation run is complete, self-consistent and readable.
+
+    This is the completion gate. An HTML file that opens is not evidence the run finished: the
+    figures it points at can be absent, the ranking it quotes can disagree with the CSV it
+    claims to come from, and a manifest can name an artifact that was never written. Each of
+    those reads as success in a browser.
+
+    Never raises for a failed run — the issues are returned so a CLI or an agent can report
+    them. Only a malformed argument raises.
+    """
+
+    root = Path(run_dir).expanduser().resolve()
+    issues: list[str] = []
+    warnings: list[str] = []
+
+    manifest_path = root / manifest_name
+    if not manifest_path.is_file():
+        return ValidationReport(
+            valid=False,
+            issues=(f"required manifest is missing: {manifest_path}",),
+            warnings=(),
+            phase="pre-render",
+        )
+    try:
+        manifest = _read_json(manifest_path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return ValidationReport(
+            valid=False,
+            issues=(f"{manifest_name} is not valid UTF-8 JSON: {exc}",),
+            warnings=(),
+            phase="pre-render",
+        )
+    if manifest.get("workflow") != "transformation_target_discovery":
+        return ValidationReport(
+            valid=False,
+            issues=(
+                f"{root} is a {manifest.get('workflow')!r} run, "
+                "not a transformation_target_discovery run",
+            ),
+            warnings=(),
+            phase="pre-render",
+        )
+    if manifest.get("schema_version") != 2:
+        issues.append(
+            f"schema_version must be the integer 2, got {manifest.get('schema_version')!r}"
+        )
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        return ValidationReport(
+            valid=False,
+            issues=("manifest artifacts must be an object keyed by semantic role",),
+            warnings=(),
+            phase="pre-render",
+        )
+
+    csv_rows: dict[str, list[dict[str, Any]]] = {}
+    for role, columns in {**_REQUIRED_ROLES, **_OPTIONAL_ROLES}.items():
+        entry = artifacts.get(role)
+        if entry is None:
+            if role in _REQUIRED_ROLES:
+                issues.append(f"manifest is missing required artifact role {role!r}")
+            continue
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("path"), str):
+            issues.append(f"artifact {role!r} has no usable path")
+            continue
+        try:
+            path = relative_path(
+                root, entry["path"], label=role, error_type=TransformationReportError
+            )
+        except TransformationReportError as exc:
+            issues.append(str(exc))
+            continue
+        if not path.is_file():
+            issues.append(f"artifact {role!r} is declared but missing: {entry['path']}")
+            continue
+        _check_integrity(role, entry, path, issues=issues, warnings=warnings)
+        status = entry.get("status")
+        if status not in {"complete", "partial"}:
+            # A stage switched off writes an empty table and says so. Demanding its columns
+            # would turn a deliberate configuration into a validation failure; the reason is
+            # what has to be present, so the absence stays legible rather than silent.
+            if role in _REQUIRED_ROLES:
+                issues.append(f"required artifact {role!r} is {status!r}")
+            elif not str(entry.get("reason", "")).strip():
+                issues.append(
+                    f"artifact {role!r} is {status!r} but records no reason, so a reader "
+                    "cannot tell a disabled stage from a failed one"
+                )
+            continue
+        if columns:
+            rows = _read_csv(path)
+            csv_rows[role] = rows
+            missing = [name for name in columns if not rows or name not in rows[0]]
+            if missing:
+                issues.append(
+                    f"artifact {role!r} is missing required column(s): {sorted(missing)}"
+                )
+
+    _check_ranking_invariants(csv_rows, issues=issues, warnings=warnings)
+
+    outputs = _check_report_outputs(root, issues=issues, warnings=warnings)
+    checks: dict[str, Any] = {
+        "artifact_contract": {
+            "status": "fail" if issues else "pass",
+            "roles_checked": len(csv_rows) + len(_REQUIRED_ROLES),
+        },
+        **outputs,
+    }
+    return ValidationReport(
+        valid=not issues,
+        issues=tuple(issues),
+        warnings=tuple(warnings),
+        phase="post-render" if (root / "report.html").is_file() else "pre-render",
+        checks=checks,
+        report_validation=(root / "report_validation.json")
+        if (root / "report_validation.json").is_file()
+        else None,
+    )
+
+
+def _check_integrity(
+    role: str,
+    entry: Mapping[str, Any],
+    path: Path,
+    *,
+    issues: list[str],
+    warnings: list[str],
+) -> None:
+    """Confirm the file on disk is the file the manifest describes.
+
+    A stale hash is how a partially re-run bundle looks: the manifest was written by one run
+    and the CSV beside it by another, and every number downstream is then attributed wrongly.
+    """
+
+    declared_size = entry.get("size_bytes")
+    actual_size = path.stat().st_size
+    if isinstance(declared_size, int) and declared_size != actual_size:
+        issues.append(
+            f"artifact {role!r} is {actual_size} bytes; the manifest declares {declared_size}"
+        )
+    declared_hash = entry.get("sha256")
+    if isinstance(declared_hash, str) and declared_hash:
+        if _sha256(path) != declared_hash:
+            issues.append(
+                f"artifact {role!r} does not match its manifest sha256; "
+                "the bundle mixes files from more than one run"
+            )
+    else:
+        warnings.append(
+            f"artifact {role!r} declares no sha256, so it cannot be verified"
+        )
+
+
+def _check_ranking_invariants(
+    csv_rows: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    issues: list[str],
+    warnings: list[str],
+) -> None:
+    """Check the ranking against itself and against the artifacts that cite it."""
+
+    ranking = csv_rows.get("transformation_ranking")
+    if not ranking:
+        return
+    try:
+        ranks = [int(row["rank"]) for row in ranking]
+    except (KeyError, TypeError, ValueError):
+        issues.append("transformation_ranking has a non-integer rank")
+        return
+    if ranks != list(range(1, len(ranks) + 1)):
+        issues.append(
+            "transformation_ranking is not ranked 1..N in file order; "
+            "a reader taking the top rows would not get the top candidates"
+        )
+    scores = [float(row["score"]) for row in ranking]
+    if scores != sorted(scores, reverse=True):
+        issues.append("transformation_ranking rows are not in descending score order")
+
+    distinct = len(set(scores))
+    if distinct < len(scores):
+        largest_tie = max(scores.count(score) for score in set(scores))
+        warnings.append(
+            f"the ranking holds {distinct} distinct scores across {len(scores)} candidates; "
+            f"its largest tie block is {largest_tie}, and ties break on target id, so a "
+            "top-k slice taken inside one is alphabetical rather than meaningful"
+        )
+
+    baseline = csv_rows.get("moma_baseline")
+    if baseline:
+        ranked = {str(row["target_id"]) for row in ranking}
+        extra = {str(row["target_id"]) for row in baseline} - ranked
+        if extra:
+            issues.append(
+                f"moma_baseline scores {len(extra)} candidate(s) absent from the ranking; "
+                "the two are meant to cover the same candidate universe"
+            )
+    else:
+        warnings.append(
+            "no MOMA baseline was run, so this bundle does not demonstrate that its ordering "
+            "differs from the baseline the source paper reports as inferior"
+        )
+
+
+def _check_report_outputs(
+    root: Path, *, issues: list[str], warnings: list[str]
+) -> dict[str, Any]:
+    """Audit the rendered outputs, including the failures a browser will not show."""
+
+    figure_manifest_path = root / "figures" / "figure_manifest.json"
+    linked = root / "report.html"
+    standalone = root / "report_standalone.html"
+    present = [
+        path for path in (figure_manifest_path, linked, standalone) if path.is_file()
+    ]
+    if not present:
+        warnings.append(
+            "the run has not been rendered; run cmm.reporting.render_transformation_report"
+        )
+        return {"publication_outputs": {"status": "not-rendered"}}
+    for path in (figure_manifest_path, linked, standalone):
+        if not path.is_file():
+            issues.append(f"required report output is missing: {path.name}")
+    if issues:
+        return {"publication_outputs": {"status": "failed"}}
+
+    try:
+        figure_manifest = load_figure_manifest(
+            figure_manifest_path,
+            root,
+            required=_REQUIRED_FIGURES,
+            order=_FIGURE_ORDER,
+            error_type=TransformationReportError,
+        )
+    except TransformationReportError as exc:
+        issues.append(str(exc))
+        return {"publication_outputs": {"status": "failed"}}
+
+    rendered = [
+        figure
+        for figure in figure_manifest.figures
+        if figure.get("status") == "rendered"
+    ]
+    linked_text = linked.read_text(encoding="utf-8")
+    standalone_text = standalone.read_text(encoding="utf-8")
+    for figure in rendered:
+        png = str(figure["outputs"]["png"])
+        if png not in linked_text:
+            issues.append(
+                f"report.html does not place rendered figure {figure['id']!r}; "
+                "the page is stale with respect to the figure manifest"
+            )
+    # The whole reason two variants exist. A relative src in the standalone copy renders as
+    # blank space in silence once the file has been moved off this machine.
+    for source in re.findall(r"<img[^>]*\ssrc='([^']*)'", standalone_text):
+        if not source.startswith("data:image/png;base64,"):
+            issues.append(
+                f"report_standalone.html references an image it does not carry: {source[:60]}"
+            )
+    for source in re.findall(r"<img[^>]*\ssrc=\"?'?([^'\">]*)", linked_text):
+        if source.startswith("data:"):
+            warnings.append(
+                "report.html embeds an image; the linked variant is meant to stay small and "
+                "reference figures/ so the 300-dpi originals are the ones read"
+            )
+            break
+
+    validation_path = root / "report_validation.json"
+    if validation_path.is_file():
+        record = _read_json(validation_path)
+        recorded = set(record.get("figures_rendered", ()))
+        if recorded != {str(figure["id"]) for figure in rendered}:
+            issues.append(
+                "report_validation.json disagrees with the figure manifest about what was "
+                "rendered; the run was re-rendered without re-validating"
+            )
+    else:
+        issues.append("report_validation.json is missing")
+
+    return {
+        "publication_outputs": {
+            "status": "fail" if issues else "pass",
+            "figures_rendered": len(rendered),
+            "figures_unavailable": len(figure_manifest.figures) - len(rendered),
+        }
+    }

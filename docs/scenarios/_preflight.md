@@ -193,7 +193,7 @@ print(result.status, result.molar_yield, result.exceeds_carbon_ceiling, result.c
 
 ## Step P5 — Check gene id overlap
 
-**Goal.** Only for runs using expression data — `SC-04`, or an omics reference in `SC-01`. An
+**Goal.** Only for runs using expression data — `SC-02`, or an omics reference in `SC-01`. An
 expression table whose ids do not match the model contributes nothing, silently.
 
 ```python

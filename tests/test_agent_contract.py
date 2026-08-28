@@ -144,13 +144,13 @@ def test_agents_md_names_both_skills_and_their_scenarios_exist() -> None:
 
     scenarios = ROOT / "docs" / "scenarios"
     assert (scenarios / "SC-01-production-target-discovery.md").is_file()
-    assert (scenarios / "SC-04-transformation-target-discovery.md").is_file()
+    assert (scenarios / "SC-02-transformation-target-discovery.md").is_file()
     frontmatter = yaml.safe_load(
-        (scenarios / "SC-04-transformation-target-discovery.md")
+        (scenarios / "SC-02-transformation-target-discovery.md")
         .read_text(encoding="utf-8")
         .split("---", 2)[1]
     )
-    assert frontmatter["id"] == "SC-04"
+    assert frontmatter["id"] == "SC-02"
     assert "source_expression" in frontmatter["requires"]
     assert "target_expression" in frontmatter["requires"]
 
