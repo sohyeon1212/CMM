@@ -163,7 +163,7 @@ flux state as `03_reference/wild_type_fluxes.csv` and records growth in the summ
 ## Step P4 — Confirm the target product is reachable
 
 **Goal.** Establish that production design is even possible. Skip only when the run has no
-target product (`SC-03` run as an essentiality study, `SC-02` run as a condition comparison).
+target product (an essentiality study, or a condition comparison).
 
 ```python
 from cmm.features import theoretical_yield
@@ -193,8 +193,8 @@ print(result.status, result.molar_yield, result.exceeds_carbon_ceiling, result.c
 
 ## Step P5 — Check gene id overlap
 
-**Goal.** Only for runs using expression data (`SC-02`, or an omics reference in `SC-01` or
-`SC-03`). An expression table whose ids do not match the model contributes nothing, silently.
+**Goal.** Only for runs using expression data — `SC-04`, or an omics reference in `SC-01`. An
+expression table whose ids do not match the model contributes nothing, silently.
 
 ```python
 from cmm.omics import read_expression_table

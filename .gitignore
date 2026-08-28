@@ -30,11 +30,14 @@ test_data/log_tpm_qc.csv
 # Generated scenario figure outputs written via CMM_OUTPUT_DIR (see docs/scenario-figures.md)
 temp_figures_new/
 
-# Scenario run directories written via CMM_RESULTS_DIR, or ./results when it is unset (see
-# docs/scenarios/_reporting.md). These are the user's own analyses: raw CSVs, 300 DPI figures
-# and the report. A single SC-01 run is several megabytes and belongs to whoever ran it.
+# Workflow run directories. Neither workflow picks a location: output_dir is required and has
+# no default (see docs/scenarios/_reporting.md), so this covers the conventional choice rather
+# than an enforced one. These are the user's own analyses: raw CSVs, 300 DPI figures and the
+# report. A single run is several megabytes and belongs to whoever ran it.
 results/
 
-# Root-level timestamped SC-01 run bundles (user-owned generated artifacts)
+# Root-level timestamped run bundles (user-owned generated artifacts)
 /SC-01_*/
 /SC-01_*.zip
+/SC-04_*/
+/SC-04_*.zip

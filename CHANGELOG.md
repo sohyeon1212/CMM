@@ -8,6 +8,55 @@ obsolete internal planning documents are removed from the public source tree.
 
 ### Added
 
+- **A second canonical workflow: transformation-target discovery.** `cmm transformation-targets
+  --config CONFIG` ranks the knockouts that move a source metabolic state toward a target one,
+  from two gene-expression profiles, using the published MTA (Yizhak et al. 2013) or rMTA
+  (Valcárcel et al. 2019). It composes existing CMM services and adds no numerical method: the
+  MIQP, transformation score and Equation 9 are `revert_targets`, the MOMA baseline is
+  `transformation_targets`, and the reference state is E-Flux2 or LAD. Six stages write the
+  same schema-v2 run bundle SC-01 does, so one manifest format and one path-discovery surface
+  serve both. Shipped with [`SC-04`](docs/scenarios/SC-04-transformation-target-discovery.md)
+  and the `cmm-transformation-engineering` skill, whose interview confirms on every run which
+  file is the source — nothing in the model can detect a swap, and the reversed run is a
+  correct answer to a different question.
+- **A report renderer for transformation runs**, `cmm.reporting.render_transformation_report`,
+  wired into `cmm transformation-targets` unless `--analysis-only` is passed. Three matplotlib
+  figures — score against rank, transformation rank against the MOMA baseline, and rank against
+  epsilon — and a self-contained HTML page, built in Python with no R dependency, since the
+  production report's `nature-r` backend draws panels a transformation run has no counterpart
+  for. The page states in its own body what a reader would otherwise have to dig out of the
+  provenance: that the reference state is not the published iMAT one, that epsilon was chosen
+  rather than derived, that the candidate
+  count is the denominator of any percentile claim, and that source and target are an input
+  rather than a finding.
+- **`cmm.omics.gene_directions_from_replicates`** implements the Student's t-test Yizhak et al.
+  specify for selecting changed genes. `gene_directions` cuts on fold change, which is all a
+  single measurement per gene supports; the published route needs replicates and had no
+  implementation. `restrict_to_top_changed` now also accepts `gene_p_values`, ranking the
+  changed set by the strongest evidence rather than the largest fold change, and records which
+  ordering was used.
+- **`cmm.features.coupled_reaction_sets`** groups reactions whose deletion has the same
+  consequence, from the null space of S. A ranking over knockout candidates is only meaningful
+  if each candidate is a distinct intervention: three reactions of an unbranched pathway are
+  one intervention, and counting them separately inflates the denominator of any "top *N*%"
+  claim.
+- **The Revert Metabolism tab now says what its parameters are for, and lets you choose the
+  source-state estimator.** The tab drives a three-stage pipeline whose parameters mean nothing
+  out of that context — ε and α belong to different stages and answer different questions — so
+  the controls are grouped by stage, each group opens with a sentence naming that stage's job,
+  and every field carries a tooltip giving its published value and what happens if it is wrong.
+  The source flux state was hard-wired to E-Flux2; **LAD is now selectable**, and the tab states
+  that neither is the iMAT-plus-sampling state Yizhak et al. use. The fold-change threshold that
+  decides which genes count as changed was likewise fixed at ±1 with no way to see or set it.
+- **MTA's two published preprocessing parameters are now reachable, including from the GUI.**
+  The significant-flux-change threshold ε was fixed at its default on every graphical run —
+  the Revert Metabolism tab never passed it — and Yizhak et al.'s cut that keeps only the most
+  differentially expressed reactions in the changed set had no implementation at all. Both are
+  now controls on the tab and arguments in the API: `differential_expression(top_n_changed=…)`
+  and the new `restrict_to_top_changed()`. The cut matters twice over — the paper reports the
+  top 100–200 changed reactions suffice to recover the correct perturbation, and each changed
+  reaction adds one binary variable to the MIQP, so it also decides whether a genome-scale run
+  is tractable. Defaults are unchanged: no cut, and ε at `revert.DEFAULT_EPSILON`.
 - **Source-checkout installation now uses a uv-managed Python 3.12 by default.** The shell and
   PowerShell installers no longer inherit an unsupported operating-system Python such as the
   Python 3.9.6 supplied by older macOS releases. They accept an explicit Python 3.10–3.12
@@ -57,6 +106,16 @@ obsolete internal planning documents are removed from the public source tree.
 
 ### Fixed
 
+- **MTA/rMTA candidates are once again scored against a common yardstick.** The
+  impossible-change mask was evaluated inside each candidate's knockout context, so it saw
+  that candidate's modified bounds. A reaction could be masked for one knockout and not for
+  another, which meant the steady set — the denominator of the transformation score — differed
+  between candidates whose scores were then ranked against each other. The mask is now applied
+  once against the unperturbed model, as in Yizhak et al.'s preprocessing, and the resulting
+  count is reported as a single `n_impossible_masked` in the ranking's provenance rather than
+  being a per-candidate quantity that never surfaced. Rankings on models where the mask fires
+  will change; the toy-network test suite is unaffected. Preparing the direction maps once
+  also removes two map constructions per candidate.
 - The source-tree fallback for `cmm.__version__` now matches the `0.5.0` package metadata.
 - **The flux map no longer drifts right, clip its title, or draw its colorbar as a hairline**
   when the GUI stretches the figure to a wide panel. `colorbar` re-anchors its parent axes to

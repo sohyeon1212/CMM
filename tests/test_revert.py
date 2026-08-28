@@ -71,15 +71,30 @@ def test_non_robust_knockout_is_not_ranked_above_disease_target(branched_model):
     reference, direction = _setup(branched_model)
     target_rxns = revert_module._target_reactions(branched_model, reference)
     perts = {p.target_id: p for p in gene_perturbations(branched_model)}
+    # Both direction maps are prepared once against the unperturbed model, exactly as
+    # revert_targets does, so the two candidates are scored against the same steady set.
+    best_direction = revert_module._prepared_direction(
+        branched_model, reference, direction, target_rxns
+    )
+    worst_direction = revert_module._prepared_direction(
+        branched_model, reference, direction, target_rxns, reverse=True
+    )
     with apply_perturbation(branched_model, perts["g3"]):
         scores = revert_module._score_knockout(
-            branched_model, reference, direction, target_rxns, "rmta", 0.66
+            branched_model,
+            reference,
+            best_direction,
+            worst_direction,
+            target_rxns,
+            "rmta",
+            0.66,
         )
     with apply_perturbation(branched_model, perts["g2"]):
         disease_target_scores = revert_module._score_knockout(
             branched_model,
             reference,
-            direction,
+            best_direction,
+            worst_direction,
             target_rxns,
             "rmta",
             0.66,

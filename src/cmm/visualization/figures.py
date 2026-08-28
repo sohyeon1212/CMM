@@ -1106,3 +1106,202 @@ def escher_flux_map(
     # every draw, so the figure stays correct at any panel size and at 300 DPI on export.
     fig.set_layout_engine("constrained")
     return fig
+
+
+def transformation_ranking_figure(
+    ranking,
+    *,
+    highlight: str | None = None,
+    top_n: int = 10,
+    column_width: int = 2,
+) -> Figure:
+    """Transformation score against rank, with the leading candidates named.
+
+    A ranking's shape is the first thing to read: a score that falls away sharply over the top
+    few candidates says something different from one that decays smoothly across hundreds. The
+    band marks the top *N* the report discusses so a reader can see whether the cut sits on a
+    cliff or in the middle of a plateau.
+    """
+
+    import pandas as pd
+
+    frame = pd.DataFrame(ranking)
+    if frame.empty:
+        raise ValueError("ranking is empty")
+    frame = frame.sort_values("score", ascending=False).reset_index(drop=True)
+    frame["rank"] = frame.index + 1
+
+    fig, ax, font = _new_figure(width=7.0, height=4.2, column_width=column_width)
+    ax.plot(frame["rank"], frame["score"], lw=1.0, color="#4a5568", zorder=2)
+    cut = min(top_n, len(frame))
+    ax.axvspan(0.5, cut + 0.5, color="#c6f6d5", alpha=0.55, zorder=0)
+    ax.scatter(
+        frame["rank"].head(cut),
+        frame["score"].head(cut),
+        s=26,
+        color="#2f855a",
+        zorder=3,
+        label=f"top {cut}",
+    )
+    if highlight is not None and (frame["target_id"] == highlight).any():
+        row = frame[frame["target_id"] == highlight].iloc[0]
+        ax.scatter(
+            [row["rank"]],
+            [row["score"]],
+            s=80,
+            color="#e53e3e",
+            zorder=5,
+            label=f"{highlight} (rank {int(row['rank'])})",
+        )
+    ax.legend(frameon=False, fontsize=font["tick"])
+    if len(frame) > 50:
+        ax.set_xscale("log")
+    _style(
+        ax,
+        font,
+        xlabel=f"rank among {len(frame)} candidates",
+        ylabel="transformation score",
+        title="Transformation score by rank",
+    )
+    fig.tight_layout()
+    return fig
+
+
+def transformation_vs_moma_figure(
+    ranking,
+    moma_baseline,
+    *,
+    highlight: str | None = None,
+    column_width: int = 2,
+) -> Figure:
+    """Each candidate's transformation rank against its rank under the MOMA baseline.
+
+    Yizhak et al. report MOMA as markedly inferior for this task, so a transformation ranking
+    that merely reproduces MOMA's ordering has not shown its signal comes from the method. Points
+    far off the diagonal are where the two disagree; a cloud along it is the warning sign.
+    """
+
+    import numpy as np
+    import pandas as pd
+
+    left = pd.DataFrame(ranking)
+    right = pd.DataFrame(moma_baseline)
+    if left.empty or right.empty:
+        raise ValueError("both the ranking and the MOMA baseline must be non-empty")
+    merged = left[["target_id", "rank"]].merge(
+        right[["target_id", "rank"]],
+        on="target_id",
+        suffixes=("_transformation", "_moma"),
+    )
+    if merged.empty:
+        raise ValueError("the ranking and the MOMA baseline share no candidates")
+
+    fig, ax, font = _new_figure(width=5.6, height=5.0, column_width=column_width)
+    ax.scatter(
+        merged["rank_transformation"],
+        merged["rank_moma"],
+        s=10,
+        color="#a0aec0",
+        alpha=0.6,
+        zorder=2,
+    )
+    limit = max(merged["rank_transformation"].max(), merged["rank_moma"].max())
+    ax.plot([1, limit], [1, limit], ls="--", lw=1.0, color="#cbd5e0", zorder=1)
+    if highlight is not None and (merged["target_id"] == highlight).any():
+        row = merged[merged["target_id"] == highlight].iloc[0]
+        ax.scatter(
+            [row["rank_transformation"]],
+            [row["rank_moma"]],
+            s=90,
+            color="#e53e3e",
+            zorder=5,
+        )
+        ax.annotate(
+            f"{highlight}\n{int(row['rank_transformation'])} vs {int(row['rank_moma'])}",
+            xy=(row["rank_transformation"], row["rank_moma"]),
+            xytext=(0.08, 0.86),
+            textcoords="axes fraction",
+            fontsize=font["tick"],
+            color="#e53e3e",
+            arrowprops=dict(arrowstyle="->", color="#e53e3e", lw=1.0),
+        )
+    # Pearson over ranks is Spearman's rho by definition.
+    rho = float(np.corrcoef(merged["rank_transformation"], merged["rank_moma"])[0, 1])
+    ax.text(
+        0.97,
+        0.04,
+        f"Spearman \u03c1 = {rho:.3f}",
+        transform=ax.transAxes,
+        ha="right",
+        fontsize=font["tick"],
+        color="#4a5568",
+    )
+    _style(
+        ax,
+        font,
+        xlabel="transformation rank",
+        ylabel="MOMA baseline rank",
+        title="Transformation rank vs MOMA rank",
+    )
+    fig.tight_layout()
+    return fig
+
+
+def epsilon_sensitivity_figure(
+    epsilon_sweep,
+    *,
+    top_n: int = 8,
+    highlight: str | None = None,
+    column_width: int = 2,
+) -> Figure:
+    """How each leading candidate's rank moves as epsilon changes.
+
+    Epsilon is a flux magnitude that CMM cannot derive the way the source papers do, so it is
+    chosen. This figure is what makes that choice auditable: a candidate whose rank is stable
+    across the sweep was not produced by the value picked.
+    """
+
+    import pandas as pd
+
+    frame = pd.DataFrame(epsilon_sweep)
+    if frame.empty:
+        raise ValueError("epsilon_sweep is empty")
+    baseline = (
+        frame.sort_values("epsilon")
+        .groupby("target_id")["rank"]
+        .first()
+        .sort_values()
+        .head(top_n)
+        .index.tolist()
+    )
+    if highlight is not None and highlight not in baseline:
+        baseline.append(highlight)
+
+    fig, ax, font = _new_figure(width=6.6, height=4.4, column_width=column_width)
+    for target in baseline:
+        series = frame[frame["target_id"] == target].sort_values("epsilon")
+        if series.empty:
+            continue
+        emphasised = target == highlight
+        ax.plot(
+            series["epsilon"],
+            series["rank"],
+            marker="o",
+            markersize=4,
+            lw=2.0 if emphasised else 1.0,
+            color="#e53e3e" if emphasised else None,
+            zorder=5 if emphasised else 2,
+            label=target,
+        )
+    ax.set_xscale("log")
+    ax.invert_yaxis()  # rank 1 at the top, where a reader expects the best candidate
+    ax.legend(frameon=False, fontsize=font["tick"], ncol=2)
+    _style(
+        ax,
+        font,
+        xlabel="epsilon (model flux units)",
+        ylabel="rank",
+        title="Rank sensitivity to the chosen epsilon",
+    )
+    fig.tight_layout()
+    return fig

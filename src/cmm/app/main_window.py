@@ -40,6 +40,8 @@ from qtpy.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QSlider,
+    QFrame,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QStyledItemDelegate,
@@ -79,6 +81,7 @@ from cmm.features.production import (
     theoretical_yield,
 )
 from cmm.features.response import flux_response
+from cmm.features.revert import DEFAULT_EPSILON as REVERT_DEFAULT_EPSILON
 from cmm.features.revert import revert_targets
 from cmm.features.sampling import (
     random_flux_sampling,
@@ -2828,36 +2831,63 @@ class CmmMainWindow(QMainWindow):
         layout.addWidget(self.sim_table, 1)
         return tab
 
+    @staticmethod
+    def _stage_box(title: str, explanation: str) -> tuple[QGroupBox, QFormLayout]:
+        """A parameter group that says what stage it configures before listing its fields.
+
+        The revert tab drives a three-stage pipeline and its parameters mean nothing out of
+        that context — 'epsilon' and 'alpha' belong to different stages and answer different
+        questions. Each box therefore opens with a sentence naming its stage's job.
+        """
+
+        box = QGroupBox(title)
+        outer = QVBoxLayout(box)
+        # Four of these stack in one column, so the padding is set against the height budget
+        # rather than left at the default: generous enough that the grouping reads as grouping,
+        # tight enough that the column still fits a laptop window without scrolling.
+        outer.setContentsMargins(12, 6, 12, 6)
+        outer.setSpacing(5)
+        caption = QLabel(explanation)
+        caption.setWordWrap(True)
+        caption.setStyleSheet("color: #5a6b80; font-size: 11px;")
+        outer.addWidget(caption)
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setVerticalSpacing(5)
+        outer.addLayout(form)
+        return box, form
+
     def _build_revert_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        # Parameters left, results right: the three stages are read once while setting a run
+        # up, whereas the ranking is what the user returns to, and stacking them vertically
+        # pushed the table off the bottom of the window on a laptop screen.
+        columns = QHBoxLayout(tab)
+        left = QWidget()
+        layout = QVBoxLayout(left)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(20)
 
-        controls = QGroupBox("Normalization-target prediction (revert metabolism)")
-        form = QFormLayout(controls)
-        self.method_combo = QComboBox()
-        self.method_combo.addItems(["rmta", "mta", "rmta_continuous"])
-        self.method_combo.setToolTip(
-            "rmta: published best/MOMA/worst workflow (MIQP); "
-            "mta: published single MTA (MIQP); "
-            "rmta_continuous: historical QP heuristic, explicitly not published rMTA."
+        intro = QLabel(
+            "Ranks knockouts by how well they move a <b>source</b> state toward a <b>target</b> one — "
+            "a disease state back toward a healthy one, say. Hover any field for its published "
+            "value and what it controls."
         )
-        self.perturbation_combo = QComboBox()
-        self.perturbation_combo.addItems(["gene", "reaction"])
-        self.alpha_spin = QDoubleSpinBox()
-        self.alpha_spin.setRange(0.0, 1.0)
-        self.alpha_spin.setSingleStep(0.01)
-        self.alpha_spin.setValue(0.66)
-        form.addRow("Method:", self.method_combo)
-        form.addRow("Knockout level:", self.perturbation_combo)
-        form.addRow("Transformation weight α:", self.alpha_spin)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
+        # --- inputs -----------------------------------------------------------------------
+        inputs_box, inputs_form = self._stage_box(
+            "Input — two expression states",
+            "Two-column CSV or TSV, one value per gene. Source = the state to move away from.",
+        )
         source_row = QHBoxLayout()
         source_btn = QPushButton("Load source CSV/TSV…")
         source_btn.clicked.connect(lambda: self.load_revert_expression("source"))
         self.revert_source_label = QLabel("not loaded")
         source_row.addWidget(source_btn)
         source_row.addWidget(self.revert_source_label, 1)
-        form.addRow("Source expression:", source_row)
+        inputs_form.addRow("Source expression:", source_row)
 
         target_row = QHBoxLayout()
         target_btn = QPushButton("Load target CSV/TSV…")
@@ -2865,7 +2895,128 @@ class CmmMainWindow(QMainWindow):
         self.revert_target_label = QLabel("not loaded")
         target_row.addWidget(target_btn)
         target_row.addWidget(self.revert_target_label, 1)
-        form.addRow("Target expression:", target_row)
+        inputs_form.addRow("Target expression:", target_row)
+        layout.addWidget(inputs_box)
+
+        # --- stage 1: source reference state ----------------------------------------------
+        vref_box, vref_form = self._stage_box(
+            "Stage 1 — source flux state (v_ref)",
+            "Turns the source expression into fluxes. Everything below is measured against it.",
+        )
+        self.revert_reference_combo = QComboBox()
+        self.revert_reference_combo.addItems(["eflux2", "lad"])
+        self.revert_reference_combo.setToolTip(
+            "eflux2 (Kim et al. 2016): scales each reaction's bounds by its expression, then "
+            "minimises total flux.\n"
+            "lad (Lee et al. 2012): fits |flux| to expression-derived targets by least "
+            "absolute deviation; needs only an LP solver.\n\n"
+            "Yizhak et al. use iMAT with 2,000 sampled distributions, which CMM does not "
+            "implement. iMAT places no objective on growth, so it and a growth-maximal "
+            "estimate can differ substantially, and the ranking is conditioned on whichever "
+            "state is used. Supply an external state through the Python API to reproduce the "
+            "published pipeline."
+        )
+        vref_form.addRow("Estimator:", self.revert_reference_combo)
+        layout.addWidget(vref_box)
+
+        # --- stage 2: direction map -------------------------------------------------------
+        direction_box, direction_form = self._stage_box(
+            "Stage 2 — which reactions should change",
+            "Compares the two states through each reaction's GPR. Reactions left out must stay put.",
+        )
+        self.revert_fold_change_spin = QDoubleSpinBox()
+        self.revert_fold_change_spin.setDecimals(2)
+        self.revert_fold_change_spin.setRange(0.0, 20.0)
+        self.revert_fold_change_spin.setSingleStep(0.1)
+        self.revert_fold_change_spin.setValue(1.0)
+        self.revert_fold_change_spin.setToolTip(
+            "A gene counts as changed when |log2 fold change| reaches this. 1.0 means a "
+            "two-fold change.\n\n"
+            "Yizhak et al. instead use a Student's t-test at P < 0.05, which needs replicate "
+            "measurements. This tab loads one value per gene, so that route requires building "
+            "the direction map through the Python API."
+        )
+        self.revert_top_changed_spin = QSpinBox()
+        self.revert_top_changed_spin.setRange(0, 100000)
+        self.revert_top_changed_spin.setSpecialValueText("all (no cut)")
+        self.revert_top_changed_spin.setValue(0)
+        self.revert_top_changed_spin.setToolTip(
+            "Keep only this many of the most differentially expressed changed reactions; the "
+            "rest are treated as steady. Yizhak et al. use the top 100-200. Each changed "
+            "reaction adds one binary variable to the search, so on a genome-scale model this "
+            "cut is also what decides whether the run finishes. 0 keeps every reaction that "
+            "clears the fold-change threshold."
+        )
+        direction_form.addRow("Fold-change threshold:", self.revert_fold_change_spin)
+        direction_form.addRow("Top changed reactions:", self.revert_top_changed_spin)
+        layout.addWidget(direction_box)
+
+        # --- stage 3: the search ----------------------------------------------------------
+        search_box, search_form = self._stage_box(
+            "Stage 3 — knockout search",
+            "One optimisation per candidate, ranked by how much of the required change it achieved.",
+        )
+        self.method_combo = QComboBox()
+        self.method_combo.addItems(["rmta", "mta", "rmta_continuous"])
+        self.method_combo.setToolTip(
+            "rmta (Valcárcel et al. 2019): three solves per candidate — best case, MOMA, and "
+            "the direction reversed for the worst case — combined so that a candidate scoring "
+            "well whichever way it is pushed is demoted. MIQP; about 3x the cost of mta.\n"
+            "mta (Yizhak et al. 2013): the single published MIQP.\n"
+            "rmta_continuous: a historical QP heuristic. It is not published rMTA and must "
+            "never be reported as such."
+        )
+        self.perturbation_combo = QComboBox()
+        self.perturbation_combo.addItems(["gene", "reaction"])
+        self.perturbation_combo.setToolTip(
+            "gene: knock out each gene and block whatever reactions its GPR disables — closer "
+            "to an experiment.\n"
+            "reaction: knock out each reaction directly."
+        )
+        self.alpha_spin = QDoubleSpinBox()
+        self.alpha_spin.setRange(0.0, 1.0)
+        self.alpha_spin.setSingleStep(0.01)
+        self.alpha_spin.setValue(0.66)
+        self.alpha_spin.setToolTip(
+            "Balances the two halves of the objective: higher a rewards making the required "
+            "changes, lower a rewards leaving the rest undisturbed.\n\n"
+            "Yizhak et al. report a = 0.66 in the main text and find the ranking robust over "
+            "0.1-0.9."
+        )
+        self.revert_epsilon_spin = QDoubleSpinBox()
+        self.revert_epsilon_spin.setDecimals(4)
+        self.revert_epsilon_spin.setRange(0.0, 1000.0)
+        self.revert_epsilon_spin.setSingleStep(0.001)
+        self.revert_epsilon_spin.setValue(REVERT_DEFAULT_EPSILON)
+        self.revert_epsilon_spin.setToolTip(
+            "How far a reaction must move from v_ref before the move counts: v >= v_ref + e to "
+            "increase, v <= v_ref - e to decrease. Also floors the score's denominator.\n\n"
+            "This is measured in the model's own flux units, so there is no safe default — a "
+            "value suited to a core model is not suited to a genome-scale one. Yizhak et al. "
+            "derive it per data set from a sampled reference distribution; CMM uses the fixed "
+            "value set here, so state it when reporting a result."
+        )
+        search_form.addRow("Method:", self.method_combo)
+        search_form.addRow("Knockout level:", self.perturbation_combo)
+        search_form.addRow("Transformation weight α:", self.alpha_spin)
+        search_form.addRow("Significant flux change ε:", self.revert_epsilon_spin)
+
+        layout.addWidget(search_box)
+        layout.addStretch(1)
+
+        # Four stacked groups do not fit a laptop window, so the stages scroll — but the Run
+        # button sits outside that scroll area, pinned under it. Inside, it would be the last
+        # thing in the tallest column and therefore the one control never visible on arrival.
+        left_scroll = QScrollArea()
+        left_scroll.setWidget(left)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(left_scroll, 1)
 
         self.revert_run_btn = QPushButton("Run Revert")
         self.revert_run_btn.setEnabled(False)
@@ -2873,21 +3024,31 @@ class CmmMainWindow(QMainWindow):
         self.revert_run_btn.setToolTip(
             "Load both source and target expression files to enable."
         )
-        form.addRow("", self.revert_run_btn)
-        layout.addWidget(controls)
+        left_layout.addWidget(self.revert_run_btn)
 
+        results = QWidget()
+        right = QVBoxLayout(results)
+        right.setContentsMargins(0, 0, 0, 0)
         self.revert_summary = QLabel(
             "Load source and target expression files to rank normalization targets."
         )
         self.revert_summary.setWordWrap(True)
-        layout.addWidget(self.revert_summary)
+        right.addWidget(self.revert_summary)
 
         self.revert_table = QTableWidget(0, 3)
         self.revert_table.setHorizontalHeaderLabels(["Rank", "Target", "Score"])
-        self.revert_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = self.revert_table.horizontalHeader()
+        # Rank is at most four digits; giving it an equal third of a wide table wastes the
+        # room the identifiers and scores can use.
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
         self.revert_table.verticalHeader().setVisible(False)
         self.revert_table.setAlternatingRowColors(True)
-        layout.addWidget(self.revert_table, 1)
+        right.addWidget(self.revert_table, 1)
+
+        columns.addWidget(left_column, 1)
+        columns.addWidget(results, 1)
         return tab
 
     # -- behavior -----------------------------------------------------------
@@ -4000,25 +4161,37 @@ class CmmMainWindow(QMainWindow):
         method = self.method_combo.currentText()
         perturbation = self.perturbation_combo.currentText()
         alpha = self.alpha_spin.value()
+        epsilon = self.revert_epsilon_spin.value()
+        top_changed = self.revert_top_changed_spin.value() or None
+        reference_method = self.revert_reference_combo.currentText()
+        fold_change = self.revert_fold_change_spin.value()
 
         def _compute(worker_model):
+            # LAD takes no objective fraction: it fits |flux| to expression-derived targets
+            # rather than holding an optimum, so passing one would be meaningless.
+            extra = {"objective_fraction": 1.0} if reference_method == "eflux2" else {}
             source_result = integrate_expression(
                 worker_model,
                 source_expression,
-                method="eflux2",
-                objective_fraction=1.0,
+                method=reference_method,
+                **extra,
             )
             if source_result.status != "optimal" or not source_result.fluxes:
                 raise ValueError(
-                    "source expression could not produce a valid source-state flux "
-                    f"({source_result.status})"
+                    f"source expression could not produce a valid source-state flux with "
+                    f"{reference_method} ({source_result.status})"
                 )
-            reference = source_result.to_flux_state("source_expression_state")
+            reference = source_result.to_flux_state(
+                f"source_expression_state_{reference_method}"
+            )
             direction = differential_expression(
                 worker_model,
                 source_expression,
                 target_expression,
                 reference=reference,
+                up_threshold=fold_change,
+                down_threshold=fold_change,
+                top_n_changed=top_changed,
             )
             return revert_targets(
                 worker_model,
@@ -4027,6 +4200,7 @@ class CmmMainWindow(QMainWindow):
                 direction,
                 method=method,
                 alpha=alpha,
+                epsilon=epsilon,
                 perturbation=perturbation,
             )
 

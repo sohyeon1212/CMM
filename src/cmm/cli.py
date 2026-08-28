@@ -38,6 +38,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Publication renderer used after a successful analysis.",
     )
 
+    transformation = commands.add_parser(
+        "transformation-targets",
+        help="Rank knockouts that move a source metabolic state toward a target state.",
+    )
+    transformation.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        help="UTF-8 JSON TransformationWorkflowConfig file.",
+    )
+    transformation.add_argument(
+        "--analysis-only",
+        action="store_true",
+        help="Write scientific artifacts without rendering figures or the HTML report.",
+    )
+    transformation.add_argument(
+        "--highlight",
+        default=None,
+        help="Candidate to mark throughout the report, for example the knockout under test.",
+    )
+
     report = commands.add_parser("report", help="Render or validate a schema-v2 run.")
     report_commands = report.add_subparsers(dest="report_command", required=True)
     render = report_commands.add_parser(
@@ -104,6 +125,52 @@ def _run_production(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_transformation(args: argparse.Namespace) -> int:
+    from cmm.workflows.transformation import (
+        TransformationWorkflowConfig,
+        run_transformation_target_discovery,
+    )
+
+    config = TransformationWorkflowConfig.from_json(args.config)
+    if config.output_dir is None:
+        raise ValueError(
+            "transformation-targets requires config.output_dir so the analysis has a "
+            "self-contained run directory"
+        )
+    result = run_transformation_target_discovery(config)
+    if result.run_directory is None:  # guarded above, retained as an invariant check
+        raise RuntimeError(
+            "transformation workflow completed without exporting a run directory"
+        )
+    summary = result.summary()
+    payload: dict[str, object] = {"run_directory": str(result.run_directory)}
+    if not args.analysis_only:
+        from cmm.reporting import render_transformation_report
+
+        report = render_transformation_report(
+            result.run_directory, highlight=args.highlight
+        )
+        payload["report_html"] = str(report.report_html)
+        # The copy to send someone: the linked page loses every figure once it is moved.
+        payload["report_standalone_html"] = str(report.report_standalone_html)
+        payload["figures"] = [str(path) for path in report.figures]
+    print(
+        json.dumps(
+            {
+                **payload,
+                "method": summary["method"],
+                "n_candidates": summary["n_candidates"],
+                "top_target": summary["top_target"],
+                "top_score": summary["top_score"],
+                # Stated on every run: the reference state is not the published iMAT one.
+                "reference_method": summary["reference_method"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _run_report(args: argparse.Namespace) -> int:
     from cmm.reporting import render_production_report, validate_production_run
 
@@ -139,6 +206,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "production-targets":
             return _run_production(args)
+        if args.command == "transformation-targets":
+            return _run_transformation(args)
         if args.command == "report":
             return _run_report(args)
     except Exception as error:

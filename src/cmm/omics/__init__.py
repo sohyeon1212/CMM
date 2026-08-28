@@ -11,6 +11,7 @@ from cmm.omics.differential import (
     DirectionMap,
     differential_expression,
     gene_directions,
+    gene_directions_from_replicates,
     gene_log2_fold_change,
     reaction_directions,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "eflux2",
     "flux_log_change",
     "gene_directions",
+    "gene_directions_from_replicates",
     "gene_log2_fold_change",
     "gene_to_reaction_weights",
     "integrate_expression",

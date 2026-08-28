@@ -3,7 +3,7 @@
 CMM currently ships **one canonical workflow**: SC-01 production-target discovery. It is the
 reference implementation for binding a scientific question to an exact model, explicit
 conditions, solver requirements, typed numerical results, provenance, a publication renderer,
-and a validated artifact directory. SC-02 and SC-03 are analysis recipes over public services;
+and a validated artifact directory. An analysis recipe over public services, by contrast,
 they are not installed workflow commands or validated run schemas.
 
 This guide separates two legitimate extension paths:

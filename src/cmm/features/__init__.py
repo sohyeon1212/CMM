@@ -9,6 +9,11 @@ from cmm.features._perturbation import (
     perturbation_provenance,
     reaction_perturbations,
 )
+from cmm.features.coupling import (
+    PARALLEL_TOLERANCE,
+    CoupledSets,
+    coupled_reaction_sets,
+)
 from cmm.features.comparison import (
     ROOM_TOLERANCES,
     BatchComparisonResult,
@@ -98,6 +103,9 @@ EXCLUDED_FEATURES = (
 )
 
 __all__ = [
+    "PARALLEL_TOLERANCE",
+    "CoupledSets",
+    "coupled_reaction_sets",
     "INCLUDED_FEATURES",
     "PLANNED_FEATURES",
     "EXCLUDED_FEATURES",
