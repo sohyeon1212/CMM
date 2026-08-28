@@ -7,14 +7,14 @@ times and inflates the denominator of any "top *N*%" claim.
 
 Yizhak et al. (2013) reduce their candidate set this way before ranking — dead-end reactions
 out, essential reactions out, then *"the set of simulated knockouts is composed of a member from
-each partially coupled set (including singleton sets)"*, which gave them 849 sets for
-*E. coli* iAF1260.
+each partially coupled set (including singleton sets)"*.
 
 **This module computes full coupling, not the paper's partial coupling.** Two reactions are
 fully coupled when ``v_i / v_j`` is the same constant in every steady state; partially coupled
 when each is non-zero exactly when the other is, with a ratio free to vary. Full coupling is
 strictly stronger, so the grouping here is conservative: it can split one of the paper's sets
-but can never merge two, and the candidate count it yields is an upper bound on theirs.
+but can never merge two, so the candidate count it yields is an upper bound on the partial
+one.
 
 The reason for the substitution is cost. Full coupling falls out of one null-space computation;
 partial coupling needs flux coupling analysis, which is O(n^2) linear programmes and impractical

@@ -2910,11 +2910,9 @@ class CmmMainWindow(QMainWindow):
             "minimises total flux.\n"
             "lad (Lee et al. 2012): fits |flux| to expression-derived targets by least "
             "absolute deviation; needs only an LP solver.\n\n"
-            "Yizhak et al. use iMAT with 2,000 sampled distributions, which CMM does not "
-            "implement. iMAT places no objective on growth, so it and a growth-maximal "
-            "estimate can differ substantially, and the ranking is conditioned on whichever "
-            "state is used. Supply an external state through the Python API to reproduce the "
-            "published pipeline."
+            "Yizhak et al. use iMAT, which CMM does not implement. iMAT places no objective "
+            "on growth, so the ranking is conditioned on whichever estimator is used. Supply "
+            "an external state through the Python API to reproduce the published pipeline."
         )
         vref_form.addRow("Estimator:", self.revert_reference_combo)
         layout.addWidget(vref_box)

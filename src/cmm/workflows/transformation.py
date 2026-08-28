@@ -18,11 +18,9 @@ other:
 **Three things this workflow does differently from the papers, by construction.** They are
 recorded in the run's provenance rather than hidden, and the report is required to state them.
 
-1. v_ref comes from E-Flux2 or LAD. The papers use iMAT with 2,000 sampled flux distributions,
-   which CMM does not implement. The substitution is not cosmetic: iMAT maximises agreement
-   with expression and lets growth fall out, whereas E-Flux2 at ``objective_fraction=1.0``
-   forces a growth-maximal state, so the two can assign substantially different flux and the
-   ranking is conditioned on whichever is used.
+1. v_ref comes from E-Flux2 or LAD. The papers use iMAT, which CMM does not implement. iMAT
+   places no objective on growth, whereas E-Flux2 at ``objective_fraction=1.0`` forces a
+   growth-maximal state, so the ranking is conditioned on whichever estimator is used.
 2. ``epsilon`` is a fixed scalar. The papers derive it per data set from the sampled reference
    distribution. It is measured in the model's own flux units, so there is no safe default;
    :meth:`TransformationWorkflowConfig.suggest_epsilon` computes candidates from v_ref instead.
@@ -280,8 +278,8 @@ class TransformationWorkflowConfig:
             # Stated on every run so a reader never has to infer it from the method name.
             "reference_state_deviation": (
                 "v_ref is a deterministic "
-                f"{self.reference_method} solve; Yizhak et al. (2013) use iMAT with 2,000 "
-                "sampled flux distributions, which CMM does not implement"
+                f"{self.reference_method} solve; Yizhak et al. (2013) use iMAT, which CMM "
+                "does not implement"
             ),
         }
 

@@ -53,10 +53,9 @@ obsolete internal planning documents are removed from the public source tree.
   the Revert Metabolism tab never passed it — and Yizhak et al.'s cut that keeps only the most
   differentially expressed reactions in the changed set had no implementation at all. Both are
   now controls on the tab and arguments in the API: `differential_expression(top_n_changed=…)`
-  and the new `restrict_to_top_changed()`. The cut matters twice over — the paper reports the
-  top 100–200 changed reactions suffice to recover the correct perturbation, and each changed
-  reaction adds one binary variable to the MIQP, so it also decides whether a genome-scale run
-  is tractable. Defaults are unchanged: no cut, and ε at `revert.DEFAULT_EPSILON`.
+  and the new `restrict_to_top_changed()`. The cut is not cosmetic: each changed reaction adds
+  one binary variable to the MIQP, so it decides whether a genome-scale run is tractable.
+  Defaults are unchanged: no cut, and ε at `revert.DEFAULT_EPSILON`.
 - **Source-checkout installation now uses a uv-managed Python 3.12 by default.** The shell and
   PowerShell installers no longer inherit an unsupported operating-system Python such as the
   Python 3.9.6 supplied by older macOS releases. They accept an explicit Python 3.10–3.12

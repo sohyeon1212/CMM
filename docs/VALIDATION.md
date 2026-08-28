@@ -374,10 +374,7 @@ that intends to follow the paper must set both:
 
 The published significance test is a Student's t-test over replicates. `gene_directions` cuts
 on log2 fold change instead, and the GUI loads one expression value per gene, so the published
-gene-selection step requires replicate data and the Python API. A worked end-to-end run
-against the paper's own *E. coli* pgi validation — including the coupled-set candidate
-construction the paper specifies — is not part of this repository; it is reproducible from the
-protocol above.
+gene-selection step requires replicate data and the Python API.
 
 References: Yizhak K, Gabay O, Cohen H, Ruppin E (2013), *Nat Commun* 4:2632,
 <https://doi.org/10.1038/ncomms3632>; Valcárcel LV, Torrano V, Tobalina L, Carracedo A,

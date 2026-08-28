@@ -92,12 +92,11 @@ into flux-value space, the MIQP's success thresholds `v_ref ± ε`, and the deno
 transformation score. Choosing the estimator is therefore a scientific decision, not a
 default.
 
-> **Yizhak et al. use iMAT with 2,000 sampled flux distributions.** CMM implements no iMAT.
-> The substitution is not cosmetic: iMAT maximises agreement between expression and activity
-> and lets growth fall out, whereas E-Flux2 at `objective_fraction=1.0` forces a growth-maximal
-> state, so the two can differ substantially in the flux they assign. State the substitution in
-> any report. An externally computed reference state can be supplied through the Python API to
-> restore the published pipeline.
+> **Yizhak et al. use iMAT.** CMM implements no iMAT. The substitution is not cosmetic: iMAT
+> places no objective on growth, whereas E-Flux2 at `objective_fraction=1.0` forces a
+> growth-maximal state, so the ranking is conditioned on whichever estimator is used. State the
+> substitution in any report. An externally computed reference state can be supplied through
+> the Python API to restore the published pipeline.
 
 ### 3 — Direction map
 
@@ -191,7 +190,6 @@ file. Beyond the standard contract in [`_reporting.md`](_reporting.md):
   difference, not evidence that it *did*.
 - The ranking is conditioned on one medium and one reference state. Treat a different condition
   as a separate run.
-- Reactions ranked near the true answer are often the ones sharing its consequences — on the
-  pgi case, the pentose-phosphate branch that takes over and the glycolytic steps downstream.
-  That is the method working, not a failure, but it means the top of the list is a
-  neighbourhood rather than a single call.
+- Reactions ranked near the true answer are often the ones sharing its consequences. That is
+  the method working, not a failure, but it means the top of the list is a neighbourhood rather
+  than a single call.

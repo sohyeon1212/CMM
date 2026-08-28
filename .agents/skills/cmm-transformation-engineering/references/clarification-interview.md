@@ -65,11 +65,11 @@ what they do and do not establish.
 
 E-Flux2 or LAD. Present this as a choice with no correct answer, and state the shared caveat:
 
-> Yizhak et al. compute the source flux state with iMAT and 2,000 sampled flux distributions.
-> CMM implements no iMAT, so neither option reproduces the published pipeline. iMAT does not
-> maximise growth — it maximises agreement between expression and activity — while E-Flux2 at
-> full objective fraction does, so the two can assign substantially different flux. If you have
-> a reference state computed elsewhere, it can be supplied through the Python API instead.
+> Yizhak et al. compute the source flux state with iMAT. CMM implements no iMAT, so neither
+> option reproduces the published pipeline. iMAT places no objective on growth while E-Flux2 at
+> full objective fraction maximises it, so the ranking is conditioned on whichever you pick. If
+> you have a reference state computed elsewhere, it can be supplied through the Python API
+> instead.
 
 E-Flux2 scales bounds by expression and needs QP; LAD fits |flux| to expression targets and
 needs only LP. Neither relaxes the MIQP requirement of the search itself.

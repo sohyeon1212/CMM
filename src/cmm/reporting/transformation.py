@@ -351,10 +351,8 @@ def _compose(
     )
     parts.append(
         "<div class='note'><strong>The reference state is not the published one.</strong> "
-        f"{e(str(provenance.get('reference_state_deviation', '')))}. iMAT maximises agreement "
-        "between expression and activity with no objective on growth, so it and a "
-        "growth-maximal estimate can assign substantially different flux; the ranking below is "
-        "conditioned on the state actually used.</div>"
+        f"{e(str(provenance.get('reference_state_deviation', '')))}. iMAT places no objective "
+        "on growth, so the ranking below is conditioned on the estimator that was used.</div>"
     )
     parts.append(
         "<div class='note'><strong>Epsilon was chosen, not derived.</strong> It is how far a "

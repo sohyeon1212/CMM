@@ -75,12 +75,11 @@ Use direct documented CMM analyses only when the user narrows the request to one
 Three departures are structural, not incidental. The run's provenance records them; the report
 must state them in words.
 
-1. **The reference state is not iMAT.** Yizhak et al. obtain v_ref from iMAT with 2,000 sampled
-   flux distributions; CMM implements no iMAT and computes it with E-Flux2 or LAD. iMAT
-   maximises agreement between expression and activity with no objective on growth, whereas
-   E-Flux2 at `objective_fraction=1.0` forces a growth-maximal state, so the two can assign
-   substantially different flux. An externally computed reference state can be supplied through
-   the Python API to restore the published pipeline.
+1. **The reference state is not iMAT.** Yizhak et al. obtain v_ref from iMAT; CMM implements
+   no iMAT and computes it with E-Flux2 or LAD. iMAT places no objective on growth, whereas
+   E-Flux2 at `objective_fraction=1.0` forces a growth-maximal state, so the ranking is
+   conditioned on whichever estimator is used. An externally computed reference state can be
+   supplied through the Python API to restore the published pipeline.
 2. **ε is chosen, not derived.** The papers derive it per data set from the sampled reference
    distribution. It is measured in the model's own flux units, so a value suited to a core
    model is not suited to a genome-scale one, and there is no safe default.
