@@ -7,11 +7,21 @@ schema, a dedicated validator, a publication renderer, a thin CLI, and regressio
 
 > **Current shipped boundary**
 >
-> SC-01 production-target discovery is the only canonical workflow currently shipped by CMM.
-> It is the sole concrete reference in this tutorial. Names such as `MyWorkflowConfig`,
-> `MyWorkflowResult`, `run_my_workflow`, `render_my_workflow_report`, and
-> `validate_my_workflow_run` below are deliberately generic placeholders. They are not
-> installed, importable, or available as CLI commands in the current package.
+> CMM ships two canonical workflows, and they are worth reading against each other because
+> they answer the same structural questions differently:
+>
+> | | SC-01 production | SC-04 transformation |
+> |---|---|---|
+> | renderer | R, via `renderer="nature-r"` | pure Python + matplotlib |
+> | validator | `validate_production_run` | none yet |
+> | reproduce/render/validate scripts | written into `scripts/` | not written |
+>
+> **Neither is the template.** SC-01 is the fuller reference — it is the one with a validator
+> and a scripts directory — while SC-04 shows the smaller shape a workflow can take when its
+> panels have no R counterpart. Names such as `MyWorkflowConfig`, `MyWorkflowResult`,
+> `run_my_workflow`, `render_my_workflow_report`, and `validate_my_workflow_run` below are
+> deliberately generic placeholders. They are not installed, importable, or available as CLI
+> commands in the current package.
 
 Do not begin by copying the production module. First decide whether the new question needs a
 canonical workflow at all. Numerical work belongs in public solver-neutral services; a workflow
@@ -786,7 +796,10 @@ predictions remain *in silico* hypotheses until independently tested.
 ## Reference implementation and supporting documents
 
 - [SC-01 production-target discovery](../scenarios/SC-01-production-target-discovery.md)
+- [SC-04 transformation-target discovery](../scenarios/SC-04-transformation-target-discovery.md)
 - [Production workflow source](../../src/cmm/workflows/production.py)
+- [Transformation workflow source](../../src/cmm/workflows/transformation.py)
+- [Transformation report renderer](../../src/cmm/reporting/transformation.py)
 - [Production schema validator](../../src/cmm/reporting/schema.py)
 - [Production publication layer](../../src/cmm/reporting/publication.py)
 - [Production R renderer](../../src/cmm/reporting/render_publication_figures.R)

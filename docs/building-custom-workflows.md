@@ -1,10 +1,10 @@
 # Building or customizing a CMM workflow
 
-CMM currently ships **one canonical workflow**: SC-01 production-target discovery. It is the
-reference implementation for binding a scientific question to an exact model, explicit
-conditions, solver requirements, typed numerical results, provenance, a publication renderer,
-and a validated artifact directory. An analysis recipe over public services, by contrast,
-they are not installed workflow commands or validated run schemas.
+CMM ships **two canonical workflows**: SC-01 production-target discovery and SC-04
+transformation-target discovery. Each binds a scientific question to an exact model, explicit
+conditions, solver requirements, typed numerical results, provenance, a report renderer, and an
+artifact directory. An analysis recipe composed over public services is a legitimate way to
+work, but it is neither an installed workflow command nor a validated run schema.
 
 This guide separates two legitimate extension paths:
 
@@ -23,6 +23,7 @@ There are three ways to use CMM. Choose by scientific scope, not by preferred in
 | Need | Boundary | Reproducible output |
 |---|---|---|
 | Complete production-target study | `ProductionWorkflowConfig` and `run_production_target_discovery` | Canonical schema-v2 run, R report, validator |
+| Which knockout moves one metabolic state toward another | `TransformationWorkflowConfig` and `run_transformation_target_discovery` | Canonical schema-v2 run, Python report |
 | Same study with different thresholds, candidate counts, search seed, or sampling settings | Change the canonical config | Same canonical schema and validation contract |
 | A different scientific question or a single analysis | Track A: compose documented functions in `cmm.core`, `cmm.features`, or `cmm.omics` | A downstream study with its own declared outputs |
 | A second reusable, installed CMM workflow | Track B: contribute a workflow-specific API, schema, reporter, validator, CLI, and tests | A separately versioned canonical run contract |
@@ -363,14 +364,16 @@ Follow the complete contributor tutorial:
 
 - [Adding a canonical workflow to CMM](tutorials/adding-a-canonical-workflow.md)
 
-That tutorial uses SC-01 as the only shipped reference and generic `MyWorkflow...` names for
-non-installed skeletons. It covers the scientific contract, typed public services, config and
+That tutorial uses SC-01 and SC-04 as its two shipped references and generic `MyWorkflow...`
+names for non-installed skeletons. It covers the scientific contract, typed public services, config and
 result types, orchestration, schema and manifest, dedicated validation and R reporting, CLI and
 package exports, documentation, tests, and release criteria.
 
-Do not import or copy private helpers from `cmm.workflows.production`. The current artifact
-contracts, `validate_run` implementation, report narrative, figure order, and R script are
-production-specific even where a name appears generic. A new workflow needs its own schema id
+Do not import or copy private helpers from `cmm.workflows.production`, and treat
+`cmm.workflows._bundle` the same way — it is shared between the two shipped workflows, but the
+leading underscore means it carries no stability promise for anything outside the package. The
+current artifact contracts, `validate_run` implementation, report narrative, figure order, and
+R script are production-specific even where a name appears generic. A new workflow needs its own schema id
 and version, semantic roles, scientific invariants, renderer inputs, and validation boundary.
 Only genuinely reusable infrastructure should be extracted, named neutrally, and tested before
 a second workflow depends on it.
