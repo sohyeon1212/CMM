@@ -184,6 +184,52 @@ def gene_directions_from_replicates(
     return frame
 
 
+def gene_directions_by_fold_change(
+    source: "pd.DataFrame",
+    target: "pd.DataFrame",
+    *,
+    up_threshold: float = 1.0,
+    down_threshold: float = 1.0,
+) -> "pd.DataFrame":
+    """Discretize log-scale expression on fold change, in the replicate-frame evidence shape.
+
+    The fold-change counterpart of :func:`gene_directions_from_replicates`, for data that
+    cannot support the published t-test — one measurement per state, or replicates a caller
+    has chosen not to test. Both frames are indexed by gene with one column per replicate and
+    are treated as **already log-scaled**, so the difference of column means is the log2 fold
+    change; that is the same convention the t-test route uses, which is what lets a caller
+    swap between the two without also changing what the numbers mean.
+
+    ``p_value`` is present but NaN so the returned frame has the same columns either way, and
+    a report can state plainly that no test was run rather than omitting the column.
+    """
+
+    import numpy as np
+    import pandas as pd
+
+    if up_threshold < 0 or down_threshold < 0:
+        raise ValueError("fold-change thresholds must be non-negative")
+    shared = source.index.intersection(target.index)
+    if not len(shared):
+        raise ValueError(
+            "source and target expression share no gene ids; check that both use the same "
+            "identifier system"
+        )
+    src, tgt = source.loc[shared], target.loc[shared]
+    frame = pd.DataFrame(
+        {"log2_fold_change": tgt.mean(axis=1) - src.mean(axis=1)}, index=shared
+    )
+    frame["t_statistic"] = np.nan
+    frame["p_value"] = np.nan
+    frame["significant"] = (frame["log2_fold_change"] >= up_threshold) | (
+        frame["log2_fold_change"] <= -down_threshold
+    )
+    frame["direction"] = np.where(
+        ~frame["significant"], 0, np.where(frame["log2_fold_change"] > 0, 1, -1)
+    ).astype(int)
+    return frame
+
+
 def _eval_gpr_indicator(node: ast.AST | None, indicator: Mapping[str, int]) -> int:
     """Evaluate one **binary** 0/1 gene indicator over a GPR AST: AND -> min, OR -> max.
 

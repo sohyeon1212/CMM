@@ -230,6 +230,53 @@ def test_t_test_labels_genes_by_direction_of_the_shift():
     assert frame["log2_fold_change"].iloc[0] == pytest.approx(3.0, abs=0.01)
 
 
+def test_fold_change_frame_matches_the_t_test_frame_shape():
+    import numpy as np
+
+    from cmm.omics.differential import (
+        gene_directions_by_fold_change,
+        gene_directions_from_replicates,
+    )
+
+    source = _replicates(np.array([[8.0, 8.1, 7.9], [8.0, 8.1, 7.9], [8.0, 8.1, 7.9]]))
+    target = _replicates(
+        np.array([[11.0, 11.1, 10.9], [5.0, 5.1, 4.9], [8.2, 8.3, 8.1]])
+    )
+    frame = gene_directions_by_fold_change(source, target, up_threshold=1.0)
+    # Same columns as the t-test route, so a caller can swap tests without also changing
+    # what it reads back; p_value is present but unset because no test was run.
+    assert set(frame) == set(gene_directions_from_replicates(source, target))
+    assert frame["p_value"].isna().all()
+    assert list(frame["direction"]) == [1, -1, 0]
+    assert frame["log2_fold_change"].iloc[0] == pytest.approx(3.0, abs=0.01)
+
+
+def test_fold_change_works_on_a_single_measurement_per_state():
+    import numpy as np
+
+    from cmm.omics.differential import gene_directions_by_fold_change
+
+    source = _replicates(np.array([[1.0], [4.0]]), columns=("only",))
+    target = _replicates(np.array([[3.0], [1.0]]), columns=("only",))
+    frame = gene_directions_by_fold_change(source, target, up_threshold=1.5)
+    assert list(frame["log2_fold_change"]) == [2.0, -3.0]
+    assert list(frame["direction"]) == [1, -1]
+
+
+def test_fold_change_rejects_disjoint_identifiers_and_negative_thresholds():
+    import numpy as np
+    import pandas as pd
+
+    from cmm.omics.differential import gene_directions_by_fold_change
+
+    a = pd.DataFrame(np.ones((2, 3)), index=["a", "b"])
+    b = pd.DataFrame(np.ones((2, 3)), index=["x", "y"])
+    with pytest.raises(ValueError, match="share no gene ids"):
+        gene_directions_by_fold_change(a, b)
+    with pytest.raises(ValueError, match="non-negative"):
+        gene_directions_by_fold_change(a, a, up_threshold=-1.0)
+
+
 def test_t_test_needs_replicates_and_names_the_alternative():
     import numpy as np
 

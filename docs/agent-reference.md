@@ -614,6 +614,8 @@ flux_log_change(source_fluxes, target_fluxes, *, reactions=None, pseudocount=1e-
 sign_flips(source_fluxes, target_fluxes, *, reactions=None, tol=1e-6)
 differential_expression(model, source, target, *, reference=None, up_threshold=1.0,
                         down_threshold=1.0, pseudocount=1.0, reactions=None)
+gene_directions_from_replicates(source, target, *, p_value_cutoff=0.05)  # -> evidence frame
+gene_directions_by_fold_change(source, target, *, up_threshold=1.0, down_threshold=1.0)
 ```
 
 - `OmicsFluxResult`: `.method`, `.status`, `.objective_value`, `.fluxes`, `.detail`,
@@ -636,6 +638,15 @@ differential_expression(model, source, target, *, reference=None, up_threshold=1
 - Every `OmicsFluxResult` carries `metadata["cmm_deviations"]`
   (`cmm.omics.EFLUX2_DEVIATIONS` / `LAD_DEVIATIONS`) listing where the implementation departs
   from its source. Read it before quoting a number.
+- **The two gene-level direction tests take replicate frames, not vectors.** Both take a
+  gene-indexed frame with one column per replicate, treat the values as **already log-scaled**
+  (so the difference of column means is the log2 fold change), and return the same evidence
+  frame: `log2_fold_change`, `t_statistic`, `p_value`, `significant`, `direction`. Feed the
+  `direction` column to `reaction_directions`, and the frame's other columns to
+  `restrict_to_top_changed` — pass `gene_p_values` only when the t-test actually ran.
+  `gene_directions_from_replicates` is Yizhak et al.'s published step 2 and needs at least two
+  replicates on each side; `gene_directions_by_fold_change` is the fallback for data that
+  cannot support it, and a run that used it must say the published test was not applied.
 - `differential_expression` returns a `DirectionMap` for the revert/transform methods. Its GPR
   rule is Yizhak et al.'s ternary rule — all subunits changed (AND), at least one changed (OR),
   **mixed ⇒ unchanged** — recorded as `metadata["gpr_rule"]`. This is a *different* operation

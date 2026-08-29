@@ -109,6 +109,10 @@ obsolete internal planning documents are removed from the public source tree.
   drawn as a blank grey network.
 - `cmm.resources.bundled_map_for(model)` returns the bundled map's path when it suits a model,
   and `None` when nothing does.
+- `cmm.omics.gene_directions_by_fold_change` — the fold-change counterpart of
+  `gene_directions_from_replicates`, returning the same evidence frame so a caller can swap
+  tests without also changing what the numbers mean. The SC-02 workflow's fold-change branch
+  is now this function.
 
 ### Fixed
 

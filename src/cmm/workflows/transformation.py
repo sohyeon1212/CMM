@@ -430,37 +430,24 @@ def _gene_directions(
 ) -> "pd.DataFrame":
     """Per-gene direction with its evidence, by whichever test the config selected."""
 
-    import numpy as np
-    import pandas as pd
+    from cmm.omics.differential import (
+        gene_directions_by_fold_change,
+        gene_directions_from_replicates,
+    )
 
-    from cmm.omics.differential import gene_directions_from_replicates
-
-    if config.significance == "ttest":
-        try:
+    try:
+        if config.significance == "ttest":
             return gene_directions_from_replicates(
                 source, target, p_value_cutoff=config.p_value_cutoff
             )
-        except ValueError as error:
-            raise TransformationWorkflowError(str(error)) from error
-
-    shared = source.index.intersection(target.index)
-    if not len(shared):
-        raise TransformationWorkflowError(
-            "source and target expression share no gene ids; check that both use the same "
-            "identifier system"
+        return gene_directions_by_fold_change(
+            source,
+            target,
+            up_threshold=config.up_threshold,
+            down_threshold=config.down_threshold,
         )
-    src, tgt = source.loc[shared], target.loc[shared]
-    frame = pd.DataFrame(
-        {"log2_fold_change": tgt.mean(axis=1) - src.mean(axis=1)}, index=shared
-    )
-    frame["p_value"] = np.nan
-    frame["significant"] = (frame["log2_fold_change"] >= config.up_threshold) | (
-        frame["log2_fold_change"] <= -config.down_threshold
-    )
-    frame["direction"] = np.where(
-        ~frame["significant"], 0, np.where(frame["log2_fold_change"] > 0, 1, -1)
-    ).astype(int)
-    return frame
+    except ValueError as error:
+        raise TransformationWorkflowError(str(error)) from error
 
 
 def _build_candidates(
