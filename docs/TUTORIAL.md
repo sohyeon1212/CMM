@@ -336,12 +336,21 @@ Ranks gene/reaction knockouts that move a **source** (e.g. disease) state toward
    `reaction`), and the **transformation weight α** (0–1, default 0.66). `rmta` is the
    published best/MOMA/worst workflow; `mta` is the published single MTA solve; the continuous
    option is an explicitly labeled historical heuristic.
-2. **Load source CSV/TSV…** and **Load target CSV/TSV…** — each is a two-column
-   gene/expression file (same format as §6). Both must load before **Run Revert** enables.
-3. **Run Revert.** The table ranks targets by score (best row highlighted); the summary names
-   the top normalization target. The source reference is generated from the **source**
-   expression with E-Flux2 at full objective. Per-reaction desired directions come from the
-   source→target expression change and GPR logic.
+2. **Load source CSV/TSV…** and **Load target CSV/TSV…** — each is a gene id column followed
+   by **one column per replicate**. A single column is one measurement per gene; two or more
+   are replicates. Values are linear expression (counts, TPM, FPKM), as in §6 — a negative
+   value is refused at the dialog. Both must load before **Run Revert** enables.
+3. Choose the **Significance test**. With at least two replicates on each side, `t-test`
+   applies Yizhak et al.'s (2013) step 2 — a per-gene Student's t-test at the **P cutoff**,
+   split three ways — which is the published route. With fewer, the option is disabled and
+   the tab cuts on the **Fold-change threshold** instead; the note under the fields says which
+   applies and why. Whichever ran also orders the **Top changed reactions** cut: smallest gene
+   P value for the t-test, largest |log2FC| for fold change.
+4. **Run Revert.** The table ranks targets by score (best row highlighted); the summary names
+   the top normalization target and states the test, how many genes were called changed, and
+   how many reactions were labelled. The source reference is generated from the
+   **source** expression with E-Flux2 at full objective. Per-reaction desired directions come
+   from the source→target expression change and GPR logic.
 
 Published `rmta` and `mta` need MIQP; `rmta_continuous` needs QP. On an unsupported solver
 the tab reports the capability error cleanly. The original studies use contextualization and

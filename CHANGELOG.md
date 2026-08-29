@@ -109,6 +109,18 @@ obsolete internal planning documents are removed from the public source tree.
   drawn as a blank grey network.
 - `cmm.resources.bundled_map_for(model)` returns the bundled map's path when it suits a model,
   and `None` when nothing does.
+- **The Revert Metabolism tab takes replicates and runs the published t-test.** Its expression
+  files were limited to one value per gene, so the only direction test the GUI could offer was
+  a fold-change cut — Yizhak et al.'s (2013) step 2 needed the Python API. Both files now read
+  a gene id column followed by one column per replicate, and with at least two on each side
+  the tab runs `gene_directions_from_replicates` (Student's t-test at a settable P cutoff)
+  through the same `reaction_directions` / `restrict_to_top_changed` path the SC-02 workflow
+  uses. With fewer, the t-test entry is disabled and a note states that the published test was
+  not applied. Values stay linear expression, as everywhere else in the app: they are
+  log2(x + 1) transformed per replicate for the comparison, and the E-Flux2/LAD source state
+  gets the replicate mean as measured. The summary line now records the test, the replicate
+  counts, how many genes were called changed and how many reactions were labelled. A
+  one-column file scores exactly as before.
 - `cmm.omics.gene_directions_by_fold_change` — the fold-change counterpart of
   `gene_directions_from_replicates`, returning the same evidence frame so a caller can swap
   tests without also changing what the numbers mean. The SC-02 workflow's fold-change branch
@@ -116,6 +128,19 @@ obsolete internal planning documents are removed from the public source tree.
 
 ### Fixed
 
+- **The desktop forms no longer lay themselves out differently on macOS.** `QFormLayout` takes
+  its alignment and field-growth policy from the platform style, and the styles disagree: most
+  give `AlignLeft` with `AllNonFixedFieldsGrow`, macOS gives `AlignHCenter` with
+  `FieldsStayAtSizeHint`. Under the macOS pair every group box centred its own label-and-field
+  block at that block's natural width, so a column of boxes landed at as many different x
+  positions as it had boxes and no two inputs shared a width — while the same code rendered
+  correctly under every other style, CI included. Both policies are now set explicitly. Three
+  smaller defects went with it: the stage boxes' label columns are pinned to one width
+  measured from the resolved font on first show (a minimum width is only a floor, so a label
+  that rendered wider still dragged its own box out of line); combo boxes and spin boxes are
+  styled to one 26px height, so a form row's pitch no longer depends on which control it
+  holds; and the inputs stop growing at a readable width instead of running the full width of
+  the panel on a large display.
 - **MTA/rMTA candidates are once again scored against a common yardstick.** The
   impossible-change mask was evaluated inside each candidate's knockout context, so it saw
   that candidate's modified bounds. A reaction could be masked for one knockout and not for

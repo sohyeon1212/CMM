@@ -372,9 +372,12 @@ that intends to follow the paper must set both:
   `restrict_to_top_changed()`. Left unset, every reaction clearing the fold-change thresholds
   stays changed, which is not the published protocol and adds one MIQP binary variable each.
 
-The published significance test is a Student's t-test over replicates. `gene_directions` cuts
-on log2 fold change instead, and the GUI loads one expression value per gene, so the published
-gene-selection step requires replicate data and the Python API.
+The published significance test is a Student's t-test over replicates, implemented as
+`gene_directions_from_replicates`. It is what the SC-02 workflow and the GUI's Revert
+Metabolism tab run whenever both expression files carry at least two replicate columns. Data
+that cannot support it fall back to a fold-change cut — `gene_directions` on a pair of vectors,
+or `gene_directions_by_fold_change` on the same replicate frames — which is not the published
+test, and a run that used it must say so.
 
 References: Yizhak K, Gabay O, Cohen H, Ruppin E (2013), *Nat Commun* 4:2632,
 <https://doi.org/10.1038/ncomms3632>; Valcárcel LV, Torrano V, Tobalina L, Carracedo A,

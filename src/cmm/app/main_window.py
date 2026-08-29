@@ -11,7 +11,7 @@ import html
 import math
 import sys
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 from pathlib import Path
 
@@ -20,7 +20,7 @@ from cobra.io import from_json, to_json
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from qtpy.QtCore import QEvent, QEventLoop, QObject, Qt, QThread, QTimer, Signal
-from qtpy.QtGui import QColor, QFont
+from qtpy.QtGui import QColor, QFont, QFontMetrics
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -93,13 +93,19 @@ from cmm.omics.conditions import (
     predict_condition_fluxes,
     read_expression_table,
 )
-from cmm.omics.differential import differential_expression
+from cmm.omics.differential import (
+    gene_directions_by_fold_change,
+    gene_directions_from_replicates,
+    reaction_directions,
+    restrict_to_top_changed,
+)
 from cmm.omics.expression import integrate_expression
 from cmm.app.svg_background import svg_background
 from cmm.resources import bundled_map_for, map_reaction_ids
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
+    import pandas as pd
 
 from cmm.visualization import (
     escher_flux_map,
@@ -159,8 +165,12 @@ QPushButton:disabled { background: #c2cedd; color: #eef1f5; border-color: #c2ced
 QPushButton:focus { border: 1px solid #7da3c8; }
 
 /* Combo boxes */
+/* A combo and a spin box sit in the same form columns, so their total heights are pinned to
+   the same 26px: min-height + both paddings + both 1px borders. Left to their own padding
+   they came out 32px and 30px, which put every stacked group of stage boxes on a slightly
+   different vertical grid. Change one of these and change the other to match. */
 QComboBox { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
-            border-radius: 6px; padding: 4px 8px; min-height: 22px; }
+            border-radius: 6px; padding: 3px 8px; min-height: 18px; }
 QComboBox:hover { border-color: #9bb4d0; }
 QComboBox:focus { border-color: #2f5e8f; }
 QComboBox::drop-down { border: none; width: 22px; }
@@ -172,7 +182,7 @@ QComboBox:disabled { background: #eef1f5; color: #9aa7b6; border-color: #dde3ea;
 
 /* Spin boxes */
 QDoubleSpinBox, QSpinBox { background: #ffffff; color: #1a2433; border: 1px solid #cdd6e1;
-    border-radius: 6px; padding: 3px 6px; min-height: 22px; }
+    border-radius: 6px; padding: 3px 6px; min-height: 18px; }
 QDoubleSpinBox:focus, QSpinBox:focus { border-color: #2f5e8f; }
 /* Styling a spin box in QSS drops the native step arrows, so draw them explicitly. */
 QDoubleSpinBox::up-button, QSpinBox::up-button { subcontrol-origin: border;
@@ -269,6 +279,86 @@ def _read_expression_vector(path: str) -> dict[str, float]:
     if not expression:
         raise ValueError("expression file contains no numeric expression values")
     return expression
+
+
+#: Added before the log2 of a linear expression value so a measured zero stays finite. Matches
+#: :func:`cmm.omics.differential.gene_log2_fold_change`'s default, which is what keeps a
+#: one-column linear file scoring identically through the old and the new direction routes.
+_LOG2_PSEUDOCOUNT = 1.0
+
+#: Widest a stage box's input is allowed to grow. The fields are told to fill their column so
+#: that every stage starts at the same x, but the column is as wide as the left panel, and a
+#: spin box holding "0.66" stretched across 600px reads as a text field, not a number entry.
+#: Below this the fields still fill the column, so they stay equal at any window size.
+_FIELD_MAX_WIDTH = 260
+
+#: Slack added to a stage label's measured text width before the shared column is pinned to it.
+#: A QLabel draws its text a pixel or two inside its own rect, and the column is fixed rather
+#: than merely floored, so an exact fit would clip the widest label on some platforms.
+_LABEL_PAD = 4
+
+
+def _read_expression_matrix(path: str) -> "pd.DataFrame":
+    """Read a gene-expression file into a gene-indexed frame of one column per measurement.
+
+    One numeric column is a single measurement per gene and supports a fold-change cut only.
+    Two or more are replicates, which is what Yizhak et al.'s (2013) Student's t-test needs.
+    The shape is a fact about the file, so it is read and reported rather than asked about.
+
+    Values are linear expression — counts, TPM, FPKM — as everywhere else in the app, so a
+    negative one is rejected here rather than left to surface as a solver error later.
+    """
+
+    import numpy as np
+    import pandas as pd
+
+    frame = pd.read_csv(path, sep=None, engine="python", index_col=0)
+    numeric = frame.select_dtypes("number")
+    if numeric.empty:
+        raise ValueError(
+            "expression file must have a gene id column followed by at least one numeric "
+            "expression column"
+        )
+    if numeric.isna().any().any():
+        raise ValueError("expression file carries missing values")
+    values = numeric.to_numpy(dtype=float)
+    if not np.isfinite(values).all() or (values < 0).any():
+        raise ValueError("expression values must be finite and non-negative")
+    numeric.index = [str(value) for value in numeric.index]
+    if numeric.index.has_duplicates:
+        raise ValueError("expression file contains duplicate gene ids")
+    return numeric
+
+
+def _as_expression_matrix(expression) -> "pd.DataFrame":
+    """Accept either a gene -> value mapping or an already-read replicate frame.
+
+    ``run_revert`` is called directly by the screenshot script and the smoke tests with plain
+    mappings, so widening the tab to replicates must not narrow that entry point.
+    """
+
+    import pandas as pd
+
+    if isinstance(expression, pd.DataFrame):
+        return expression
+    series = pd.Series(
+        {str(gene): float(value) for gene, value in expression.items()}, dtype=float
+    )
+    return series.to_frame("value")
+
+
+def _expression_in_log2(matrix: "pd.DataFrame") -> "pd.DataFrame":
+    """The replicate matrix in log2 space, which is where both direction tests operate.
+
+    Fold change is multiplicative, so only in log space is a doubling and a halving the same
+    distance either side of zero. The transform is applied per replicate rather than after
+    averaging; for a single column the two are the same number, which is what makes this route
+    agree exactly with the fold-change cut this tab applied before it accepted replicates.
+    """
+
+    import numpy as np
+
+    return np.log2(matrix + _LOG2_PSEUDOCOUNT)
 
 
 class _AnalysisWorker(QObject):
@@ -394,8 +484,13 @@ class CmmMainWindow(QMainWindow):
         # reuses the layout but not Escher's drawing conventions, so a picture exported from
         # the map itself is the way to get those without embedding a browser.
         self._map_background: "np.ndarray | None" = None
-        self._revert_source_expression: dict[str, float] | None = None
-        self._revert_target_expression: dict[str, float] | None = None
+        self._revert_source_expression: "pd.DataFrame | None" = None
+        self._revert_target_expression: "pd.DataFrame | None" = None
+        # The tab falls back to a fold-change cut on data that cannot carry a t-test; these
+        # separate that fallback from a fold-change run the user asked for.
+        self._revert_significance_forced = False
+        self._revert_significance_syncing = False
+        self._stage_labels_aligned = False
         # Real gene expression loaded from a CSV on the Omics tab, reused as the LAD/E-Flux2
         # reference template on the Comparison tab so that path is not left to synthetic data.
         self._omics_expression: dict[str, float] | None = None
@@ -456,6 +551,8 @@ class CmmMainWindow(QMainWindow):
         self.status_label = QLabel("Ready.")
         self.status_label.setObjectName("statusbar")
         outer.addWidget(self.status_label)
+
+        self._pin_form_layout_policies()
 
     def _build_menus(self) -> None:
         """A desktop-style menu bar: Analysis / Model / Config drive the platform."""
@@ -688,6 +785,36 @@ class CmmMainWindow(QMainWindow):
         return self._run_in_background(
             _compute_with_worker_model, label=label, cleanup=cleanup
         )
+
+    def _pin_form_layout_policies(self) -> None:
+        """Lay every form out the same way regardless of the host platform's style.
+
+        ``QFormLayout`` reads its alignment and growth policy from the style, and the styles
+        disagree: most give ``AlignLeft|AlignTop`` with ``AllNonFixedFieldsGrow``, while macOS
+        gives ``AlignHCenter|AlignTop`` with ``FieldsStayAtSizeHint``. Under the macOS pair
+        each box centres its own label-plus-field block at that block's natural width, so a
+        column of stage boxes lands at as many different x positions as it has boxes and no
+        two inputs share a width - while the same code renders perfectly aligned under any
+        other style. Pinning both makes the layout the design's, not the host's.
+        """
+
+        for form in self.findChildren(QFormLayout):
+            form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+    def showEvent(self, event) -> None:
+        """Square the revert tab's four label columns into one, once, on first show.
+
+        Deferred to here rather than done while building: a label's font is only finally
+        resolved when the window is realized, and a column pinned to a width measured before
+        that is wrong on exactly the machines whose fonts differ from the developer's. The
+        same pass caps how wide the inputs may grow.
+        """
+
+        super().showEvent(event)
+        if not self._stage_labels_aligned:
+            self._stage_labels_aligned = True
+            self._align_stage_forms(self._revert_stage_forms)
 
     # -- File menu (open / export) ------------------------------------------
 
@@ -2857,6 +2984,50 @@ class CmmMainWindow(QMainWindow):
         outer.addLayout(form)
         return box, form
 
+    @staticmethod
+    def _align_stage_forms(forms: Sequence[QFormLayout]) -> None:
+        """Give a column of stage boxes one shared label column, right-aligned to its fields.
+
+        Each ``QFormLayout`` sizes its label column to its own longest label, so four stacked
+        boxes put their inputs at four different x positions, and inside one box a short label
+        is left stranded against the box edge with its field far to the right. Widening every
+        label to the widest in the column lines the inputs up down the whole column, and
+        right-aligning keeps each colon beside the field it names.
+        """
+
+        labels = []
+        for form in forms:
+            for row in range(form.rowCount()):
+                item = form.itemAt(row, QFormLayout.LabelRole)
+                if item is None or item.widget() is None:
+                    # A spanning row - the replicate note - reports through FieldRole too, and
+                    # it is a wrapped paragraph that wants the whole box, not an input.
+                    continue
+                labels.append(item.widget())
+                field = form.itemAt(row, QFormLayout.FieldRole)
+                if field is not None and field.widget() is not None:
+                    field.widget().setMaximumWidth(_FIELD_MAX_WIDTH)
+        if not labels:
+            return
+        widest = 0
+        for label in labels:
+            # A label reports the *unstyled* font's width until it has been polished against
+            # the window it lives in - 190px rather than 134px for the longest of these - so
+            # measuring any earlier reserves a column half again wider than the text needs.
+            label.ensurePolished()
+            metrics = QFontMetrics(label.font())
+            widest = max(widest, metrics.horizontalAdvance(label.text()) + _LABEL_PAD)
+        for label in labels:
+            # setFixedWidth, not setMinimumWidth. A minimum is only a floor: a label that
+            # renders wider than this still widens its own QFormLayout's label column, and
+            # that stage's inputs then sit right of every other stage's. Measuring from the
+            # resolved font rather than from sizeHint is what makes the pin safe to apply.
+            label.setFixedWidth(widest)
+            # The alignment has to be set on the label's own text, not through the layout's
+            # setLabelAlignment: that positions the label *widget* inside the column, and
+            # every widget is now exactly the column's width.
+            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
     def _build_revert_tab(self) -> QWidget:
         tab = QWidget()
         # Parameters left, results right: the three stages are read once while setting a run
@@ -2879,7 +3050,9 @@ class CmmMainWindow(QMainWindow):
         # --- inputs -----------------------------------------------------------------------
         inputs_box, inputs_form = self._stage_box(
             "Input — two expression states",
-            "Two-column CSV or TSV, one value per gene. Source = the state to move away from.",
+            "CSV or TSV: a gene id column, then one column per replicate. Values are linear "
+            "expression (counts, TPM, FPKM), not log-transformed. Two or more replicates on "
+            "each side unlock the published t-test. Source = the state to move away from.",
         )
         source_row = QHBoxLayout()
         source_btn = QPushButton("Load source CSV/TSV…")
@@ -2930,9 +3103,9 @@ class CmmMainWindow(QMainWindow):
         self.revert_fold_change_spin.setToolTip(
             "A gene counts as changed when |log2 fold change| reaches this. 1.0 means a "
             "two-fold change.\n\n"
-            "Yizhak et al. instead use a Student's t-test at P < 0.05, which needs replicate "
-            "measurements. This tab loads one value per gene, so that route requires building "
-            "the direction map through the Python API."
+            "Used only when the significance test above is 'fold change'. Yizhak et al. use a "
+            "Student's t-test at P < 0.05 instead, which this tab runs whenever both files "
+            "carry at least two replicate columns."
         )
         self.revert_top_changed_spin = QSpinBox()
         self.revert_top_changed_spin.setRange(0, 100000)
@@ -2945,8 +3118,46 @@ class CmmMainWindow(QMainWindow):
             "cut is also what decides whether the run finishes. 0 keeps every reaction that "
             "clears the fold-change threshold."
         )
+        self.revert_significance_combo = QComboBox()
+        self.revert_significance_combo.addItem("t-test (P value)", "ttest")
+        self.revert_significance_combo.addItem("fold change", "fold_change")
+        self.revert_significance_combo.setToolTip(
+            "t-test: Yizhak et al.'s (2013) step 2 — Student's t-test per gene across the "
+            "replicate columns, split three ways at the P cutoff. This is the published "
+            "route and needs at least two replicates in each file.\n"
+            "fold change: cut on |log2 fold change| of the column means. All a single "
+            "measurement per state supports; say so when reporting a result.\n\n"
+            "Whichever is used also orders the 'top changed reactions' cut below: smallest "
+            "gene P value for the t-test, largest |log2FC| for fold change."
+        )
+        self.revert_p_value_spin = QDoubleSpinBox()
+        self.revert_p_value_spin.setDecimals(4)
+        self.revert_p_value_spin.setRange(0.0001, 1.0)
+        self.revert_p_value_spin.setSingleStep(0.01)
+        self.revert_p_value_spin.setValue(0.05)
+        self.revert_p_value_spin.setToolTip(
+            "A gene counts as changed when its two-sided Student's t-test P value falls "
+            "below this. Yizhak et al. use P < 0.05.\n\n"
+            "The test is run per gene with no multiple-testing correction, as the paper "
+            "specifies; the 'top changed reactions' cut is what limits the changed set."
+        )
+        self.revert_significance_combo.currentIndexChanged.connect(
+            self._on_revert_significance_changed
+        )
+        direction_form.addRow("Significance test:", self.revert_significance_combo)
+        direction_form.addRow("t-test P cutoff:", self.revert_p_value_spin)
         direction_form.addRow("Fold-change threshold:", self.revert_fold_change_spin)
         direction_form.addRow("Top changed reactions:", self.revert_top_changed_spin)
+        self.revert_replicate_note = QLabel("")
+        self.revert_replicate_note.setWordWrap(True)
+        # A wrapped label spanning a form row reports one line's height unless its size policy
+        # says the height depends on the width. Without this the note is clipped mid-sentence
+        # and spills past the box border - and only once the row is wide enough to wrap.
+        note_policy = self.revert_replicate_note.sizePolicy()
+        note_policy.setHeightForWidth(True)
+        self.revert_replicate_note.setSizePolicy(note_policy)
+        self.revert_replicate_note.setStyleSheet("color: #5a6b80; font-size: 11px;")
+        direction_form.addRow(self.revert_replicate_note)
         layout.addWidget(direction_box)
 
         # --- stage 3: the search ----------------------------------------------------------
@@ -3047,6 +3258,12 @@ class CmmMainWindow(QMainWindow):
 
         columns.addWidget(left_column, 1)
         columns.addWidget(results, 1)
+        # Aligned at the end of _build_ui rather than here: the labels have to be inside the
+        # window before their widths mean anything.
+        self._revert_stage_forms = [inputs_form, vref_form, direction_form, search_form]
+        # Nothing is loaded yet, so this settles the direction controls into their
+        # can't-t-test state and prints the reason rather than leaving them looking usable.
+        self._update_revert_direction_controls()
         return tab
 
     # -- behavior -----------------------------------------------------------
@@ -4108,6 +4325,81 @@ class CmmMainWindow(QMainWindow):
             and self._revert_target_expression is not None
         )
         self.revert_run_btn.setEnabled(ready)
+        self._update_revert_direction_controls()
+
+    def _revert_replicate_counts(self) -> tuple[int, int]:
+        """Replicate columns currently loaded on each side; 0 where no file is loaded.
+
+        A caller may assign a plain gene -> value mapping instead of a read frame, which is
+        one measurement per gene however it arrived.
+        """
+
+        counts = [
+            0 if state is None else int(getattr(state, "shape", (0, 1))[1])
+            for state in (
+                self._revert_source_expression,
+                self._revert_target_expression,
+            )
+        ]
+        return counts[0], counts[1]
+
+    def _on_revert_significance_changed(self) -> None:
+        """A user-driven pick of the test overrides the tab's own fallback for good."""
+
+        if not self._revert_significance_syncing:
+            self._revert_significance_forced = False
+        self._update_revert_direction_controls()
+
+    def _update_revert_direction_controls(self) -> None:
+        """Offer the t-test only when the loaded files can carry it, and say why not.
+
+        A t-test needs at least two replicates on each side. Leaving the option selectable on
+        a one-column file would trade a decision the user can make before running for a solver
+        error after it, so the option is disabled and the reason is stated next to it.
+        """
+
+        combo = self.revert_significance_combo
+        n_source, n_target = self._revert_replicate_counts()
+        loaded = n_source and n_target
+        can_ttest = n_source >= 2 and n_target >= 2
+        ttest_index = combo.findData("ttest")
+        item = combo.model().item(ttest_index)
+        if item is not None:
+            item.setEnabled(bool(can_ttest))
+        # Dropping to fold change on a file that cannot be tested is the tab's decision, not
+        # the user's, so it is remembered and undone once replicates arrive. A fold-change run
+        # the user chose while the t-test was available is left alone.
+        self._revert_significance_syncing = True
+        try:
+            if not can_ttest and combo.currentData() == "ttest":
+                combo.setCurrentIndex(combo.findData("fold_change"))
+                self._revert_significance_forced = True
+            elif can_ttest and self._revert_significance_forced:
+                combo.setCurrentIndex(ttest_index)
+                self._revert_significance_forced = False
+        finally:
+            self._revert_significance_syncing = False
+        significance = combo.currentData()
+        self.revert_p_value_spin.setEnabled(significance == "ttest")
+        self.revert_fold_change_spin.setEnabled(significance != "ttest")
+
+        if not loaded:
+            note = (
+                "Load both files to see how many replicates they carry. The t-test needs at "
+                "least two columns on each side."
+            )
+        elif can_ttest:
+            note = (
+                f"{n_source} source and {n_target} target replicates — Yizhak et al.'s "
+                f"t-test is available."
+            )
+        else:
+            note = (
+                f"{n_source} source and {n_target} target replicate(s): too few for a "
+                f"t-test, so the direction map is cut on fold change. State that the "
+                f"published test was not applied when reporting this run."
+            )
+        self.revert_replicate_note.setText(note)
 
     def load_revert_expression(self, role: str) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -4119,7 +4411,7 @@ class CmmMainWindow(QMainWindow):
         if not path:
             return
         try:
-            expression = _read_expression_vector(path)
+            expression = _read_expression_matrix(path)
         except Exception as exc:
             self.revert_summary.setText(
                 f"Could not read {html.escape(role)} expression: {html.escape(str(exc))}"
@@ -4128,15 +4420,18 @@ class CmmMainWindow(QMainWindow):
         import os
 
         name = os.path.basename(path)
+        n_genes, n_replicates = expression.shape
+        plural = "" if n_replicates == 1 else "s"
+        caption = f"{name} ({n_genes} genes x {n_replicates} column{plural})"
         if role == "source":
             self._revert_source_expression = expression
-            self.revert_source_label.setText(f"{name} ({len(expression)} genes)")
+            self.revert_source_label.setText(caption)
         else:
             self._revert_target_expression = expression
-            self.revert_target_label.setText(f"{name} ({len(expression)} genes)")
+            self.revert_target_label.setText(caption)
         self._update_revert_run_state()
         self.status_label.setText(
-            f"Loaded {role} expression ({len(expression)} genes)."
+            f"Loaded {role} expression ({n_genes} genes, {n_replicates} column{plural})."
         )
 
     def run_loaded_revert(self) -> None:
@@ -4153,8 +4448,8 @@ class CmmMainWindow(QMainWindow):
 
     def run_revert(
         self,
-        source_expression: Mapping[str, float],
-        target_expression: Mapping[str, float],
+        source_expression: "Mapping[str, float] | pd.DataFrame",
+        target_expression: "Mapping[str, float] | pd.DataFrame",
     ) -> None:
         method = self.method_combo.currentText()
         perturbation = self.perturbation_combo.currentText()
@@ -4163,6 +4458,25 @@ class CmmMainWindow(QMainWindow):
         top_changed = self.revert_top_changed_spin.value() or None
         reference_method = self.revert_reference_combo.currentText()
         fold_change = self.revert_fold_change_spin.value()
+        p_value_cutoff = self.revert_p_value_spin.value()
+        source_matrix = _as_expression_matrix(source_expression)
+        target_matrix = _as_expression_matrix(target_expression)
+        # A caller may drive this directly with one value per gene, so what is actually
+        # runnable is decided from the matrices in hand rather than from the combo's state.
+        significance = self.revert_significance_combo.currentData() or "fold_change"
+        if significance == "ttest" and (
+            source_matrix.shape[1] < 2 or target_matrix.shape[1] < 2
+        ):
+            significance = "fold_change"
+
+        # E-Flux2 and LAD scale reaction bounds by a linear expression level, so the flux
+        # state gets the replicate mean as measured; only the comparison moves to log space.
+        source_linear = {
+            str(gene): float(value)
+            for gene, value in source_matrix.mean(axis=1).items()
+        }
+        source_log2 = _expression_in_log2(source_matrix)
+        target_log2 = _expression_in_log2(target_matrix)
 
         def _compute(worker_model):
             # LAD takes no objective fraction: it fits |flux| to expression-derived targets
@@ -4170,7 +4484,7 @@ class CmmMainWindow(QMainWindow):
             extra = {"objective_fraction": 1.0} if reference_method == "eflux2" else {}
             source_result = integrate_expression(
                 worker_model,
-                source_expression,
+                source_linear,
                 method=reference_method,
                 **extra,
             )
@@ -4182,16 +4496,41 @@ class CmmMainWindow(QMainWindow):
             reference = source_result.to_flux_state(
                 f"source_expression_state_{reference_method}"
             )
-            direction = differential_expression(
-                worker_model,
-                source_expression,
-                target_expression,
-                reference=reference,
-                up_threshold=fold_change,
-                down_threshold=fold_change,
-                top_n_changed=top_changed,
+            if significance == "ttest":
+                genes = gene_directions_from_replicates(
+                    source_log2, target_log2, p_value_cutoff=p_value_cutoff
+                )
+            else:
+                genes = gene_directions_by_fold_change(
+                    source_log2,
+                    target_log2,
+                    up_threshold=fold_change,
+                    down_threshold=fold_change,
+                )
+            gene_dirs = {
+                str(gene): int(value) for gene, value in genes["direction"].items()
+            }
+            direction = reaction_directions(
+                worker_model, gene_dirs, reference=reference
             )
-            return revert_targets(
+            if top_changed is not None:
+                # With a t-test run, the smallest gene P value is the closer analogue of the
+                # paper's gene-level test than |log2FC|; without one there are no P values.
+                direction = restrict_to_top_changed(
+                    worker_model,
+                    direction,
+                    genes["log2_fold_change"].to_dict(),
+                    top_changed,
+                    gene_p_values=(
+                        genes["p_value"].to_dict() if significance == "ttest" else None
+                    ),
+                )
+            if not direction.nonsteady():
+                raise ValueError(
+                    "no reaction was labelled as changed; loosen the significance threshold "
+                    "or check that the two expression states differ"
+                )
+            ranking = revert_targets(
                 worker_model,
                 None,
                 reference,
@@ -4201,9 +4540,10 @@ class CmmMainWindow(QMainWindow):
                 epsilon=epsilon,
                 perturbation=perturbation,
             )
+            return ranking, genes, direction
 
         try:
-            ranking = self._run_model_in_background(
+            ranking, genes, direction = self._run_model_in_background(
                 _compute, label=f"Running revert ({method})…"
             )
         except (
@@ -4221,13 +4561,32 @@ class CmmMainWindow(QMainWindow):
             if i == 0:
                 for col in range(3):
                     self.revert_table.item(i, col).setBackground(QColor("#dce9d6"))
+        # The direction map is the run's largest hidden assumption — the same model and
+        # method rank differently under a t-test and a fold-change cut — so how it was built
+        # is stated with the result rather than left in the controls.
+        if significance == "ttest":
+            test = (
+                f"Student's t-test at P &lt; {p_value_cutoff:g} over "
+                f"{source_matrix.shape[1]}v{target_matrix.shape[1]} replicates"
+            )
+        else:
+            test = f"|log2 fold change| &ge; {fold_change:g}"
+        n_significant = int(genes["significant"].sum())
+        evidence = (
+            f"Direction map: {test} &mdash; "
+            f"{n_significant} of {len(genes)} shared genes changed, "
+            f"{len(direction.nonsteady())} reactions labelled."
+        )
         best = ranking.best()
         if best is not None:
             self.revert_summary.setText(
                 f"<b>Top normalization target: {best.target_id}</b> "
                 f"(score {best.score:.4g}, method {method}, {perturbation} knockout). "
-                f"Knocking it out moves the source state most toward the target state."
+                f"Knocking it out moves the source state most toward the target state.<br>"
+                f"{evidence}"
             )
+        else:
+            self.revert_summary.setText(f"No target was scored. {evidence}")
         self.status_label.setText(f"Revert prediction complete ({method}).")
 
     # -- transformation finder (A -> B) -------------------------------------
