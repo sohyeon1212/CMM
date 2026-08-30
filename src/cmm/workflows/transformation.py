@@ -15,7 +15,7 @@ other:
 ``05_transformation`` one optimisation per candidate, ranked
 ``06_validation``   the MOMA baseline the source paper compares against
 
-**Three things this workflow does differently from the papers, by construction.** They are
+**Two things this workflow does differently from the papers, by construction.** They are
 recorded in the run's provenance rather than hidden, and the report is required to state them.
 
 1. v_ref comes from E-Flux2 or LAD. The papers use iMAT, which CMM does not implement. iMAT
@@ -24,8 +24,9 @@ recorded in the run's provenance rather than hidden, and the report is required 
 2. ``epsilon`` is a fixed scalar. The papers derive it per data set from the sampled reference
    distribution. It is measured in the model's own flux units, so there is no safe default;
    :meth:`TransformationWorkflowConfig.suggest_epsilon` computes candidates from v_ref instead.
-3. Candidate reduction uses full flux coupling, not the papers' partial coupling. See
-   :mod:`cmm.features.coupling`.
+A reaction-level run additionally collapses coupled reactions to one representative each, using
+full flux coupling; see :mod:`cmm.features.coupling`. A gene-level run, the default, instead
+deduplicates genes sharing a blocked-reaction signature.
 """
 
 from __future__ import annotations

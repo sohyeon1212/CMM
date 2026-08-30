@@ -123,12 +123,16 @@ def test_transformation_skill_relative_markdown_links_resolve() -> None:
 
 
 def test_transformation_skill_states_the_deviations_it_must_disclose() -> None:
-    # These three are structural, not incidental: a run that omits them reads as reproducing a
+    # These two are structural, not incidental: a run that omits them reads as reproducing a
     # published pipeline it does not reproduce.
     skill = (TRANSFORMATION_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "iMAT" in skill
     assert "chosen, not derived" in skill  # epsilon
-    assert "full, not partial" in skill  # coupling
+    # Coupling is not a third deviation. Yizhak et al. apply partial coupling only in their
+    # reaction-level validation analyses, and rMTA ranks gene knockouts with no coupling
+    # reduction at all, so disclosing it as a departure from the published pipeline overstates
+    # what the sources do. The skill must keep that scoped.
+    assert "not a departure from rMTA" in skill
     # And the one input no inspection can check.
     assert "Never infer it from file names" in skill
 

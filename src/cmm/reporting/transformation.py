@@ -581,8 +581,9 @@ def _compose(
             f"<p class='meta'>Coupling: {e(str(coupling.get('coupling')))}, "
             f"{e(str(coupling.get('n_sets')))} sets from "
             f"{e(str(coupling.get('n_reactions')))} reactions. CMM computes full coupling, "
-            "which is stronger than the partial coupling the source paper uses: it can split "
-            "one of their sets but never merge two.</p>"
+            "which is stronger than partial coupling: it can split a partially coupled set "
+            "but never merge two, so this count is an upper bound on a partial-coupling "
+            "one.</p>"
         )
     parts.append(sources("transformation_candidates"))
 

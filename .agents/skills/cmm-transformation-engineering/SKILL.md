@@ -81,7 +81,7 @@ Use direct documented CMM analyses only when the user narrows the request to one
 
 ## Disclose what is not the published pipeline
 
-Three departures are structural, not incidental. The run's provenance records them; the report
+Two departures are structural, not incidental. The run's provenance records them; the report
 must state them in words.
 
 1. **The reference state is not iMAT.** Yizhak et al. obtain v_ref from iMAT; CMM implements
@@ -95,9 +95,11 @@ must state them in words.
    `TransformationWorkflowConfig.suggest_epsilon` reads percentiles off v_ref so the choice
    has a basis; offer those numbers rather than a bare default. Configure
    `validation.epsilon_sweep` when the ranking will be reported, and present the sensitivity.
-3. **Candidate reduction uses full, not partial, flux coupling.** Full coupling is stronger, so
-   the grouping is conservative — it can split one of the paper's sets but never merge two, and
-   the candidate count is an upper bound on theirs.
+A reaction-level run also collapses coupled reactions to one representative each, using full
+flux coupling. Full coupling is stronger than the partial coupling Yizhak et al. apply in their
+reaction-level validation analyses, so the grouping is conservative — it can split a partially
+coupled set but never merge two, and the candidate count is an upper bound on theirs. This is
+not a departure from rMTA, which ranks gene knockouts and applies no coupling reduction.
 
 Use the t-test whenever both files carry replicates: it is what the paper specifies, and
 `gene_directions_from_replicates` implements it. Fall back to a fold-change cut only for

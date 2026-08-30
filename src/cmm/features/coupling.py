@@ -5,20 +5,18 @@ intervention. Three reactions of an unbranched pathway always carry the same flu
 any one of them stops all three; counting them as three candidates counts one intervention three
 times and inflates the denominator of any "top *N*%" claim.
 
-Yizhak et al. (2013) reduce their candidate set this way before ranking — dead-end reactions
-out, essential reactions out, then *"the set of simulated knockouts is composed of a member from
-each partially coupled set (including singleton sets)"*.
+Yizhak et al. (2013) reduce their candidate set this way before their reaction-level validation
+analyses — dead-end reactions out, essential reactions out, then *"the set of simulated
+knockouts is composed of a member from each partially coupled set (including singleton sets)"*.
+Valcárcel et al. (2019) rank gene knockouts and apply no coupling reduction.
 
-**This module computes full coupling, not the paper's partial coupling.** Two reactions are
-fully coupled when ``v_i / v_j`` is the same constant in every steady state; partially coupled
-when each is non-zero exactly when the other is, with a ratio free to vary. Full coupling is
-strictly stronger, so the grouping here is conservative: it can split one of the paper's sets
-but can never merge two, so the candidate count it yields is an upper bound on the partial
-one.
-
-The reason for the substitution is cost. Full coupling falls out of one null-space computation;
-partial coupling needs flux coupling analysis, which is O(n^2) linear programmes and impractical
-at genome scale.
+**This module computes full coupling.** Two reactions are fully coupled when ``v_i / v_j`` is
+the same constant in every steady state; partially coupled when each is non-zero exactly when
+the other is, with a ratio free to vary. Full coupling is strictly stronger, so the grouping is
+conservative: it can split a partially coupled set but can never merge two, so the candidate
+count it yields is an upper bound on the partial one. Full coupling also falls out of one
+null-space computation, whereas partial coupling needs flux coupling analysis — O(n^2) linear
+programmes, impractical at genome scale.
 """
 
 from __future__ import annotations

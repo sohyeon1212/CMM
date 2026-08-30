@@ -266,6 +266,18 @@ yields, design rankings, expression-derived fluxes and one result field's meanin
 
 ### Scientific correctness
 
+- **The coupling disclosure no longer claims the source papers reduce candidates by partial
+  coupling.** Yizhak et al. (2013) apply it only in their reaction-level validation analyses
+  — *"in the validation analyses, the set of simulated knockouts is composed of a member from
+  each partially coupled set"* — and Valcárcel et al. (2019) rank gene knockouts with no
+  coupling reduction at all. `cmm.features.coupling`, the transformation workflow docstring,
+  the `cmm-transformation-engineering` disclosure list and the rendered report nonetheless
+  presented full-versus-partial coupling as one of three structural departures from "the
+  papers", which overstates what either source does and reads as a deviation from rMTA that
+  does not exist. Each now states what a reaction-level CMM run computes, names the Yizhak
+  scope, and says rMTA applies no such reduction. A gene-level run — the default, and the
+  perturbation level of both published human analyses — never reaches the coupling path. No
+  numerical behaviour changes.
 - **GPR `OR` resolution is per method, matching each source paper.** CMM's global `max` matched
   none of them. `gene_to_reaction_weights` gains an `or_rule` parameter defaulting to `"sum"`,
   which is what both Kim et al. 2016 (E-Flux2) and Lee et al. 2012 (LAD) specify; `AND = min`
