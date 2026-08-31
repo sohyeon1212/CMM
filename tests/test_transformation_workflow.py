@@ -440,9 +440,9 @@ def test_report_renders_figures_and_states_what_it_must(
 
     assert report.report_html.is_file()
     names = {path.name for path in report.figures}
-    assert "fig01_transformation_ranking.png" in names
-    assert "fig02_ranking_vs_moma.png" in names
-    assert "fig03_epsilon_sensitivity.png" in names
+    assert "fig02_transformation_ranking.png" in names
+    assert "fig03_ranking_vs_moma.png" in names
+    assert "fig04_epsilon_sensitivity.png" in names
     for path in report.figures:
         assert path.stat().st_size > 0
         # Editable vector output beside the raster: a figure that exists only as a PNG has to
@@ -491,7 +491,11 @@ def test_mta_run_does_not_publish_three_copies_of_one_score(
         validation=TransformationValidationConfig(enabled=False),
     )
     rows = run_transformation_target_discovery(config).ranking
-    assert set(rows[0]) == {"target_id", "score", "rank"}
+    assert not {"bTS", "mTS", "wTS"} & set(rows[0])
+    # The display name is unrelated to the component question and rides along wherever the
+    # model names the thing being knocked out, so the guard is on the components, not on the
+    # exact column set.
+    assert set(rows[0]) <= {"target_id", "target_name", "score", "rank"}
 
 
 @pytest.mark.requires_miqp
@@ -582,7 +586,7 @@ def test_completion_gate_catches_the_failures_a_browser_shows_as_success(
     # A figure the manifest still claims was drawn. The page shows an empty box.
     valid, issues = mutated(
         "no_png",
-        lambda root: (root / "figures/fig01_transformation_ranking.png").unlink(),
+        lambda root: (root / "figures/fig02_transformation_ranking.png").unlink(),
     )
     assert not valid and any("missing non-empty png" in issue for issue in issues)
 
@@ -592,7 +596,7 @@ def test_completion_gate_catches_the_failures_a_browser_shows_as_success(
         lambda root: (root / "report_standalone.html").write_text(
             re.sub(
                 r"src='data:image/png;base64,[^']*'",
-                "src='figures/fig01_transformation_ranking.png'",
+                "src='figures/fig02_transformation_ranking.png'",
                 (root / "report_standalone.html").read_text(encoding="utf-8"),
                 count=1,
             ),

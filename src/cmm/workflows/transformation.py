@@ -685,9 +685,13 @@ def run_transformation_target_discovery(
         # is returned in all four slots, so emitting them as columns would present one number
         # as three independent measurements that happen to agree.
         components = ("bTS", "mTS", "wTS") if config.method == "rmta" else ()
+        # The name column appears only when the model named something, so a reconstruction
+        # that names nothing writes exactly the table it wrote before.
+        named = any(target.target_name for target in ranking.targets)
         rows = tuple(
             {
                 "target_id": target.target_id,
+                **({"target_name": target.target_name} if named else {}),
                 "score": float(target.score),
                 "rank": index + 1,
                 **{
@@ -872,8 +876,14 @@ def _moma_baseline(model, reference, target_expression, candidates, config):
         targets=list(candidates),
         order=2,
     )
+    named = any(t.target_name for t in ranking.targets)
     return tuple(
-        {"target_id": t.target_id, "moma_score": float(t.score), "rank": i + 1}
+        {
+            "target_id": t.target_id,
+            **({"target_name": t.target_name} if named else {}),
+            "moma_score": float(t.score),
+            "rank": i + 1,
+        }
         for i, t in enumerate(ranking.sorted().targets)
     )
 

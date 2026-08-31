@@ -115,14 +115,16 @@ def _table(
 
 
 _FIGURE_ORDER = (
-    "fig01_transformation_ranking",
-    "fig02_ranking_vs_moma",
-    "fig03_epsilon_sensitivity",
+    "fig01_component_scores",
+    "fig02_transformation_ranking",
+    "fig03_ranking_vs_moma",
+    "fig04_epsilon_sensitivity",
 )
-#: Only the ranking is unconditional. The MOMA baseline and the epsilon sweep are configurable
-#: stages, and a run that switched one off is a valid run whose figure is legitimately absent —
+#: Only the ranking is unconditional. The component-score panel needs the best/worst contrast
+#: that only rMTA computes, and the MOMA baseline and epsilon sweep are configurable stages; a
+#: run that switched one off, or ran MTA, is a valid run whose figure is legitimately absent —
 #: the manifest records why, which is what keeps "absent" distinguishable from "broken".
-_REQUIRED_FIGURES = frozenset({"fig01_transformation_ranking"})
+_REQUIRED_FIGURES = frozenset({"fig02_transformation_ranking"})
 
 
 def renderer_script_path() -> Path:
@@ -590,8 +592,12 @@ def _compose(
     # --- 4. Results --------------------------------------------------------------------
     parts.append("<h2>4. Results</h2>")
     parts.append("<h3>Ranking</h3>")
-    parts.append(panel("fig01_transformation_ranking"))
-    columns = ["rank", "target_id", "score"]
+    parts.append(panel("fig01_component_scores"))
+    parts.append(panel("fig02_transformation_ranking"))
+    columns = ["rank", "target_id"]
+    if "target_name" in ranking[0]:
+        columns.append("target_name")
+    columns.append("score")
     for optional in ("bTS", "mTS", "wTS"):
         if optional in ranking[0]:
             columns.append(optional)
@@ -606,7 +612,7 @@ def _compose(
 
     parts.append("<h3>MOMA baseline</h3>")
     if baseline:
-        parts.append(panel("fig02_ranking_vs_moma"))
+        parts.append(panel("fig03_ranking_vs_moma"))
         parts.append(
             "<p>Yizhak et al. compare their method against a MOMA baseline and report it as "
             "<i>markedly inferior</i> for this task. The comparison is here because a ranking "
@@ -623,7 +629,7 @@ def _compose(
 
     parts.append("<h3>Epsilon sensitivity</h3>")
     if sweep:
-        parts.append(panel("fig03_epsilon_sensitivity"))
+        parts.append(panel("fig04_epsilon_sensitivity"))
         parts.append(sources("epsilon_sensitivity"))
     else:
         parts.append(

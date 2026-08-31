@@ -275,10 +275,112 @@ highlight_flag <- function(ids) {
   if (is.null(highlight)) rep(FALSE, length(ids)) else ids == highlight
 }
 
-# --- Figure 1 — transformation score against rank ---------------------------------------
+# A gene symbol or reaction name where the analysis stage resolved one, and the identifier
+# otherwise. Runs written before target_name existed carry no such column and fall back
+# cleanly, which is why this reads the frame rather than requiring the column.
+display_label <- function(frame) {
+  ids <- as.character(frame$target_id)
+  if (!"target_name" %in% names(frame)) return(ids)
+  names_col <- as.character(frame$target_name)
+  names_col[is.na(names_col)] <- ""
+  ifelse(nzchar(trimws(names_col)), trimws(names_col), ids)
+}
+
+# --- Figure 1 — best-case against worst-case component score ----------------------------
 render_panel(
-  id = "fig01_transformation_ranking",
+  id = "fig01_component_scores",
   label = "Figure 1",
+  caption = paste(
+    "Best-case against worst-case transformation score for every scored candidate.",
+    "Candidates in the lower-right quadrant move flux toward the target state even in the",
+    "worst case, and are the only ones the robust score amplifies."
+  ),
+  alt = "Scatter of best-case against worst-case transformation score, divided into quadrants",
+  roles = c("transformation_ranking"),
+  width_mm = 89,
+  height_mm = 65,
+  # Not required: under MTA the three component scores are one number, so this panel has
+  # nothing to draw, and a run that legitimately cannot produce it is still a complete run.
+  required = FALSE,
+  build = function() {
+    frame <- read_artifact_csv("transformation_ranking")
+    needed <- c("bTS", "mTS", "wTS")
+    if (!all(needed %in% names(frame))) {
+      stop("the ranking carries no bTS/mTS/wTS columns, which only rMTA reports")
+    }
+    for (col in needed) frame[[col]] <- as.numeric(frame[[col]])
+    frame <- frame[stats::complete.cases(frame[, needed, drop = FALSE]), , drop = FALSE]
+    if (nrow(frame) == 0L) stop("the ranking contains no scored candidate")
+    if (isTRUE(all.equal(frame$bTS, frame$wTS))) {
+      stop(paste(
+        "best-case and worst-case scores are identical, as they are under MTA;",
+        "the contrast is defined only for rMTA"
+      ))
+    }
+    frame$amplified <- frame$bTS > 0 & frame$mTS > 0 & frame$wTS < 0
+    frame$label <- display_label(frame)
+    marked <- frame[frame$amplified | highlight_flag(as.character(frame$target_id)), , drop = FALSE]
+    legend_labels <- c(`FALSE` = "Robust score = MOMA component", `TRUE` = "Amplified by the robust score")
+
+    plot <- ggplot2::ggplot(frame, ggplot2::aes(x = .data$bTS, y = .data$wTS)) +
+      ggplot2::geom_hline(yintercept = 0, linewidth = 0.3, colour = grey, linetype = "dashed") +
+      ggplot2::geom_vline(xintercept = 0, linewidth = 0.3, colour = grey, linetype = "dashed") +
+      # Amplified candidates are few and sit close to wTS = 0, where the bulk of the cloud
+      # also crowds. Drawing them as a second, larger layer keeps them visible whatever the
+      # axis range turns out to be.
+      ggplot2::geom_point(
+        data = frame[!frame$amplified, , drop = FALSE],
+        ggplot2::aes(colour = .data$amplified, shape = .data$amplified), size = 0.8
+      ) +
+      ggplot2::geom_point(
+        data = frame[frame$amplified, , drop = FALSE],
+        ggplot2::aes(colour = .data$amplified, shape = .data$amplified), size = 1.8
+      ) +
+      ggplot2::scale_colour_manual(
+        values = c(`FALSE` = blue, `TRUE` = orange), labels = legend_labels,
+        breaks = c(FALSE, TRUE), drop = FALSE, name = NULL
+      ) +
+      ggplot2::scale_shape_manual(
+        values = c(`FALSE` = 16, `TRUE` = 17), labels = legend_labels,
+        breaks = c(FALSE, TRUE), drop = FALSE, name = NULL
+      ) +
+      ggplot2::labs(x = "Best-case score (bTS)", y = "Worst-case score (wTS)") +
+      theme_nature() +
+      ggplot2::theme(legend.position = "bottom")
+    if (nrow(marked) > 0L) {
+      plot <- plot +
+        ggrepel::geom_text_repel(
+          data = marked,
+          mapping = ggplot2::aes(label = .data$label),
+          size = 2,
+          colour = "black",
+          family = font_family,
+          min.segment.length = 0,
+          segment.size = 0.25,
+          max.overlaps = 20L,
+          seed = 0L
+        )
+    }
+    caption <- sprintf(
+      paste(
+        "Best-case (bTS) against worst-case (wTS) transformation score for %d scored candidates.",
+        "The %d in the lower-right quadrant move flux toward the target state even in the worst",
+        "case and are the only ones the robust score amplifies; every other candidate carries",
+        "its MOMA-based component unchanged."
+      ),
+      nrow(frame),
+      sum(frame$amplified)
+    )
+    attr(plot, "cmm_caption") <- caption
+    attr(plot, "cmm_alt") <- caption
+    plot
+  }
+)
+
+# --- Figure 2 — transformation score against rank ---------------------------------------
+render_panel(
+  id = "fig02_transformation_ranking",
+  label = "Figure 2",
   caption = paste(
     "Transformation score against rank. A score that decays smoothly rather than falling away",
     "means the cut between the leading candidates and the rest is a choice, not a boundary."
@@ -294,6 +396,7 @@ render_panel(
     if (nrow(frame) == 0L) stop("the ranking contains no scored candidate")
     frame$rank <- as.integer(frame$rank)
     frame$score <- as.numeric(frame$score)
+    frame$label <- display_label(frame)
     frame$marked <- highlight_flag(as.character(frame$target_id))
     marked <- frame[frame$marked, , drop = FALSE]
 
@@ -307,7 +410,7 @@ render_panel(
         ggplot2::geom_point(data = marked, size = 1.4, colour = orange) +
         ggrepel::geom_text_repel(
           data = marked,
-          mapping = ggplot2::aes(label = .data$target_id),
+          mapping = ggplot2::aes(label = .data$label),
           size = 2,
           colour = orange,
           family = font_family,
@@ -331,10 +434,10 @@ render_panel(
   }
 )
 
-# --- Figure 2 — transformation rank against the MOMA baseline ---------------------------
+# --- Figure 3 — transformation rank against the MOMA baseline ---------------------------
 render_panel(
-  id = "fig02_ranking_vs_moma",
-  label = "Figure 2",
+  id = "fig03_ranking_vs_moma",
+  label = "Figure 3",
   caption = paste(
     "Each candidate's rank under the transformation method and under the MOMA baseline.",
     "Points on the diagonal are candidates the two methods agree on."
@@ -350,6 +453,7 @@ render_panel(
     merged <- merge(
       data.frame(
         target_id = as.character(ranking$target_id),
+        label = display_label(ranking),
         transformation_rank = as.integer(ranking$rank),
         stringsAsFactors = FALSE
       ),
@@ -380,7 +484,7 @@ render_panel(
         ggplot2::geom_point(data = marked, size = 1.5, colour = orange) +
         ggrepel::geom_text_repel(
           data = marked,
-          mapping = ggplot2::aes(label = .data$target_id),
+          mapping = ggplot2::aes(label = .data$label),
           size = 2,
           colour = orange,
           family = font_family,
@@ -393,10 +497,10 @@ render_panel(
   }
 )
 
-# --- Figure 3 — rank against epsilon ------------------------------------------------------
+# --- Figure 4 — rank against epsilon ------------------------------------------------------
 render_panel(
-  id = "fig03_epsilon_sensitivity",
-  label = "Figure 3",
+  id = "fig04_epsilon_sensitivity",
+  label = "Figure 4",
   caption = paste(
     "How each leading candidate's rank moves with epsilon. A candidate whose rank is flat",
     "across the sweep was not produced by the value that was chosen."

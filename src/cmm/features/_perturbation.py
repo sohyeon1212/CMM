@@ -58,6 +58,29 @@ def blocked_reactions_for_genes(
 PerturbationKind = Literal["gene", "reaction"]
 
 
+def target_display_name(model: Model, target_id: str, kind: PerturbationKind) -> str:
+    """The model's own label for a target id, or ``""`` when it names nothing useful.
+
+    Report tables and figure labels read ``6510_AT1`` or ``b1602`` otherwise, which no reader
+    can interpret. The name is taken from the SBML the run already stores — never from an
+    imported expression table, which is untrusted data — and a grouped gene target whose id is
+    a join of several ids resolves each part it can.
+    """
+
+    lookup = model.genes if kind == "gene" else model.reactions
+    parts = []
+    for piece in target_id.split(";"):
+        piece = piece.strip()
+        try:
+            entity = lookup.get_by_id(piece)
+        except KeyError:
+            continue
+        name = (getattr(entity, "name", "") or "").strip()
+        if name and name != piece:
+            parts.append(name)
+    return ";".join(parts)
+
+
 @dataclass(frozen=True)
 class Perturbation:
     """A single knockout, expressed as the reactions it forces to zero."""

@@ -20,8 +20,9 @@ obsolete internal planning documents are removed from the public source tree.
   file is the source — nothing in the model can detect a swap, and the reversed run is a
   correct answer to a different question.
 - **A report renderer and a completion gate for transformation runs.**
-  `cmm.reporting.render_transformation_report` draws three panels — score against rank,
-  transformation rank against the MOMA baseline, and rank against epsilon — through
+  `cmm.reporting.render_transformation_report` draws four panels — best-case against worst-case
+  component score, score against rank, transformation rank against the MOMA baseline, and rank
+  against epsilon — through
   `render_transformation_figures.R`, the same checked-in R/ggplot2 path SC-01 uses, and writes
   the same artifact pair: a linked `report.html` and a `report_standalone.html` carrying every
   figure as a data URI, with 300-DPI PNG plus editable SVG and PDF for each panel.
@@ -266,6 +267,25 @@ yields, design rankings, expression-derived fluxes and one result field's meanin
 
 ### Scientific correctness
 
+- **Ranked targets carry the model's own name for the thing they name.** `TargetScore` gains
+  `target_name`, populated from the SBML the run already stores — `model.genes[…].name` for a
+  gene-level target, `model.reactions[…].name` for a reaction-level one, never from an imported
+  expression table, which is untrusted data. Report tables and figure labels read `6510_AT1` or
+  `b1602` without it, which no reader can interpret. The name sits *beside* `target_id` and never
+  replaces it: names are neither unique nor always present, whereas the id is what provenance and
+  reproduction are written against. The export column appears only when something was actually
+  named, so a ranking over a model that names nothing exports exactly the table it did before.
+  Shared by FSEOF, OptKnock and revert, so both workflows gain it at once.
+- **The transformation report leads with the component scores rather than the shape of the list.**
+  The old first panel plotted transformation score against rank; both axes are artifacts of the
+  ranking, and under rMTA a single amplified candidate can be an order of magnitude above the
+  rest, flattening the other 400 onto the axis. The new `fig01_component_scores` plots best-case
+  (bTS) against worst-case (wTS), the space Equation 9 actually branches on, marking the
+  candidates the robust score amplifies and labelling them. Score against rank is kept as
+  `fig02_transformation_ranking` and is now the required panel, because it is the only one every
+  method can draw: under MTA the three component scores are one number, so the component panel
+  records why it cannot be drawn instead of failing the run. The MOMA and epsilon panels shift to
+  `fig03` and `fig04`.
 - **The coupling disclosure no longer claims the source papers reduce candidates by partial
   coupling.** Yizhak et al. (2013) apply it only in their reaction-level validation analyses
   — *"in the validation analyses, the set of simulated knockouts is composed of a member from

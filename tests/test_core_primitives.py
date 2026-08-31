@@ -182,3 +182,30 @@ def test_target_ranking_export_frame_is_deterministic():
     assert list(frame.columns) == ["rank", "target_id", "score"]
     assert list(frame["target_id"]) == ["y", "x"]
     assert list(frame["rank"]) == [1, 2]
+
+
+def test_target_name_is_exported_beside_the_id_and_never_replaces_it():
+    # Report tables and figure labels read "6510_AT1" or "b1602" without it, which no reader
+    # can interpret. It sits beside the id rather than replacing it because names are neither
+    # unique nor always present, while the id is what provenance is written against.
+    ranking = TargetRanking(
+        method="m",
+        targets=(
+            TargetScore("6510_AT1", 2.0, {"bTS": 1.0}, target_name="SLC1A5"),
+            TargetScore("343_AT1", 1.0, {"bTS": 0.5}),
+        ),
+    )
+    frame = ranking.to_frame()
+    assert list(frame.columns) == ["rank", "target_id", "target_name", "score", "bTS"]
+    assert list(frame["target_id"]) == ["6510_AT1", "343_AT1"]
+    # An unnamed target keeps its row and exports an empty label, not a missing one.
+    assert list(frame["target_name"]) == ["SLC1A5", ""]
+
+
+def test_a_ranking_that_names_nothing_exports_the_table_it_did_before():
+    # Models without gene or reaction names must not gain an empty column: the export is an
+    # artifact other tools read, so its shape cannot depend on an unrelated model's metadata.
+    ranking = TargetRanking(
+        method="m", targets=(TargetScore("b1602", 1.0), TargetScore("b0114", 0.5))
+    )
+    assert list(ranking.to_frame().columns) == ["rank", "target_id", "score"]

@@ -61,6 +61,7 @@ from cmm.features._perturbation import (
     grouped_gene_perturbations,
     perturbation_provenance,
     reaction_perturbations,
+    target_display_name,
 )
 from cmm.omics.differential import DirectionMap
 
@@ -618,6 +619,7 @@ def revert_targets(
                         "wTS": scores.worst,
                         **marker,
                     },
+                    target_name=target_display_name(model, pert.target_id, pert.kind),
                 )
             )
 

@@ -76,6 +76,26 @@ def _write(root: Path, relative: str, content: str) -> dict[str, object]:
     }
 
 
+def _rewrite_artifact(root: Path, relative: str, content: str) -> None:
+    """Replace an artifact and re-record its hash, as a real re-run would.
+
+    Editing a CSV without updating the manifest is exactly the corruption the completion gate
+    exists to catch, so a fixture that did it would be testing the gate, not the renderer.
+    """
+
+    (root / relative).write_text(content, encoding="utf-8")
+    manifest_path = root / "00_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = (root / relative).read_bytes()
+    for entry in manifest["artifacts"].values():
+        if entry["path"] == relative:
+            entry["sha256"] = hashlib.sha256(raw).hexdigest()
+            entry["size_bytes"] = len(raw)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+
 @pytest.fixture()
 def bundle(tmp_path: Path) -> Path:
     """A minimal but complete transformation run, written directly to disk."""
@@ -192,9 +212,10 @@ def test_r_renderer_writes_vector_and_raster_for_every_panel(bundle: Path) -> No
         figure["id"] for figure in manifest["figures"] if figure["status"] == "rendered"
     }
     assert rendered == {
-        "fig01_transformation_ranking",
-        "fig02_ranking_vs_moma",
-        "fig03_epsilon_sensitivity",
+        "fig01_component_scores",
+        "fig02_transformation_ranking",
+        "fig03_ranking_vs_moma",
+        "fig04_epsilon_sensitivity",
     }
     assert manifest["renderer"]["engine"] == "R/ggplot2"
     # The renderer records what produced the artwork, so a figure can be traced to a script.
@@ -212,9 +233,35 @@ def test_r_renderer_writes_vector_and_raster_for_every_panel(bundle: Path) -> No
     linked = report.report_html.read_text(encoding="utf-8")
     standalone = report.report_standalone_html.read_text(encoding="utf-8")
     # The two variants exist precisely because one of them survives being moved.
-    assert "src='figures/fig01_transformation_ranking.png'" in linked
+    assert "src='figures/fig01_component_scores.png'" in linked
     assert "src='figures/" not in standalone
-    assert standalone.count("data:image/png;base64,") == 3
+    assert standalone.count("data:image/png;base64,") == 4
+
+
+@pytest.mark.skipif(
+    not _r_is_ready(), reason="Rscript renderer packages are not installed"
+)
+def test_component_score_panel_is_skipped_with_a_reason_under_mta(bundle: Path) -> None:
+    # MTA computes one transformation score and reports it as all three components, so the
+    # best-versus-worst contrast this panel exists to show does not exist for that method. It
+    # must record why rather than fail the run, and rather than draw a diagonal of identical
+    # values that a reader would take for a result.
+    relative = "05_transformation/transformation_ranking.csv"
+    rows = (bundle / relative).read_text(encoding="utf-8").splitlines()
+    rewritten = [rows[0]]
+    for row in rows[1:]:
+        target, score, rank, b_ts, m_ts, _w_ts = row.split(",")
+        rewritten.append(",".join([target, score, rank, b_ts, m_ts, b_ts]))
+    _rewrite_artifact(bundle, relative, "\n".join(rewritten) + "\n")
+
+    report = render_transformation_report(bundle)
+    manifest = json.loads(report.figure_manifest.read_text(encoding="utf-8"))
+    panels = {figure["id"]: figure for figure in manifest["figures"]}
+    assert panels["fig01_component_scores"]["status"] == "skipped"
+    assert "rMTA" in panels["fig01_component_scores"]["reason"]
+    # The run is still complete: the required panel is the one every method can draw.
+    assert panels["fig02_transformation_ranking"]["status"] == "rendered"
+    assert validate_transformation_run(bundle).valid
 
     assert validate_transformation_run(bundle).valid
 
@@ -248,7 +295,7 @@ def test_optional_panels_are_absent_with_a_stated_reason(
     report = render_transformation_report(bundle)
     figures = json.loads(report.figure_manifest.read_text(encoding="utf-8"))["figures"]
     unavailable = {f["id"]: f for f in figures if f["status"] != "rendered"}
-    assert set(unavailable) == {"fig02_ranking_vs_moma", "fig03_epsilon_sensitivity"}
+    assert set(unavailable) == {"fig03_ranking_vs_moma", "fig04_epsilon_sensitivity"}
     for figure in unavailable.values():
         assert figure["reason"].strip()
 
