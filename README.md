@@ -276,6 +276,22 @@ iJO1366 (5166 variables), requires a full academic or commercial license.
 The `rmta_continuous` QP row above is **unverified**: the test suite has no test that solves its
 QP, only a GLPK capability-gate test. See [Known limits](docs/VALIDATION.md).
 
+### Expect MTA/rMTA on a genome-scale model to take hours
+
+A slow MIQP screen is the normal cost of these methods, not a hang or a misconfiguration. One
+measured reference point: published rMTA over Recon1 (3741 reactions, 1905 genes) at the gene
+level, 413 candidates after the blocked-reaction reduction, with Gurobi 13 on an 8-core Apple
+M4, took **about 95 s per candidate and 11.5 h end to end**. rMTA solves three MIQPs per
+candidate — best case, MOMA and worst case — against MTA's one, and candidates are evaluated
+sequentially, so wall time scales with the candidate count and extra cores do not shorten it
+much. Each additional value in `validation.epsilon_sweep` re-ranks every candidate and costs
+another full pass.
+
+Run these screens in the background rather than interrupting and retrying with smaller
+parameters, and size a run from its candidate count before launching it: cost is roughly the
+candidate count times the per-candidate solve time, so a smaller model with far fewer
+candidates is correspondingly cheaper.
+
 ## Python quick start
 
 ```python
