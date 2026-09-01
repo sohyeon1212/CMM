@@ -123,6 +123,7 @@ jobs:
 
           wheel_required = {
               "cmm/reporting/render_publication_figures.R",
+              "cmm/reporting/render_transformation_figures.R",
               "cmm/resources/LICENSE.escher.txt",
           }
           with ZipFile(wheels[0]) as archive:
@@ -145,6 +146,9 @@ jobs:
               ".agents/skills/cmm-production-engineering/SKILL.md",
               ".agents/skills/cmm-production-engineering/agents/openai.yaml",
               ".agents/skills/cmm-production-engineering/references/clarification-interview.md",
+              ".agents/skills/cmm-transformation-engineering/SKILL.md",
+              ".agents/skills/cmm-transformation-engineering/agents/openai.yaml",
+              ".agents/skills/cmm-transformation-engineering/references/clarification-interview.md",
               "docs/AI-USAGE.md",
           }
           with tarfile.open(sdists[0], mode="r:gz") as archive:
@@ -647,7 +651,9 @@ jobs:
         env:
           COVERAGE_FILE: ${{ runner.temp }}/.coverage.publication
         run: >-
-          uv run --no-sync pytest -q -ra tests/test_publication_reporting.py
+          uv run --no-sync pytest -q -ra
+          tests/test_publication_reporting.py
+          tests/test_transformation_reporting.py
           --cov=cmm --cov-branch --cov-report=
 
       - name: Upload locked-R publication coverage

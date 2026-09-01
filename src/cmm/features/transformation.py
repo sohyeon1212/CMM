@@ -43,6 +43,7 @@ from cmm.features._perturbation import (
     gene_perturbations,
     perturbation_provenance,
     reaction_perturbations,
+    target_display_name,
 )
 from cmm.features.comparison import moma
 from cmm.features.revert import revert_targets, tie_structure
@@ -173,13 +174,25 @@ def transformation_targets(
             result = moma(model, source_state, linear=False)
         if result.status != "optimal":
             nonoptimal += 1
-            scored.append(TargetScore(pert.target_id, 0.0))
+            scored.append(
+                TargetScore(
+                    pert.target_id,
+                    0.0,
+                    target_name=target_display_name(model, pert.target_id, pert.kind),
+                )
+            )
             continue
         predicted = FluxState(result.fluxes, name="perturbed")
         distance_to_target = predicted.distance(
             target_state, reactions=compare_rxns, order=order
         )
-        scored.append(TargetScore(pert.target_id, baseline - distance_to_target))
+        scored.append(
+            TargetScore(
+                pert.target_id,
+                baseline - distance_to_target,
+                target_name=target_display_name(model, pert.target_id, pert.kind),
+            )
+        )
 
     return TargetRanking(
         method="transform_moma",

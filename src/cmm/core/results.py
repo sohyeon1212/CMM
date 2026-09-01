@@ -21,10 +21,16 @@ class TargetScore:
     target_id: str
     score: float
     detail: Mapping[str, float] = field(default_factory=dict)
+    #: Human-readable label for ``target_id`` — a gene symbol or a reaction name, taken from
+    #: the model rather than from any imported table. Empty when the model names nothing, which
+    #: is why it never replaces ``target_id``: names are not unique and not always present,
+    #: whereas the id is the key that provenance and reproduction are written against.
+    target_name: str = ""
 
     def __post_init__(self) -> None:
         if not self.target_id:
             raise ValueError("target_id must not be empty")
+        object.__setattr__(self, "target_name", str(self.target_name or ""))
         score = float(self.score)
         if math.isnan(score):
             raise ValueError("target score must not be NaN")
@@ -73,8 +79,14 @@ class TargetRanking:
 
     def to_records(self) -> list[dict]:
         records: list[dict] = []
+        # The column only appears when something was actually named, so a ranking over a model
+        # that names nothing exports exactly the table it did before.
+        named = any(t.target_name for t in self.targets)
         for rank, t in enumerate(self.sorted().targets, start=1):
-            row = {"rank": rank, "target_id": t.target_id, "score": t.score}
+            row: dict = {"rank": rank, "target_id": t.target_id}
+            if named:
+                row["target_name"] = t.target_name
+            row["score"] = t.score
             row.update(t.detail)
             records.append(row)
         return records
@@ -84,6 +96,8 @@ class TargetRanking:
 
         records = self.to_records()
         base_cols = ["rank", "target_id", "score"]
+        if any("target_name" in r for r in records):
+            base_cols.insert(2, "target_name")
         detail_cols = sorted({k for r in records for k in r} - set(base_cols))
         frame = pd.DataFrame(records, columns=base_cols + detail_cols)
         return frame

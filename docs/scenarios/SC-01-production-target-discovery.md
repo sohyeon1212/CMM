@@ -14,8 +14,7 @@ requires:
   product: "exchange reaction id, for example EX_succ_e"
   condition: "explicit medium, substrate uptake, oxygen/aeration bounds, and other changed bounds"
 optional_inputs_from:
-  - "SC-02: a resolved biological condition"
-  - "SC-03: an exhaustive essentiality study"
+  - "a resolved biological condition from an omics comparison"
 solver:
   canonical_workflow: "QP for MOMA-L2; MILP for ROOM and strain design"
   strain_design: "importable straindesign; any additional backend requirement is surfaced"
@@ -146,7 +145,7 @@ Use the same condition object and resolved model state that every later step use
 
 Use the configured FBA or deterministic pFBA reference and record wild-type growth, product
 flux, and the complete state. MOMA, ROOM, and paired sampling must all refer to this same state
-and model fingerprint. SC-02 may supply the resolved biological condition, but the current
+and model fingerprint. An omics comparison may supply the resolved biological condition, but the current
 `ProductionWorkflowConfig` does not accept an LAD/E-Flux2 flux state as its reference.
 
 An expression-derived reference would change the biological question and requires a separate

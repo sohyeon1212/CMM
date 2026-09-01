@@ -7,9 +7,24 @@ title: Reporting principles and the canonical SC-01 artifact contract
 
 A study is finished when someone else could reproduce it from the directory it left behind.
 That means raw numbers, figures, provenance, and a narrative that references them—not a summary
-in chat. The principles below apply to every study, while the concrete directory, renderer, and
-validator in this document are the shipped SC-01 production contract. SC-02 and SC-03 are
-public-service recipes and do not automatically inherit this schema.
+in chat. The principles below apply to every study. Three of them bind both shipped workflows, because
+each is a way of failing invisibly:
+
+- **Two copies of the report.** `report.html` links its figures by relative path and
+  `report_standalone.html` embeds them. A reader given only the linked copy sees a page with
+  every figure missing and no indication that anything is absent.
+- **Every figure as raster and vector.** 300-DPI PNG for reading, SVG and PDF so a panel can be
+  edited rather than redrawn.
+- **A completion gate that is code, not judgement.** `validate_production_run` and
+  `validate_transformation_run` decide whether a run finished. An HTML file that opens is not
+  evidence: it can cite absent figures or a CSV edited after the render, and both look like
+  success in a browser.
+
+The concrete directory layout below is the SC-01 production contract specifically; SC-02 writes
+its own smaller directory with the same `00_*.json` roots, `figures/`, `scripts/` and report
+pair. Both render through checked-in R, each with its own script, because the panels one
+workflow needs have no counterpart in the other. Analysis recipes are public-service recipes
+and do not automatically inherit this schema.
 
 ---
 
@@ -451,7 +466,7 @@ sits at an artificial bound is not presented as a recommendation however highly 
 scan ranked it. For knockouts, the sampling column compares the matched wild-type and deletion
 ensembles; a wild-type-only sampling plot is not validation.
 
-SC-02 and SC-03 narrative requirements remain in their own scenario files; they must not inherit
+A recipe's narrative requirements stay in its own document; they must not inherit
 an SC-01 recommendation or strain-proposal section.
 
 ### How it is written

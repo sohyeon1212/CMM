@@ -1,34 +1,29 @@
 # CMM scenarios
 
-Step-by-step metabolic-engineering recipes for driving CMM from an AI coding CLI. Every
-scenario defines a complete scientific question, but only SC-01 currently has an installed
-workflow API, CLI command, versioned artifact schema, R report, and validator. SC-02 and SC-03
-must be composed from the documented public services, and their caller owns the resulting
-artifact contract.
+What each installed workflow's numbers mean. **These documents do not run anything** — each
+workflow is executed from its skill, which carries the command, the entry point and the
+capability gates. Read the section here when a result needs interpreting.
 
-Read `AGENTS.md` first for the router, the solver gate, and the rules. Read
-`docs/agent-reference.md` for signatures while writing the calls.
+| Workflow | Run it from | Read this for |
+|---|---|---|
+| Production targets | `.agents/skills/cmm-production-engineering/` | [SC-01](SC-01-production-target-discovery.md) |
+| Transformation targets | `.agents/skills/cmm-transformation-engineering/` | [SC-02](SC-02-transformation-target-discovery.md) |
 
-For a complete production request, use the auto-discoverable
-`.agents/skills/cmm-production-engineering/` skill and the canonical
-`cmm production-targets --config CONFIG` workflow. The detailed steps below explain the
-scientific roles and support narrow API calls; they are not a reason to invent a second,
-one-off orchestrator. To change workflow parameters or compose a downstream study, follow
+Read `docs/agent-reference.md` for signatures when writing narrow API calls. To change workflow
+parameters or compose a downstream study, follow
 [Building or customizing a CMM workflow](../building-custom-workflows.md). Contributors adding
 a second installed workflow should use the
 [canonical-workflow tutorial](../tutorials/adding-a-canonical-workflow.md).
 
 ## Index
 
-| ID | Delivery status | Goal | Requires | Minimum solver | Key outputs |
-|---|---|---|---|---|---|
-| [SC-01](SC-01-production-target-discovery.md) | Shipped canonical workflow | Increase production of a target metabolite, and design a strain where it is guaranteed | confirmed model, product exchange, condition | **QP + MILP** for the full workflow; strain design also needs importable `straindesign` | MOMA/ROOM single-deletion candidates, OptKnock/RobustKnock designs, FSEOF/FVSEOF targets, forward validation |
-| [SC-02](SC-02-omics-context-engineering.md) | Public-service recipe | Explain and exploit a difference between conditions | model, expression table | LP (LAD) | per-condition fluxes, ranked differences, context targets |
-| [SC-03](SC-03-knockout-screening.md) | Public-service recipe | Screen every single deletion | model | LP (FBA capacity) | capacity-based dependency classes; optional MOMA/ROOM product phenotypes |
+| ID | Goal | Requires | Minimum solver | Key outputs |
+|---|---|---|---|---|
+| [SC-01](SC-01-production-target-discovery.md) | Increase production of a target metabolite, and design a strain where it is guaranteed | confirmed model, product exchange, condition | **QP + MILP**; strain design also needs importable `straindesign` | MOMA/ROOM single-deletion candidates, OptKnock/RobustKnock designs, FSEOF/FVSEOF targets, forward validation |
+| [SC-02](SC-02-transformation-target-discovery.md) | Rank knockouts that move a source metabolic state toward a target state | confirmed model, source and target expression, condition | **MIQP** — no LP or QP substitute exists | ranked candidates with their transformation scores, the MOMA baseline, optional epsilon sensitivity |
 
-Every scenario is scientifically complete on its own and none is a prerequisite for another.
-Only SC-01 supplies its report and artifact contract automatically. A caller following SC-02
-or SC-03 must export the typed results and define how that study is validated.
+Each is scientifically complete on its own and neither is a prerequisite for the other. Both
+supply their report and artifact contract automatically.
 
 Shared, used by all of them:
 
@@ -39,27 +34,11 @@ Shared, used by all of them:
 
 ## How they fit together
 
-Each box below is an entry point. Start at whichever one matches the user's goal — the arrows
-are optional continuations, not required steps.
+Both workflows share the same preflight and reporting contracts:
 
 ```
-              every scenario: _preflight … _reporting
-
-   ┌──────────────┐                                ┌──────────────┐
-   │    SC-02     │                                │    SC-03     │
-   │ explain a    │                                │ essentiality │
-   │ difference   │                                │ + screening  │
-   └──────┬───────┘                                └──────┬───────┘
-          │  supplies the condition        supplies an exhaustive│
-          │  to search in                   single-deletion view │
-          └──────────────►┌──────────────┐◄─────────────────┘
-                          │    SC-01     │
-                          │  production  │
-                          │    strain    │
-                          └──────────────┘
-                       step 3  single KO (forward, MOMA/ROOM)
-                       step 4  design    (inverse, MILP)
-                       step 6  checks    (loopless FVA + response + sampling)
+   _preflight ─┬─►  production skill  ─►  SC-01 numbers  ─┬─► _reporting
+               └─►  transformation skill ─► SC-02 numbers ─┘
 ```
 
 - **SC-01 is the spine of a production goal.** Its single-knockout step evaluates every
@@ -68,17 +47,12 @@ are optional continuations, not required steps.
   These outputs answer different questions and remain separate tables and figure panels.
 - **A coupling-only request enters SC-01 at the strain-design step** and skips single-deletion
   and amplification analyses unless the user asks for them.
-- **The canonical full workflow does not silently downgrade.** Missing QP, MILP,
-  importable `straindesign`, R, or a required R package is a surfaced capability result. Any
-  additional backend requirement is surfaced by that backend. A user may
+- **SC-02 asks the inverse question.** Instead of pushing flux toward a product it ranks the
+  knockout that best moves one measured state toward another. It is complete on its own and is
+  not a step of SC-01.
+- **Neither workflow silently downgrades.** A missing QP, MILP, MIQP, importable
+  `straindesign`, R, or required R package is a surfaced capability result. A user may
   explicitly approve a narrower run, but its report must state which claim is no longer made.
-- **SC-02 and SC-03 are complete studies, not sub-steps.** "Why does condition A outproduce B"
-  and "which genes are essential" are finished answers. They *also* compose with SC-01 when the
-  goal is production — SC-02 chooses the condition, SC-03 gives the exhaustive deletion picture
-  — but neither is subordinate to it, and neither has to be run before SC-01.
-
-Only chain scenarios when the user's goal needs the second one, and say in the report why you
-ran it.
 
 ## Scenario document structure
 

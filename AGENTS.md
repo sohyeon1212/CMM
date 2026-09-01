@@ -8,65 +8,35 @@ perturbation-response analyses that support that.
 
 **Drive CMM through the Python API or its thin CLI, not the GUI.** Every numerical analysis is
 a solver-neutral service in `cmm.core`, `cmm.features`, `cmm.omics`; the desktop app is a thin
-view over the same calls. A complete production-engineering request uses the repository skill
-`.agents/skills/cmm-production-engineering/` and the composed workflow described below. A
-single-analysis request still calls its documented service directly.
+view over the same calls. A single-analysis request calls its documented service directly.
+
+**Two installed workflows carry their own skill, and the skill is the execution contract.** A
+complete request of either kind is run from the skill alone:
+
+| Request | Skill |
+|---|---|
+| Production / over-expression / knockout targets for a metabolite | [`cmm-production-engineering`](.agents/skills/cmm-production-engineering/SKILL.md) |
+| Which knockout moves one metabolic state toward another | [`cmm-transformation-engineering`](.agents/skills/cmm-transformation-engineering/SKILL.md) |
 
 Two document layers sit under this one. Read them on demand, not up front:
 
-- **`docs/scenarios/`** — step-by-step pipelines. Start here when the user has a goal.
+- **`docs/scenarios/`** — what each workflow's numbers mean, plus the shared preflight and
+  reporting contracts. The skill runs the analysis; read the scenario section you need when a
+  result needs interpreting.
 - **`docs/agent-reference.md`** — signatures and result objects. Read the section for the
   function you are about to call.
 
 ---
 
-## 1. Scenario router
+## 1. Which workflow
 
-Match the user's goal to a scenario and follow that file. Every scenario begins with
-`docs/scenarios/_preflight.md` and ends with `docs/scenarios/_reporting.md`.
+Both installed workflows are run from their skill; §0's table above is the whole routing
+decision. The scenario document beside each one explains what the numbers mean and is read
+when a result needs interpreting, not to execute a run.
 
-SC-01 is the only installed canonical workflow. SC-02 and SC-03 are complete scientific
-recipes over public services, not built-in workflow commands or production-schema runs. When
-following either recipe, preserve typed results and define the study's artifact contract rather
-than claiming compatibility with SC-01's renderer or validator.
-
-**Each scenario answers its own question and finishes on its own.** None is a mandatory
-prerequisite for another. They also combine, and the combinations below are the useful ones —
-but only run a second scenario when the user's goal actually needs it, and say why.
-
-| The user wants | Scenario | Ends here? |
-|---|---|---|
-| Increase production of metabolite X; find over-expression and knockout targets | [`SC-01`](docs/scenarios/SC-01-production-target-discovery.md) | yes — this is the spine of a production goal |
-| A strain where production is *guaranteed*, not merely possible | [`SC-01`](docs/scenarios/SC-01-production-target-discovery.md), entering at **step 4** | yes — step 4 searches and evaluates growth coupling |
-| Explain a metabolic difference between conditions or strains | [`SC-02`](docs/scenarios/SC-02-omics-context-engineering.md) | yes — a complete study on its own |
-| Which genes are essential; a single-deletion study | [`SC-03`](docs/scenarios/SC-03-knockout-screening.md) | yes — a complete study on its own |
-| Screen deletions *for a production goal* | [`SC-03`](docs/scenarios/SC-03-knockout-screening.md) → `SC-01` | no — the screen feeds SC-01's candidates |
-| Find targets *in a specific condition* backed by expression data | [`SC-02`](docs/scenarios/SC-02-omics-context-engineering.md) → `SC-01` | no — SC-02 picks the condition, SC-01 searches it |
-
-Equivalent natural-language intents map the same way: production enhancement and
-over-expression/knockout targets → SC-01; growth-coupled strain design → SC-01 (from step 4);
-omics analysis, condition comparison, or expression-data-backed target discovery → SC-02;
-knockout screening and essentiality → SC-03.
-
-How they relate:
-
-- **SC-01 is the spine of a production goal.** Start here when the goal is "make more of X"
-  and nothing narrower is being asked. Step 3 is an exhaustive forward single-gene screen with
-  MOMA/ROOM; step 4 separately searches multi-reaction growth-coupled designs with
-  OptKnock/RobustKnock and evaluates `guaranteed_product`. MOMA/ROOM do not validate those
-  multi-knockout designs. A request that is only about coupling enters at step 4 and skips the
-  single-knockout and amplification stages.
-- **SC-02 and SC-03 are complete studies in their own right**, not sub-steps of SC-01. Each
-  also composes with SC-01 when the user's goal is production: SC-02 supplies the condition to
-  search in, SC-03 supplies an exhaustive single-deletion picture. Neither is subordinate to it.
-
-`docs/scenarios/README.md` holds the same map with a diagram; read it when a request spans
-more than one scenario.
-
-If the request is a single analysis rather than a goal ("run FBA", "what is the theoretical
-yield"), skip the scenarios and call the function from `docs/agent-reference.md` directly.
-Two capabilities have no scenario and are reached that way: `revert_targets` (MTA/rMTA) and
-`transformation_targets`, documented in `docs/agent-reference.md` §9.
+Every run begins with `docs/scenarios/_preflight.md` and ends with
+`docs/scenarios/_reporting.md`. A single-analysis request — one FBA, one FVA, one sampling run
+— calls its documented service directly; see `docs/agent-reference.md`.
 
 ### Canonical production-workflow boundary
 
@@ -155,9 +125,10 @@ The canonical SC-01 workflow is stricter: its single-knockout comparison require
 ROOM so the two requested methods stay comparable. It fails its capability gate when QP or
 MILP is missing; it does not silently replace MOMA-L2 with MOMA-L1. OptKnock/RobustKnock also
 require importable `straindesign`; require Java only if the selected backend reports that it
-needs it. The `nature-r` report renderer separately requires `Rscript` and loadable renderer
-packages; compatible minima come from package metadata, while exact versions come from
-`renv.lock` and are asserted in CI.
+needs it. Both workflows' report renderers require `Rscript` and loadable renderer packages; compatible
+minima come from package metadata, while exact versions come from `renv.lock` and are asserted
+in CI. That gate is on rendering only — either workflow's `--analysis-only` mode writes its
+full run bundle without R.
 
 ---
 
@@ -173,9 +144,13 @@ packages; compatible minima come from package metadata, while exact versions com
    its evidence and scientific consequence, and resolve dependent questions in order. If any
    clarification was required, summarize the final run definition and obtain explicit approval
    before starting the workflow. Do not add that confirmation round to an initially complete
-   request. The production skill's
-   [`clarification-interview.md`](.agents/skills/cmm-production-engineering/references/clarification-interview.md)
-   defines the detailed protocol.
+   request. Each skill's `references/clarification-interview.md`
+   defines the detailed protocol —
+   [production](.agents/skills/cmm-production-engineering/references/clarification-interview.md),
+   [transformation](.agents/skills/cmm-transformation-engineering/references/clarification-interview.md).
+   The transformation interview additionally confirms, on every run, which expression file is
+   the source: nothing in the model can detect a swap, and the reversed run answers a different
+   question correctly.
 2. **Preflight first.** Run `docs/scenarios/_preflight.md` before any scenario. A model that
    does not grow, has no exchanges, or whose gene ids do not match the expression table will
    produce confident nonsense.

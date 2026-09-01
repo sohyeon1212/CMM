@@ -11,7 +11,12 @@ import pytest  # noqa: E402
 
 pytest.importorskip("qtpy")
 
-from cmm.app.main_window import CmmMainWindow, _read_expression_vector  # noqa: E402
+from cmm.app.main_window import (  # noqa: E402
+    CmmMainWindow,
+    _expression_in_log2,
+    _read_expression_matrix,
+    _read_expression_vector,
+)
 from cmm.features.comparison import ROOM_TOLERANCES, reference_flux  # noqa: E402
 from cmm.app.screenshots import (  # noqa: E402
     SOURCE_EXPRESSION,
@@ -189,6 +194,274 @@ def test_expression_vector_rejects_duplicates_and_negative_values(tmp_path):
     negative.write_text("gene,expression\ng1,-1\n")
     with pytest.raises(ValueError, match="non-negative"):
         _read_expression_vector(str(negative))
+
+
+def _write_replicates(path, expression, offsets):
+    """One CSV per state: a gene column, then one column per replicate.
+
+    ``offsets`` shifts each replicate off the shared mean so the t-test sees within-group
+    variance; without any the variance is zero and the P value is undefined.
+    """
+
+    header = "gene," + ",".join(f"rep{i + 1}" for i in range(len(offsets)))
+    rows = [
+        ",".join([gene] + [f"{value * (1 + off):.6g}" for off in offsets])
+        for gene, value in expression.items()
+    ]
+    path.write_text("\n".join([header, *rows]) + "\n")
+    return path
+
+
+def test_expression_matrix_reads_replicate_columns(tmp_path):
+    path = tmp_path / "replicates.tsv"
+    path.write_text("gene\tr1\tr2\tr3\ng1\t1\t2\t3\ng2\t4\t5\t6\n")
+
+    frame = _read_expression_matrix(str(path))
+    assert list(frame.index) == ["g1", "g2"]
+    assert frame.shape == (2, 3)
+
+
+def test_expression_matrix_rejects_duplicate_genes_and_missing_values(tmp_path):
+    duplicate = tmp_path / "duplicate.csv"
+    duplicate.write_text("gene,r1,r2\ng1,1,2\ng1,3,4\n")
+    with pytest.raises(ValueError, match="duplicate"):
+        _read_expression_matrix(str(duplicate))
+
+    missing = tmp_path / "missing.csv"
+    missing.write_text("gene,r1,r2\ng1,1,\n")
+    with pytest.raises(ValueError, match="missing"):
+        _read_expression_matrix(str(missing))
+
+    text_only = tmp_path / "text.csv"
+    text_only.write_text("gene,label\ng1,up\n")
+    with pytest.raises(ValueError, match="numeric"):
+        _read_expression_matrix(str(text_only))
+
+    # Expression is linear throughout the app, so a log-transformed table is refused at the
+    # file dialog rather than surfacing later as an E-Flux2 solver error.
+    negative = tmp_path / "log2.csv"
+    negative.write_text("gene,r1,r2\ng1,-1.5,-0.5\n")
+    with pytest.raises(ValueError, match="non-negative"):
+        _read_expression_matrix(str(negative))
+
+
+def test_the_comparison_moves_to_log_space_per_replicate():
+    import pandas as pd
+
+    linear = pd.DataFrame({"r1": [1.0, 7.0], "r2": [3.0, 15.0]}, index=["g1", "g2"])
+
+    # log2(x + 1) per replicate, not after averaging, so a one-column file reproduces the
+    # log-ratio the tab computed before it accepted replicates.
+    assert _expression_in_log2(linear)["r1"].tolist() == [1.0, 3.0]
+    assert _expression_in_log2(linear)["r2"].tolist() == [2.0, 4.0]
+
+
+def test_stage_forms_do_not_inherit_the_platform_form_layout_style(app):
+    """The stage boxes must lay out identically under macOS's QFormLayout style hints.
+
+    QFormLayout reads its alignment and growth policy from the style. Most styles give
+    AlignLeft + AllNonFixedFieldsGrow; macOS gives AlignHCenter + FieldsStayAtSizeHint, and
+    under that pair every box centres its own label-plus-field block at that block's natural
+    width - so the stages land at different x positions and no two inputs share a width. CI
+    renders under a non-macOS style, so the hints are applied here directly rather than by
+    swapping the application style, which would crash (QProxyStyle takes ownership).
+    """
+
+    from qtpy.QtWidgets import QAbstractSpinBox, QComboBox, QFormLayout, QGroupBox
+
+    def placements(window):
+        page = window.tabs.widget(window._tab_index("Revert Metabolism"))
+        return {
+            (control.mapTo(window, control.rect().topLeft()).x(), control.width())
+            for box in page.findChildren(QGroupBox)
+            for control in box.findChildren((QComboBox, QAbstractSpinBox))
+        }
+
+    window = CmmMainWindow(build_demo_model())
+    window.resize(1400, 900)
+    window._goto_tab(
+        "Revert Metabolism"
+    )  # a hidden page has no real geometry to measure
+    for form in window._revert_stage_forms:
+        form.setFormAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+    window.show()
+    for _ in range(5):
+        app.processEvents()
+
+    # The test is only worth anything if these hints really do break the layout.
+    assert len(placements(window)) > 1, (
+        "macOS's hints no longer scatter the stage inputs"
+    )
+
+    window._pin_form_layout_policies()
+    for _ in range(5):
+        app.processEvents()
+    fixed = placements(window)
+    assert len(fixed) == 1, f"stage inputs disagree on x/width: {sorted(fixed)}"
+
+
+def test_stage_inputs_do_not_stretch_across_a_wide_panel(app):
+    """Inputs fill their column so the stages align, but only up to a readable width.
+
+    They are told to grow because that is what puts every stage's inputs at one x; left
+    uncapped, a spin box holding "0.66" runs the full width of the left panel on a large
+    display. The wrapped note under the fields is not an input and must still span the box.
+    """
+
+    from qtpy.QtWidgets import QAbstractSpinBox, QComboBox, QGroupBox
+
+    window = CmmMainWindow(build_demo_model())
+    window.resize(2000, 1000)  # a display wide enough for the cap to bite
+    window._goto_tab("Revert Metabolism")
+    window.show()
+    for _ in range(5):
+        app.processEvents()
+
+    page = window.tabs.widget(window._tab_index("Revert Metabolism"))
+    controls = [
+        control
+        for box in page.findChildren(QGroupBox)
+        for control in box.findChildren((QComboBox, QAbstractSpinBox))
+    ]
+    assert controls
+    assert {control.width() for control in controls} == {260}
+
+    note = window.revert_replicate_note
+    assert note.width() > 400, (
+        "the note is an explanation, not a field; it spans the box"
+    )
+    # A wrapped label reports one line's height unless its policy says otherwise, and is then
+    # clipped mid-sentence. Check the text the tab actually shows, at its actual width.
+    for text in (
+        note.text(),
+        "1 source and 1 target replicate(s): too few for a t-test, so the direction map is "
+        "cut on fold change. State that the published test was not applied when reporting "
+        "this run.",
+    ):
+        note.setText(text)
+        for _ in range(5):
+            app.processEvents()
+        assert note.height() >= note.heightForWidth(note.width()), text
+
+
+def test_revert_stage_boxes_share_one_label_column(app):
+    """Four stacked stage boxes must put their inputs at one x, not four.
+
+    Each QFormLayout otherwise sizes its label column to its own longest label, which strands
+    a short label like 'Method:' against the box edge with its field far to the right.
+    """
+
+    from qtpy.QtGui import QFontMetrics
+    from qtpy.QtWidgets import QFormLayout
+
+    window = CmmMainWindow(build_demo_model())
+    window.show()  # the column is squared on first show, once the fonts are resolved
+
+    labels = []
+    for form in window._revert_stage_forms:
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.LabelRole)
+            if item is not None and item.widget() is not None:
+                labels.append(item.widget())
+    widths = {label.width() for label in labels}
+    assert len(widths) == 1, (
+        f"stage labels span several column widths: {sorted(widths)}"
+    )
+    assert {int(label.alignment()) & int(Qt.AlignRight) for label in labels} == {
+        int(Qt.AlignRight)
+    }
+    # Pinned, not floored: a label allowed to grow past the column would widen its own stage
+    # box alone and pull that stage's inputs out of line with every other stage.
+    for label in labels:
+        assert label.minimumWidth() == label.maximumWidth()
+        assert (
+            QFontMetrics(label.font()).horizontalAdvance(label.text()) <= label.width()
+        )
+    # Measured against the styled font, not the default one: measuring before the labels are
+    # realized would reserve a column half again wider than the text needs.
+    assert 0 < widths.pop() < 160
+
+
+def test_stage_controls_share_one_height(app):
+    """Combos and spin boxes in one form column must be the same height.
+
+    They are styled separately, so their paddings drifted apart (32px against 30px) and each
+    stage box ended up on its own vertical grid — the row pitch alternated with whichever
+    control the row happened to hold.
+    """
+
+    from qtpy.QtWidgets import QAbstractSpinBox, QComboBox
+
+    window = CmmMainWindow(build_demo_model())
+    page = window.tabs.widget(window._tab_index("Revert Metabolism"))
+    heights = {
+        control.sizeHint().height()
+        for kind in (QComboBox, QAbstractSpinBox)
+        for control in page.findChildren(kind)
+    }
+    assert len(heights) == 1, f"stage controls disagree on height: {sorted(heights)}"
+    assert heights.pop() <= 28
+
+
+def test_revert_ttest_offered_only_with_replicates(app, tmp_path):
+    window = CmmMainWindow(build_demo_model())
+    combo = window.revert_significance_combo
+
+    # Nothing loaded: the t-test entry is not selectable and the note says why.
+    assert combo.model().item(combo.findData("ttest")).isEnabled() is False
+    assert "two columns" in window.revert_replicate_note.text()
+
+    single = _write_replicates(tmp_path / "one.csv", SOURCE_EXPRESSION, [0.0])
+    window._revert_source_expression = _read_expression_matrix(str(single))
+    window._revert_target_expression = _read_expression_matrix(str(single))
+    window._update_revert_run_state()
+    assert combo.model().item(combo.findData("ttest")).isEnabled() is False
+    assert combo.currentData() == "fold_change"
+    assert window.revert_fold_change_spin.isEnabled()
+    assert not window.revert_p_value_spin.isEnabled()
+
+    triplicate = _write_replicates(
+        tmp_path / "three.csv", SOURCE_EXPRESSION, [-0.05, 0.0, 0.05]
+    )
+    window._revert_source_expression = _read_expression_matrix(str(triplicate))
+    window._revert_target_expression = _read_expression_matrix(str(triplicate))
+    window._update_revert_run_state()
+    assert combo.model().item(combo.findData("ttest")).isEnabled() is True
+    # The fold-change fallback was the tab's own, so replicates arriving restore the
+    # published test without the user having to notice the combo.
+    assert combo.currentData() == "ttest"
+    assert window.revert_p_value_spin.isEnabled()
+    assert not window.revert_fold_change_spin.isEnabled()
+    assert "t-test is available" in window.revert_replicate_note.text()
+
+    # A fold-change run the user chose while the t-test was available survives a reload.
+    combo.setCurrentIndex(combo.findData("fold_change"))
+    window._update_revert_run_state()
+    assert combo.currentData() == "fold_change"
+
+
+@pytest.mark.requires_miqp
+def test_revert_tab_runs_replicates_through_the_ttest(app, tmp_path):
+    window = CmmMainWindow(build_demo_model())
+    source = _write_replicates(
+        tmp_path / "source.csv", SOURCE_EXPRESSION, [-0.02, 0.0, 0.02]
+    )
+    target = _write_replicates(
+        tmp_path / "target.csv", TARGET_EXPRESSION, [-0.02, 0.0, 0.02]
+    )
+    window._revert_source_expression = _read_expression_matrix(str(source))
+    window._revert_target_expression = _read_expression_matrix(str(target))
+    window._update_revert_run_state()
+    combo = window.revert_significance_combo
+    combo.setCurrentIndex(combo.findData("ttest"))
+
+    window.run_loaded_revert()
+    # Same disease-branch gene as the single-measurement run: the published t-test route must
+    # not change which target wins on data that differ this strongly.
+    assert window.revert_table.item(0, 1).text() == "g2"
+    assert "t-test" in window.revert_summary.text()
+    assert "3v3 replicates" in window.revert_summary.text()
 
 
 @pytest.mark.requires_miqp

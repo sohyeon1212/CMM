@@ -134,6 +134,5 @@ For details, read only the relevant sections of:
 
 - [`AGENTS.md`](../../../AGENTS.md) for routing and shipped-feature boundaries.
 - [`SC-01`](../../../docs/scenarios/SC-01-production-target-discovery.md) for scientific roles and interpretation.
-- [`SC-03`](../../../docs/scenarios/SC-03-knockout-screening.md) when exhaustive single-deletion context is requested.
 - [`_reporting.md`](../../../docs/scenarios/_reporting.md) for the artifact and figure contract.
 - [`agent-reference.md`](../../../docs/agent-reference.md) for public signatures.

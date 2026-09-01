@@ -31,7 +31,7 @@ Only `cmm.app` depends on Qt. The scientific services, workflow, CLI, and valida
 importable and testable in a headless process. The `nature-r` renderer depends on an external
 `Rscript` process and fails before rendering when a declared package is unavailable.
 
-SC-01 is currently the only shipped canonical workflow. SC-02 and SC-03 are scientific recipes
+SC-01 and SC-02 are the shipped canonical workflows. Other analyses are recipes
 over the public services, not installed workflow APIs, CLI commands, or validated schemas. A
 contributor adding another canonical workflow must define a separate schema id/version,
 renderer, validator, and public boundary rather than treating production-specific helpers as a

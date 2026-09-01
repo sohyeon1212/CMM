@@ -75,6 +75,57 @@ run_provenance(model, method="my_run", note="...")
 Every numerical result already carries this in `result.metadata`. Never report a number
 without it — see the run contract in `AGENTS.md`.
 
+### Complete transformation workflow — `cmm.workflows.transformation`
+
+Use this boundary for an end-to-end SC-02 request — "which knockout moves this state toward
+that one" — and the individual functions below when the request names one analysis.
+
+```python
+from cmm.workflows.transformation import (
+    TransformationWorkflowConfig,
+    TransformationWorkflowResult,
+    run_transformation_target_discovery,
+)
+
+config = TransformationWorkflowConfig(
+    model_path="model/iAF1260.xml",
+    source_expression_path="data/wild_type.csv",   # the state to move AWAY from
+    target_expression_path="data/knockout.csv",    # the state to move TOWARD
+    output_dir="results/transformation",
+    method="mta",              # or "rmta": three solves per candidate, ~3x the cost
+    perturbation="gene",       # "reaction" to reproduce a published coupled-set ranking
+    epsilon=0.01,
+    condition=anaerobic,
+)
+result = run_transformation_target_discovery(config)
+```
+
+`TransformationWorkflowConfig(model_path, source_expression_path, target_expression_path,
+output_dir=None, solver=None, medium=None, condition=None, reference_method="eflux2",
+reference_objective_fraction=1.0, direction=DirectionConfig(), candidates=CandidateConfig(),
+method="mta", perturbation="gene", alpha=0.66, epsilon=1e-3, parameter_k=100.0,
+validation=TransformationValidationConfig(), overwrite=False)`.
+
+`DirectionConfig(significance="ttest", p_value_cutoff=0.05, up_threshold=1.0,
+down_threshold=1.0, top_n_changed=200, ranking="p_value")`;
+`CandidateConfig(exclude_blocked=True, exclude_essential=True, essential_growth_fraction=0.20,
+collapse_coupled_sets=None, explicit=None)`;
+`TransformationValidationConfig(enabled=True, run_moma_baseline=True, epsilon_sweep=())`.
+
+- **Source and target are not interchangeable.** The same pair asks two different questions and
+  nothing in the model can detect a swap. Confirm the direction; never infer it from filenames.
+- **MIQP is required and has no substitute.** `rmta_continuous` is a QP heuristic and is not
+  published rMTA.
+- `collapse_coupled_sets=None` follows the perturbation level — on for reactions, off for genes,
+  because coupled sets are defined on reactions. Asking for them on a gene run is rejected.
+- **`suggest_epsilon(reference_fluxes)`** returns percentiles of |v_ref| so epsilon can be
+  chosen against the model at hand. It is a flux magnitude; there is no safe default.
+- Every run's provenance states that v_ref is not the published iMAT-plus-sampling state, and
+  `result.summary()["candidate_construction"]` carries the count that is the denominator of any
+  percentile claim.
+
+CLI: `cmm transformation-targets --config CONFIG`.
+
 ### Complete production workflow — `cmm.workflows.production`
 
 Use this boundary for an end-to-end SC-01 request; use the individual functions below when the
@@ -563,6 +614,8 @@ flux_log_change(source_fluxes, target_fluxes, *, reactions=None, pseudocount=1e-
 sign_flips(source_fluxes, target_fluxes, *, reactions=None, tol=1e-6)
 differential_expression(model, source, target, *, reference=None, up_threshold=1.0,
                         down_threshold=1.0, pseudocount=1.0, reactions=None)
+gene_directions_from_replicates(source, target, *, p_value_cutoff=0.05)  # -> evidence frame
+gene_directions_by_fold_change(source, target, *, up_threshold=1.0, down_threshold=1.0)
 ```
 
 - `OmicsFluxResult`: `.method`, `.status`, `.objective_value`, `.fluxes`, `.detail`,
@@ -585,6 +638,15 @@ differential_expression(model, source, target, *, reference=None, up_threshold=1
 - Every `OmicsFluxResult` carries `metadata["cmm_deviations"]`
   (`cmm.omics.EFLUX2_DEVIATIONS` / `LAD_DEVIATIONS`) listing where the implementation departs
   from its source. Read it before quoting a number.
+- **The two gene-level direction tests take replicate frames, not vectors.** Both take a
+  gene-indexed frame with one column per replicate, treat the values as **already log-scaled**
+  (so the difference of column means is the log2 fold change), and return the same evidence
+  frame: `log2_fold_change`, `t_statistic`, `p_value`, `significant`, `direction`. Feed the
+  `direction` column to `reaction_directions`, and the frame's other columns to
+  `restrict_to_top_changed` — pass `gene_p_values` only when the t-test actually ran.
+  `gene_directions_from_replicates` is Yizhak et al.'s published step 2 and needs at least two
+  replicates on each side; `gene_directions_by_fold_change` is the fallback for data that
+  cannot support it, and a run that used it must say the published test was not applied.
 - `differential_expression` returns a `DirectionMap` for the revert/transform methods. Its GPR
   rule is Yizhak et al.'s ternary rule — all subunits changed (AND), at least one changed (OR),
   **mixed ⇒ unchanged** — recorded as `metadata["gpr_rule"]`. This is a *different* operation
@@ -607,7 +669,7 @@ confident, meaningless answer. Check the overlap before integrating.
 from cmm.features import direction_from_states, revert_targets, transformation_targets
 
 revert_targets(model, source_condition, reference_state, direction, *, targets=None,
-               method="rmta", alpha=0.66, epsilon=1e-3, parameter_k=100.0,
+               method="rmta", alpha=0.66, epsilon=DEFAULT_EPSILON, parameter_k=100.0,
                perturbation="gene", transcript_separator=None)
 transformation_targets(model, source_state, target_state, *, method="moma",
                        perturbation="gene", targets=None, order=2, alpha=0.66)
@@ -624,10 +686,16 @@ Both return a `TargetRanking`: `.sorted(descending=True)`, `.top(n)`, `.best()`,
 - **Check the tie structure before quoting a top-k.** `TargetRanking.metadata` carries
   `n_distinct_scores`, `largest_tie_block` and `score_resolution` (also available from
   `cmm.features.tie_structure`), because `TargetRanking.sorted` breaks ties alphabetically on
-  `target_id`. On the project's own SC-02 pair the `mta` path had a single tie block of 18 of
+  `target_id`. On one anaerobic/aerobic pair the `mta` path had a single tie block of 18 of
   71 genes even after 0.4.0 floored the score denominator and removed a 38-gene `+∞` block.
 - `direction` is the *goal*, not the intervention. The top-ranked knockout need not be one of
   the differentially expressed genes.
+- **To follow Yizhak et al., set `epsilon` and cut the changed set.** `epsilon` defaults to
+  `revert.DEFAULT_EPSILON`, a fixed scalar where the paper derives one per data set; the
+  changed set is uncut unless you pass `differential_expression(..., top_n_changed=N)` with
+  the paper's `N` of 100–200 (or call `restrict_to_top_changed`). The cut is not cosmetic —
+  every changed reaction is one more MIQP binary, so on a genome-scale model it decides
+  whether the run finishes.
 - rMTA is optimistic per knockout — a prioritization tool robustified by its worst-case term,
   not a proof.
 - **`transformation_targets` is not a CMM invention.** Both paths map to published Yizhak et al.

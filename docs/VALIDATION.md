@@ -361,6 +361,24 @@ The optimization, transformation score, and robust Equation 9 are documented in
 E-Flux2 source-state preprocessing, which differs from the original contextualization plus
 sampling protocol and must be disclosed in manuscripts.
 
+Two of Yizhak et al.'s preprocessing parameters are exposed rather than assumed, and a run
+that intends to follow the paper must set both:
+
+- **ε**, the flux change that counts as significant. `revert.DEFAULT_EPSILON` is a fixed
+  scalar; the paper derives ε per data set from a sampled reference distribution. State the
+  value used.
+- **the changed-set size.** The paper keeps only the top 100–200 most differentially expressed
+  reactions as "changed"; pass `differential_expression(top_n_changed=…)` or call
+  `restrict_to_top_changed()`. Left unset, every reaction clearing the fold-change thresholds
+  stays changed, which is not the published protocol and adds one MIQP binary variable each.
+
+The published significance test is a Student's t-test over replicates, implemented as
+`gene_directions_from_replicates`. It is what the SC-02 workflow and the GUI's Revert
+Metabolism tab run whenever both expression files carry at least two replicate columns. Data
+that cannot support it fall back to a fold-change cut — `gene_directions` on a pair of vectors,
+or `gene_directions_by_fold_change` on the same replicate frames — which is not the published
+test, and a run that used it must say so.
+
 References: Yizhak K, Gabay O, Cohen H, Ruppin E (2013), *Nat Commun* 4:2632,
 <https://doi.org/10.1038/ncomms3632>; Valcárcel LV, Torrano V, Tobalina L, Carracedo A,
 Planes FJ (2019), *Bioinformatics* 35(21):4350–4355,

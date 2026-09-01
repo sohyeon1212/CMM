@@ -9,6 +9,13 @@ from cmm.reporting.publication import (
     render_publication_figures,
     render_production_report,
 )
+from cmm.reporting.transformation import (
+    TransformationReport,
+    TransformationReportError,
+    render_transformation_figures,
+    render_transformation_report,
+    validate_transformation_run,
+)
 from cmm.reporting.schema import (
     ARTIFACT_CONTRACTS,
     RUN_SCHEMA_VERSION,
@@ -22,6 +29,11 @@ from cmm.reporting.schema import (
 
 __all__ = [
     "ARTIFACT_CONTRACTS",
+    "TransformationReport",
+    "TransformationReportError",
+    "render_transformation_figures",
+    "render_transformation_report",
+    "validate_transformation_run",
     "RUN_SCHEMA_VERSION",
     "FigureManifest",
     "PublicationBundle",

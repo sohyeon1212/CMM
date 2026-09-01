@@ -1,0 +1,6 @@
+interface:
+  display_name: "CMM Transformation Engineering"
+  short_description: "Rank knockouts that move one metabolic state toward another"
+  default_prompt: "Use $cmm-transformation-engineering to rank the knockouts that move my source metabolic state toward the target state, from two gene-expression profiles."
+policy:
+  allow_implicit_invocation: true

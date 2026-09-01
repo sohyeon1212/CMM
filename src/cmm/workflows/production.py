@@ -14,7 +14,7 @@ loading.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import math
@@ -92,6 +92,16 @@ ReferenceMethod = Literal["fba", "pfba"]
 SamplingMethod = Literal["optgp", "achr"]
 SingleKnockoutMethod = Literal["moma_l2", "room"]
 ArtifactStatus = Literal["complete", "partial", "skipped", "failed"]
+
+# The bundle writer lives in a shared module so this workflow and transformation-target
+# discovery emit one format and one validator can serve both. Imported under the original
+# names: every reference below is unchanged.
+from cmm.workflows._bundle import (  # noqa: E402
+    ArtifactRecord,
+    _ArtifactWriter,
+    _jsonable,
+)
+
 LooplessAlgorithm = Literal["cycleFreeFlux", "fastSNP"]
 
 _STRAIN_DESIGN_SEED_MAX = 2_000_000_000
@@ -569,20 +579,6 @@ def _validation_coverage(
         "sampling_failed": sum(item.status == "failed" for item in sampling_results),
         "sampling_skipped": sum(item.status == "skipped" for item in sampling_results),
     }
-
-
-@dataclass(frozen=True)
-class ArtifactRecord:
-    path: str
-    stage: str
-    role: str
-    media_type: str
-    status: ArtifactStatus = "complete"
-    method: str | None = None
-    reason: str | None = None
-    metadata_path: str | None = None
-    sha256: str | None = None
-    size_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2281,149 +2277,6 @@ def _annotate_loop_diagnostic(
         lambda target: value(target, "reason")
     )
     return output
-
-
-class _ArtifactWriter:
-    def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
-        self.records: list[ArtifactRecord] = []
-        self.metadata_links: dict[str, str] = {}
-
-    def _path(self, relative: str) -> Path:
-        path = self.root / relative
-        resolved = path.resolve(strict=False)
-        if not resolved.is_relative_to(self.root):
-            raise ProductionWorkflowError(
-                f"artifact path escapes the run directory: {relative!r}"
-            )
-        return path
-
-    def csv(
-        self,
-        relative: str,
-        frame: pd.DataFrame,
-        *,
-        stage: str,
-        role: str,
-        method: str | None = None,
-        status: ArtifactStatus = "complete",
-        reason: str | None = None,
-        metadata_path: str | None = None,
-    ) -> None:
-        path = self._path(relative)
-        frame.to_csv(path, index=False)
-        self._record(
-            path,
-            stage,
-            role,
-            "text/csv",
-            method,
-            status,
-            reason,
-            metadata_path,
-        )
-
-    def json(
-        self,
-        relative: str,
-        payload: object,
-        *,
-        stage: str,
-        role: str,
-        status: ArtifactStatus = "complete",
-        reason: str | None = None,
-    ) -> None:
-        path = self._path(relative)
-        path.write_text(
-            json.dumps(_jsonable(payload), indent=2, sort_keys=True, ensure_ascii=False)
-            + "\n",
-            encoding="utf-8",
-        )
-        self._record(path, stage, role, "application/json", None, status, reason, None)
-
-    def metadata(
-        self,
-        role: str,
-        relative: str,
-        payload: object,
-        *,
-        stage: str,
-    ) -> None:
-        self.json(
-            relative,
-            payload,
-            stage=stage,
-            role=f"{role}_metadata",
-        )
-        self.metadata_links[role] = relative
-        self.records = [
-            replace(record, metadata_path=relative)
-            if record.role == role and record.media_type == "text/csv"
-            else record
-            for record in self.records
-        ]
-
-    def text(
-        self,
-        relative: str,
-        content: str,
-        *,
-        stage: str,
-        role: str,
-        media_type: str = "text/x-python",
-        executable: bool = False,
-    ) -> None:
-        path = self._path(relative)
-        path.write_text(content, encoding="utf-8")
-        if executable:
-            path.chmod(0o755)
-        self._record(path, stage, role, media_type, None, "complete", None, None)
-
-    def existing(
-        self,
-        relative: str,
-        *,
-        stage: str,
-        role: str,
-        media_type: str,
-    ) -> None:
-        self._record(
-            self._path(relative),
-            stage,
-            role,
-            media_type,
-            None,
-            "complete",
-            None,
-            None,
-        )
-
-    def _record(
-        self,
-        path: Path,
-        stage: str,
-        role: str,
-        media_type: str,
-        method: str | None,
-        status: ArtifactStatus,
-        reason: str | None,
-        metadata_path: str | None,
-    ) -> None:
-        payload = path.read_bytes()
-        self.records.append(
-            ArtifactRecord(
-                path=path.relative_to(self.root).as_posix(),
-                stage=stage,
-                role=role,
-                media_type=media_type,
-                status=status,
-                method=method,
-                reason=reason,
-                metadata_path=metadata_path,
-                sha256=hashlib.sha256(payload).hexdigest(),
-                size_bytes=len(payload),
-            )
-        )
 
 
 def _export_result(
@@ -4668,27 +4521,6 @@ def _condition_from_payload(value: object) -> Condition | None:
         objective=objective,
         notes=str(value.get("notes", "")),
     )
-
-
-def _jsonable(value: object) -> object:
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, (np.integer,)):
-        return int(value)
-    if isinstance(value, (np.floating,)):
-        number = float(value)
-        return number if math.isfinite(number) else None
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value) and not isinstance(value, type):
-        return _jsonable(asdict(value))
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_jsonable(item) for item in value]
-    return str(value)
 
 
 def _slug(value: str) -> str:

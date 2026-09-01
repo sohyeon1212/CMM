@@ -8,6 +8,62 @@ obsolete internal planning documents are removed from the public source tree.
 
 ### Added
 
+- **A second canonical workflow: transformation-target discovery.** `cmm transformation-targets
+  --config CONFIG` ranks the knockouts that move a source metabolic state toward a target one,
+  from two gene-expression profiles, using the published MTA (Yizhak et al. 2013) or rMTA
+  (Valcárcel et al. 2019). It composes existing CMM services and adds no numerical method: the
+  MIQP, transformation score and Equation 9 are `revert_targets`, the MOMA baseline is
+  `transformation_targets`, and the reference state is E-Flux2 or LAD. Six stages write the
+  same schema-v2 run bundle SC-01 does, so one manifest format and one path-discovery surface
+  serve both. Shipped with [`SC-02`](docs/scenarios/SC-02-transformation-target-discovery.md)
+  and the `cmm-transformation-engineering` skill, whose interview confirms on every run which
+  file is the source — nothing in the model can detect a swap, and the reversed run is a
+  correct answer to a different question.
+- **A report renderer and a completion gate for transformation runs.**
+  `cmm.reporting.render_transformation_report` draws four panels — best-case against worst-case
+  component score, score against rank, transformation rank against the MOMA baseline, and rank
+  against epsilon — through
+  `render_transformation_figures.R`, the same checked-in R/ggplot2 path SC-01 uses, and writes
+  the same artifact pair: a linked `report.html` and a `report_standalone.html` carrying every
+  figure as a data URI, with 300-DPI PNG plus editable SVG and PDF for each panel.
+  `validate_transformation_run` is the completion gate: it checks each declared artifact
+  against its recorded hash and size, that the ranking is ordered 1..N by descending score,
+  that a skipped stage records why, and that the standalone page carries every image it
+  references. A page that opens is not evidence a run finished, and each of those failures
+  looks like success in a browser. `cmm report render` and `cmm report validate` read the
+  run's own manifest to tell the two workflows apart, so neither has to be told which it is.
+  The page states in its own body what a reader would otherwise have to dig out of the
+  provenance: that the reference state is not the published iMAT one, that epsilon was chosen
+  rather than derived, that the candidate
+  count is the denominator of any percentile claim, and that source and target are an input
+  rather than a finding.
+- **`cmm.omics.gene_directions_from_replicates`** implements the Student's t-test Yizhak et al.
+  specify for selecting changed genes. `gene_directions` cuts on fold change, which is all a
+  single measurement per gene supports; the published route needs replicates and had no
+  implementation. `restrict_to_top_changed` now also accepts `gene_p_values`, ranking the
+  changed set by the strongest evidence rather than the largest fold change, and records which
+  ordering was used.
+- **`cmm.features.coupled_reaction_sets`** groups reactions whose deletion has the same
+  consequence, from the null space of S. A ranking over knockout candidates is only meaningful
+  if each candidate is a distinct intervention: three reactions of an unbranched pathway are
+  one intervention, and counting them separately inflates the denominator of any "top *N*%"
+  claim.
+- **The Revert Metabolism tab now says what its parameters are for, and lets you choose the
+  source-state estimator.** The tab drives a three-stage pipeline whose parameters mean nothing
+  out of that context — ε and α belong to different stages and answer different questions — so
+  the controls are grouped by stage, each group opens with a sentence naming that stage's job,
+  and every field carries a tooltip giving its published value and what happens if it is wrong.
+  The source flux state was hard-wired to E-Flux2; **LAD is now selectable**, and the tab states
+  that neither is the iMAT-plus-sampling state Yizhak et al. use. The fold-change threshold that
+  decides which genes count as changed was likewise fixed at ±1 with no way to see or set it.
+- **MTA's two published preprocessing parameters are now reachable, including from the GUI.**
+  The significant-flux-change threshold ε was fixed at its default on every graphical run —
+  the Revert Metabolism tab never passed it — and Yizhak et al.'s cut that keeps only the most
+  differentially expressed reactions in the changed set had no implementation at all. Both are
+  now controls on the tab and arguments in the API: `differential_expression(top_n_changed=…)`
+  and the new `restrict_to_top_changed()`. The cut is not cosmetic: each changed reaction adds
+  one binary variable to the MIQP, so it decides whether a genome-scale run is tractable.
+  Defaults are unchanged: no cut, and ε at `revert.DEFAULT_EPSILON`.
 - **Source-checkout installation now uses a uv-managed Python 3.12 by default.** The shell and
   PowerShell installers no longer inherit an unsupported operating-system Python such as the
   Python 3.9.6 supplied by older macOS releases. They accept an explicit Python 3.10–3.12
@@ -54,9 +110,48 @@ obsolete internal planning documents are removed from the public source tree.
   drawn as a blank grey network.
 - `cmm.resources.bundled_map_for(model)` returns the bundled map's path when it suits a model,
   and `None` when nothing does.
+- **The Revert Metabolism tab takes replicates and runs the published t-test.** Its expression
+  files were limited to one value per gene, so the only direction test the GUI could offer was
+  a fold-change cut — Yizhak et al.'s (2013) step 2 needed the Python API. Both files now read
+  a gene id column followed by one column per replicate, and with at least two on each side
+  the tab runs `gene_directions_from_replicates` (Student's t-test at a settable P cutoff)
+  through the same `reaction_directions` / `restrict_to_top_changed` path the SC-02 workflow
+  uses. With fewer, the t-test entry is disabled and a note states that the published test was
+  not applied. Values stay linear expression, as everywhere else in the app: they are
+  log2(x + 1) transformed per replicate for the comparison, and the E-Flux2/LAD source state
+  gets the replicate mean as measured. The summary line now records the test, the replicate
+  counts, how many genes were called changed and how many reactions were labelled. A
+  one-column file scores exactly as before.
+- `cmm.omics.gene_directions_by_fold_change` — the fold-change counterpart of
+  `gene_directions_from_replicates`, returning the same evidence frame so a caller can swap
+  tests without also changing what the numbers mean. The SC-02 workflow's fold-change branch
+  is now this function.
 
 ### Fixed
 
+- **The desktop forms no longer lay themselves out differently on macOS.** `QFormLayout` takes
+  its alignment and field-growth policy from the platform style, and the styles disagree: most
+  give `AlignLeft` with `AllNonFixedFieldsGrow`, macOS gives `AlignHCenter` with
+  `FieldsStayAtSizeHint`. Under the macOS pair every group box centred its own label-and-field
+  block at that block's natural width, so a column of boxes landed at as many different x
+  positions as it had boxes and no two inputs shared a width — while the same code rendered
+  correctly under every other style, CI included. Both policies are now set explicitly. Three
+  smaller defects went with it: the stage boxes' label columns are pinned to one width
+  measured from the resolved font on first show (a minimum width is only a floor, so a label
+  that rendered wider still dragged its own box out of line); combo boxes and spin boxes are
+  styled to one 26px height, so a form row's pitch no longer depends on which control it
+  holds; and the inputs stop growing at a readable width instead of running the full width of
+  the panel on a large display.
+- **MTA/rMTA candidates are once again scored against a common yardstick.** The
+  impossible-change mask was evaluated inside each candidate's knockout context, so it saw
+  that candidate's modified bounds. A reaction could be masked for one knockout and not for
+  another, which meant the steady set — the denominator of the transformation score — differed
+  between candidates whose scores were then ranked against each other. The mask is now applied
+  once against the unperturbed model, as in Yizhak et al.'s preprocessing, and the resulting
+  count is reported as a single `n_impossible_masked` in the ranking's provenance rather than
+  being a per-candidate quantity that never surfaced. Rankings on models where the mask fires
+  will change; the toy-network test suite is unaffected. Preparing the direction maps once
+  also removes two map constructions per candidate.
 - The source-tree fallback for `cmm.__version__` now matches the `0.5.0` package metadata.
 - **The flux map no longer drifts right, clip its title, or draw its colorbar as a hairline**
   when the GUI stretches the figure to a wide panel. `colorbar` re-anchors its parent axes to
@@ -172,6 +267,37 @@ yields, design rankings, expression-derived fluxes and one result field's meanin
 
 ### Scientific correctness
 
+- **Ranked targets carry the model's own name for the thing they name.** `TargetScore` gains
+  `target_name`, populated from the SBML the run already stores — `model.genes[…].name` for a
+  gene-level target, `model.reactions[…].name` for a reaction-level one, never from an imported
+  expression table, which is untrusted data. Report tables and figure labels read `6510_AT1` or
+  `b1602` without it, which no reader can interpret. The name sits *beside* `target_id` and never
+  replaces it: names are neither unique nor always present, whereas the id is what provenance and
+  reproduction are written against. The export column appears only when something was actually
+  named, so a ranking over a model that names nothing exports exactly the table it did before.
+  Shared by FSEOF, OptKnock and revert, so both workflows gain it at once.
+- **The transformation report leads with the component scores rather than the shape of the list.**
+  The old first panel plotted transformation score against rank; both axes are artifacts of the
+  ranking, and under rMTA a single amplified candidate can be an order of magnitude above the
+  rest, flattening the other 400 onto the axis. The new `fig01_component_scores` plots best-case
+  (bTS) against worst-case (wTS), the space Equation 9 actually branches on, marking the
+  candidates the robust score amplifies and labelling them. Score against rank is kept as
+  `fig02_transformation_ranking` and is now the required panel, because it is the only one every
+  method can draw: under MTA the three component scores are one number, so the component panel
+  records why it cannot be drawn instead of failing the run. The MOMA and epsilon panels shift to
+  `fig03` and `fig04`.
+- **The coupling disclosure no longer claims the source papers reduce candidates by partial
+  coupling.** Yizhak et al. (2013) apply it only in their reaction-level validation analyses
+  — *"in the validation analyses, the set of simulated knockouts is composed of a member from
+  each partially coupled set"* — and Valcárcel et al. (2019) rank gene knockouts with no
+  coupling reduction at all. `cmm.features.coupling`, the transformation workflow docstring,
+  the `cmm-transformation-engineering` disclosure list and the rendered report nonetheless
+  presented full-versus-partial coupling as one of three structural departures from "the
+  papers", which overstates what either source does and reads as a deviation from rMTA that
+  does not exist. Each now states what a reaction-level CMM run computes, names the Yizhak
+  scope, and says rMTA applies no such reduction. A gene-level run — the default, and the
+  perturbation level of both published human analyses — never reaches the coupling path. No
+  numerical behaviour changes.
 - **GPR `OR` resolution is per method, matching each source paper.** CMM's global `max` matched
   none of them. `gene_to_reaction_weights` gains an `or_rule` parameter defaulting to `"sum"`,
   which is what both Kim et al. 2016 (E-Flux2) and Lee et al. 2012 (LAD) specify; `AND = min`

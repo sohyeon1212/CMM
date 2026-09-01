@@ -53,7 +53,7 @@ TS = (successful directional movement - unsuccessful directional movement)
 **The denominator is floored at the run's own `epsilon` (0.4.0).** A steady-set deviation
 smaller than the change the method itself calls significant cannot be resolved from zero, and
 dividing by it produced `±∞`. That was not a harmless edge case: on `e_coli_core` with the
-SC-02 condition pair the steady deviation is *exactly* zero for 38 of 69 solvable gene
+one anaerobic/aerobic condition pair the steady deviation is *exactly* zero for 38 of 69 solvable gene
 knockouts, so 38 candidates shared the single score `+∞` and `TargetRanking.sorted` broke the
 tie on `target_id` — the reported "top 38" was an alphabetical slice, not a ranking. The floor
 leaves the published ratio unchanged wherever the denominator is meaningful (the smallest

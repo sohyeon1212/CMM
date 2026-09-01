@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import cmm.reporting._rscript as _rscript
 import cmm.reporting.publication as publication
 
 from cmm.reporting import (
@@ -23,9 +24,11 @@ from cmm.reporting import (
 )
 from cmm.reporting.publication import (
     FigureRenderError,
-    _decode_renderer_stream,
-    _renderer_environment,
     renderer_script_path,
+)
+from cmm.reporting._rscript import (
+    decode_renderer_stream as _decode_renderer_stream,
+    renderer_environment as _renderer_environment,
 )
 
 
@@ -1712,8 +1715,9 @@ def test_renderer_decodes_subprocess_bytes_explicitly(tmp_path, monkeypatch):
             stderr=b"invalid byte: \xff",
         )
 
-    monkeypatch.setattr(publication.shutil, "which", lambda _: "/fake/Rscript")
-    monkeypatch.setattr(publication.subprocess, "run", fake_run)
+    # The subprocess call now lives in the shared invoker, so that is where it is intercepted.
+    monkeypatch.setattr(_rscript.shutil, "which", lambda _: "/fake/Rscript")
+    monkeypatch.setattr(_rscript.subprocess, "run", fake_run)
     with pytest.raises(FigureRenderError) as raised:
         render_publication_figures(run)
     assert "renderer µ" in str(raised.value)

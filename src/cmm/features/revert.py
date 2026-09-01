@@ -14,15 +14,18 @@ results cannot be mistaken for rMTA.
 
 **Deviations from the published pipelines, disclosed rather than changed.**
 
-1. ``epsilon`` is a fixed scalar (default 1e-3). Yizhak et al. and Valcárcel et al. derive the
-   required change per reaction from a *sampled* reference distribution, or use a per-reaction
-   epsilon with 1e-3 only as a floor. Deriving it requires the flux sampling CMM deliberately
-   avoids for determinism, so the scalar is kept and stated.
-2. The impossible-change mask (:func:`_prepared_direction`) is applied per candidate, under
-   that candidate's knockout-modified bounds. A reaction can therefore be maskable for one
-   knockout and not for another, so the steady set — and with it the denominator of the
-   transformation score — varies across candidates. The published preprocessing masks once,
-   against the unperturbed model.
+1. ``epsilon`` is a fixed scalar (:data:`DEFAULT_EPSILON`). Yizhak et al. and Valcárcel et al.
+   derive the required change per reaction from a *sampled* reference distribution, or use a
+   per-reaction epsilon with 1e-3 only as a floor. Deriving it requires the flux sampling CMM
+   deliberately avoids for determinism, so the scalar is kept and stated.
+2. For ``rmta``, the impossible-change mask is applied to the *already reversed* direction map
+   when building the worst-case problem, whereas the COBRA Toolbox masks in preprocessing
+   (``diffexprs2rxnFBS.m``) and reverses the masked map. The two orders disagree for an
+   inactive irreversible reaction: a raw ``+1`` becomes ``0`` here and ``-1`` there, and a raw
+   ``-1`` becomes ``+1`` here and ``0`` there. Masking after the swap is the physically
+   consistent reading — a backward move on an inactive irreversible reaction is impossible in
+   either frame — but it is not the reference implementation's order, and it changes ``wTS``
+   and therefore Equation 9's branch. Unverified against ``rMTA.m`` itself.
 3. The source state CMM's callers usually supply is a deterministic E-Flux2 solve at
    ``objective_fraction=1.0``, i.e. contextualization is replaced by a single growth-maximal
    flux vector rather than the contextualization-plus-sampling of the papers, and the
@@ -58,10 +61,17 @@ from cmm.features._perturbation import (
     grouped_gene_perturbations,
     perturbation_provenance,
     reaction_perturbations,
+    target_display_name,
 )
 from cmm.omics.differential import DirectionMap
 
 RevertMethod = Literal["rmta", "mta", "mta_miqp", "rmta_continuous"]
+
+#: Flux change a changed reaction must clear, measured from the source reference, before the
+#: move counts as a success. Yizhak et al. derive this per data set from a sampled reference
+#: distribution; CMM keeps a fixed scalar (see the module docstring, deviation 1). Callers who
+#: know their flux scale should set it explicitly.
+DEFAULT_EPSILON = 1e-3
 
 
 def tie_structure(scored: Sequence[TargetScore]) -> dict[str, object]:
@@ -346,14 +356,22 @@ def _prepared_direction(
 def _score_knockout(
     model: Model,
     reference: FluxState,
-    direction: DirectionMap,
+    best_direction: DirectionMap,
+    worst_direction: DirectionMap,
     target_rxns: list[str],
     method: RevertMethod,
     alpha: float,
-    epsilon: float = 1e-3,
+    epsilon: float = DEFAULT_EPSILON,
     parameter_k: float = 100.0,
 ) -> _Scores:
-    best_direction = _prepared_direction(model, reference, direction, target_rxns)
+    """Score one candidate. Both direction maps are prepared once by the caller.
+
+    They are deliberately *not* rebuilt here. The impossible-change mask depends on reaction
+    bounds, and this function runs inside the candidate's knockout context, so rebuilding
+    would evaluate the mask against knockout-modified bounds and give each candidate its own
+    steady set — and with it its own transformation-score denominator. Yizhak et al. mask once
+    against the unperturbed model, which is what the caller now does.
+    """
 
     if method in {"mta", "mta_miqp"}:
         flux, status = _mta_miqp(
@@ -378,9 +396,6 @@ def _score_knockout(
         )
         moma_flux, moma_status = _mta_qp(
             model, reference, best_direction, target_rxns, 0.0
-        )
-        worst_direction = _prepared_direction(
-            model, reference, direction, target_rxns, reverse=True
         )
         worst_flux, worst_status = _mta_miqp(
             model, reference, worst_direction, target_rxns, alpha=alpha, eps=epsilon
@@ -482,7 +497,7 @@ def revert_targets(
     targets: Iterable[str] | None = None,
     method: RevertMethod = "rmta",
     alpha: float = 0.66,
-    epsilon: float = 1e-3,
+    epsilon: float = DEFAULT_EPSILON,
     parameter_k: float = 100.0,
     perturbation: Literal["gene", "reaction"] = "gene",
     transcript_separator: str | None = None,
@@ -566,6 +581,17 @@ def revert_targets(
             else {}
         )
 
+        # Prepare both direction maps once, against the unperturbed model. Yizhak et al. apply
+        # the impossible-change mask in preprocessing, before any knockout is simulated; doing
+        # it per candidate would let the steady set — the transformation score's denominator —
+        # differ between candidates whose scores are then ranked against each other.
+        best_direction = _prepared_direction(
+            model, reference_state, direction, target_rxns
+        )
+        worst_direction = _prepared_direction(
+            model, reference_state, direction, target_rxns, reverse=True
+        )
+
         scored: list[TargetScore] = []
         nonoptimal = 0
         for pert in perts:
@@ -573,7 +599,8 @@ def revert_targets(
                 scores = _score_knockout(
                     model,
                     reference_state,
-                    direction,
+                    best_direction,
+                    worst_direction,
                     target_rxns,
                     method,
                     alpha,
@@ -592,6 +619,7 @@ def revert_targets(
                         "wTS": scores.worst,
                         **marker,
                     },
+                    target_name=target_display_name(model, pert.target_id, pert.kind),
                 )
             )
 
@@ -618,6 +646,19 @@ def revert_targets(
             ),
             "direction_provenance": dict(direction.metadata),
             "n_directional_reactions": len(direction.nonsteady()),
+            # Now a single number for the whole run rather than a per-candidate quantity,
+            # because the mask is applied once against the unperturbed model. The reversed
+            # count is reported only for rmta, the one method that solves the worst-case MIQP.
+            "n_impossible_masked": best_direction.metadata.get("n_impossible_masked"),
+            **(
+                {
+                    "n_impossible_masked_reversed": worst_direction.metadata.get(
+                        "n_impossible_masked"
+                    )
+                }
+                if method == "rmta"
+                else {}
+            ),
             **perturbation_provenance(perts),
             **tie_structure(scored),
         },
