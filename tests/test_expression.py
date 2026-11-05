@@ -111,6 +111,28 @@ def test_eflux2_bounds_follow_each_reactions_own_expression(ecoli_core):
     assert result.fluxes["PFK"] <= 1.0 + 1e-6
 
 
+def test_read_gene_table_keeps_numeric_looking_ids_as_text(tmp_path):
+    from cmm.omics import read_expression_table, read_gene_table
+
+    path = tmp_path / "ids.tsv"
+    path.write_text(
+        "gene\tcondA\tcondB\n6487.1\t5\t6\n6487.10\t7\t8\n5152.20\t1\t2\n",
+        encoding="utf-8",
+    )
+    frame = read_gene_table(path)
+    assert list(frame["gene"]) == ["6487.1", "6487.10", "5152.20"]
+    assert frame["condA"].dtype.kind == "i"  # values keep their inferred type
+    assert list(read_gene_table(path, index=True).index) == [
+        "6487.1",
+        "6487.10",
+        "5152.20",
+    ]
+    # The multi-condition reader, with its gene column named or left as the first.
+    for gene_column in (None, "gene"):
+        table = read_expression_table(str(path), gene_column=gene_column)
+        assert list(table.index) == ["6487.1", "6487.10", "5152.20"]
+
+
 @pytest.mark.requires_qp
 def test_eflux2_does_not_mutate_model(ecoli_core):
     growth = ecoli_core.slim_optimize()

@@ -36,6 +36,7 @@ from cmm.omics.expression import (
     lad,
     linear_expression,
     log2_expression,
+    read_gene_table,
 )
 
 __all__ = [
@@ -64,6 +65,7 @@ __all__ = [
     "lad",
     "linear_expression",
     "log2_expression",
+    "read_gene_table",
     "predict_condition_fluxes",
     "reaction_directions",
     "read_expression_table",

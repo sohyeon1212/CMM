@@ -108,6 +108,7 @@ from cmm.omics.differential import (
 from cmm.omics.expression import (
     describe_expression_columns,
     log2_expression,
+    read_gene_table,
 )
 from cmm.omics.imat import (
     PUBLISHED_IMAT_BETA,
@@ -271,7 +272,7 @@ def _read_expression_vector(path: str) -> dict[str, float]:
 
     import pandas as pd
 
-    frame = pd.read_csv(path, sep=None, engine="python")
+    frame = read_gene_table(path)
     if frame.shape[1] < 2:
         raise ValueError(
             "expression file must have at least two columns: gene, expression"
@@ -328,9 +329,8 @@ def _read_expression_matrix(
     """
 
     import numpy as np
-    import pandas as pd
 
-    frame = pd.read_csv(path, sep=None, engine="python", index_col=0)
+    frame = read_gene_table(path, index=True)
     numeric = frame.select_dtypes("number")
     if numeric.empty:
         raise ValueError(
@@ -4701,13 +4701,10 @@ class CmmMainWindow(QMainWindow):
         )
         if not path:
             return
-        import pandas as pd
 
         try:
             expression = _read_expression_matrix(path, allow_negative=True)
-            columns = describe_expression_columns(
-                pd.read_csv(path, sep=None, engine="python", index_col=0)
-            )
+            columns = describe_expression_columns(read_gene_table(path, index=True))
         except Exception as exc:
             self.revert_summary.setText(
                 f"Could not read {html.escape(role)} expression: {html.escape(str(exc))}"

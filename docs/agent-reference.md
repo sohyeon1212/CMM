@@ -675,6 +675,7 @@ eflux2(model, reaction_weights, *, objective_fraction=1.0, min_scale=1e-3,
 lad(model, reaction_weights, *, scaling_factor=1.0, weight_threshold=0.0,
     reaction_sigma=None, gpr_or_rule=None)
 read_expression_table(path, gene_column=None)                       # -> gene x condition frame
+read_gene_table(path, *, gene_column=None, index=False)              # gene ids kept as text
 predict_condition_fluxes(model, expression, *, method="eflux2", conditions=None)
 flux_log_change(source_fluxes, target_fluxes, *, reactions=None, pseudocount=1e-3)
 sign_flips(source_fluxes, target_fluxes, *, reactions=None, tol=1e-6)
@@ -732,7 +733,9 @@ gene_directions_by_fold_change(source, target, *, up_threshold=1.0, down_thresho
 
 **Gene ids must match `model.genes`.** GEO tables use symbols or probe ids; an *E. coli* model
 uses b-numbers. Unmapped ids silently contribute nothing, so an unmapped table produces a
-confident, meaningless answer. Check the overlap before integrating.
+confident, meaningless answer. Check the overlap before integrating. Read tables with
+`read_gene_table` (or the readers built on it): a plain `pd.read_csv` turns Recon3D ids such as
+`6487.10` into the number `6487.1`.
 
 ---
 

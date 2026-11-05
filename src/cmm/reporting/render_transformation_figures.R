@@ -102,13 +102,23 @@ artifact_path <- function(role) {
   file.path(run_dir, relative)
 }
 
+# Identifier columns stay text. read.csv would otherwise read a column of Recon3D gene ids
+# such as 6487.10 as numbers, and the point label would print the different id 6487.1.
+# Every other column gets the same type conversion read.csv applies by default.
+identifier_columns <- c("target_id", "target_name", "reaction_id", "gene_id")
+
 read_artifact_csv <- function(role) {
-  utils::read.csv(
+  missing <- c("", "NA", "NaN")
+  frame <- utils::read.csv(
     artifact_path(role),
-    stringsAsFactors = FALSE,
+    colClasses = "character",
     check.names = FALSE,
-    na.strings = c("", "NA", "NaN")
+    na.strings = missing
   )
+  for (column in setdiff(names(frame), identifier_columns)) {
+    frame[[column]] <- utils::type.convert(frame[[column]], as.is = TRUE, na.strings = missing)
+  }
+  frame
 }
 
 relative_to_run <- function(path) {

@@ -139,6 +139,13 @@ obsolete internal planning documents are removed from the public source tree.
 
 ### Fixed
 
+- **Numeric-looking gene ids are no longer read as numbers.** Recon3D names genes
+  `<entrez>.<transcript>`, so every id in an expression table can parse as a number, and pandas
+  then read `6487.10` as the float `6487.1`. With the real `6487.1` also present, SC-02 stopped
+  on a false "repeats a gene id"; without it, the gene silently fell out of the model overlap.
+  The SC-02 reader, `read_expression_table`, the GUI's expression readers and both R renderers
+  (whose point labels printed the wrong id) now keep identifier columns as text, through the new
+  `cmm.omics.read_gene_table`. Expression files on disk were never affected.
 - **OptKnock and RobustKnock can no longer run forever.** `straindesign` 1.18 finds the optimal
   design, then solves a second MILP to minimise the interventions. When that solve is not
   optimal - on a 1,440-reaction model Gurobi reported "Model is infeasible" straight after

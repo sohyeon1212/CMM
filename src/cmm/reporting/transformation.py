@@ -980,7 +980,10 @@ def _compose(
     )
     parts.append(
         "<p class='meta'>Every number on this page is read from that inventory&rsquo;s CSVs; "
-        "<code>00_manifest.json</code> is the only path-discovery surface.</p>"
+        "<code>00_manifest.json</code> is the only path-discovery surface. Gene and "
+        "reaction identifiers in those CSVs are text, not numbers: a Recon3D gene such as "
+        "<code>6487.10</code> is a different gene from <code>6487.1</code>, so open the files "
+        "with identifier columns as text rather than letting a spreadsheet convert them.</p>"
     )
     parts.append("</body></html>")
     return "\n".join(parts)

@@ -97,6 +97,30 @@ class ExpressionColumns:
         return notes
 
 
+def read_gene_table(
+    path, *, gene_column: str | None = None, index: bool = False
+) -> "pd.DataFrame":
+    """Read a CSV/TSV whose gene-id column must stay text.
+
+    Without a dtype, pandas reads a column whose every entry looks like a number as floats, so
+    Recon3D's ``<entrez>.<transcript>`` ids lose a trailing zero: ``6487.10`` becomes
+    ``6487.1`` and collides with the real ``6487.1``, or silently stops matching the model.
+    The gene column (the first, unless ``gene_column`` names another) is therefore read as
+    ``str``; every other column keeps pandas' inference. ``index=True`` makes it the index.
+    """
+
+    import pandas as pd
+
+    key: str | int = gene_column if gene_column is not None else 0
+    return pd.read_csv(
+        path,
+        sep=None,
+        engine="python",
+        dtype={key: str},
+        index_col=key if index else None,
+    )
+
+
 def describe_expression_columns(frame) -> ExpressionColumns:
     """Classify a raw table's columns (gene ids already in the index) as above."""
 

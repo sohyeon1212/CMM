@@ -49,7 +49,9 @@ class ConditionFluxes:
 def read_expression_table(path: str, gene_column: str | None = None) -> pd.DataFrame:
     """Read a gene-by-condition expression table; index = gene id, columns = conditions."""
 
-    frame = pd.read_csv(path, sep=None, engine="python")
+    from cmm.omics.expression import read_gene_table
+
+    frame = read_gene_table(path, gene_column=gene_column)
     if frame.empty or frame.shape[1] < 2:
         raise ValueError(
             "expression table must contain a gene column and at least one condition"

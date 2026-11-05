@@ -184,6 +184,13 @@ def test_expression_vector_reads_tsv(tmp_path):
     assert _read_expression_vector(str(path)) == {"g1": 2.5, "g2": 7.0}
 
 
+def test_gui_expression_readers_keep_numeric_looking_gene_ids(tmp_path):
+    path = tmp_path / "recon_ids.csv"
+    path.write_text("gene,r1\n6487.1,2.5\n6487.10,7\n")
+    assert _read_expression_vector(str(path)) == {"6487.1": 2.5, "6487.10": 7.0}
+    assert list(_read_expression_matrix(str(path)).index) == ["6487.1", "6487.10"]
+
+
 def test_expression_vector_rejects_duplicates_and_negative_values(tmp_path):
     duplicate = tmp_path / "duplicate.csv"
     duplicate.write_text("gene,expression\ng1,1\ng1,2\n")

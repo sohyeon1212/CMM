@@ -591,6 +591,12 @@ Numerical result metadata includes:
   uptake with its rate — so a result file states its own conditions rather than leaving a reader
   to reconstruct them from a fingerprint.
 
+Gene and reaction identifiers are read as text everywhere CMM reads a table back: the
+expression readers go through `cmm.omics.read_gene_table`, and both R renderers convert every
+column except the identifier columns. Recon3D's `<entrez>.<transcript>` ids would otherwise
+lose a trailing zero (`6487.10` → `6487.1`). Tests use ids such as `1.1`/`1.10` and
+`6487.1`/`6487.10` in the SC-02 reader, the omics and GUI readers, and the rendered SVG labels.
+
 Save result tables together with their metadata, the exact input model and omics files, the
 Git commit, and the `uv.lock` used for the analysis. Model fingerprints detect scientific
 model changes; they do not replace archival storage of the model file.

@@ -321,6 +321,22 @@ def test_read_expression_rejects_a_table_with_no_numeric_columns(tmp_path):
         _read_expression(path)
 
 
+def test_numeric_looking_gene_ids_are_read_as_text(tmp_path):
+    # Recon3D-style <entrez>.<transcript> ids. Read as floats, 1.10 becomes 1.1: with 1.1
+    # present the run stopped on a false duplicate, without it the gene silently dropped out.
+    path = tmp_path / "ids.csv"
+    path.write_text("gene,r1,r2\n1.1,5,6\n1.10,7,8\n1.2,9,10\n", encoding="utf-8")
+    frame = _read_expression(path)
+    assert list(frame.index) == ["1.1", "1.10", "1.2"]
+    assert {"1.1", "1.10", "1.2"} <= set(
+        frame.index
+    )  # all three meet the model's genes
+
+    alone = tmp_path / "alone.csv"
+    alone.write_text("gene,r1,r2\n1.10,7,8\n1.2,9,10\n", encoding="utf-8")
+    assert list(_read_expression(alone).index) == ["1.10", "1.2"]
+
+
 def test_read_expression_rejects_duplicate_gene_ids(tmp_path):
     path = tmp_path / "dup.csv"
     path.write_text("gene,a\nb0001,1\nb0001,2\n", encoding="utf-8")

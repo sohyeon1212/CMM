@@ -538,11 +538,10 @@ def _read_expression(path: Path, scale: str = "linear") -> "pd.DataFrame":
     """
 
     import numpy as np
-    import pandas as pd
 
-    from cmm.omics.expression import describe_expression_columns
+    from cmm.omics.expression import describe_expression_columns, read_gene_table
 
-    frame = pd.read_csv(path, sep=None, engine="python", index_col=0)
+    frame = read_gene_table(path, index=True)
     numeric = frame.select_dtypes("number").copy()
     if numeric.empty:
         raise TransformationWorkflowError(

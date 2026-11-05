@@ -484,6 +484,37 @@ def test_report_shows_preflight_warnings_and_only_them(bundle: Path) -> None:
     assert "every gene measured" not in page  # a passing check is not listed
 
 
+@pytest.mark.skipif(
+    not _r_is_ready(), reason="Rscript renderer packages are not installed"
+)
+def test_numeric_looking_gene_ids_keep_their_text_in_the_figures(bundle: Path) -> None:
+    # Recon3D names genes <entrez>.<transcript>. Read as numbers, 6487.10 and 5152.20 become
+    # 6487.1 and 5152.2 — the labels of two *other* genes in this very ranking.
+    renamed = {"PGI": "6487.1", "PFK": "6487.10", "TPI": "5152.20", "ENO": "5152.2"}
+
+    def rename(text: str) -> str:
+        for old, new in renamed.items():
+            text = text.replace(old, new)
+        return text
+
+    for relative in (
+        "04_candidates/candidates.csv",
+        "05_transformation/transformation_ranking.csv",
+        "06_validation/moma_baseline.csv",
+        "06_validation/epsilon_sensitivity.csv",
+    ):
+        _rewrite_artifact(bundle, relative, rename((bundle / relative).read_text()))
+
+    report = render_transformation_report(bundle)
+    labels = " ".join(
+        path.read_text(encoding="utf-8") for path in (bundle / "figures").glob("*.svg")
+    )
+    for gene in renamed.values():
+        assert f">{gene}<" in labels, gene
+    assert validate_transformation_run(bundle).valid
+    assert report.report_html.is_file()
+
+
 # Two amplified candidates over a non-amplified tail whose last three scores tie: the case
 # Figure 2 used to flatten and the page used to leave unquantified.
 SPLIT_RANKING = """target_id,score,rank,bTS,mTS,wTS
