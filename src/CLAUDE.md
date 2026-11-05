@@ -10,7 +10,7 @@ section for the call you are about to make.
 | Package | Owns | Solves? |
 |---|---|:---:|
 | `core` | conditions, media, FBA/pFBA/FVA, `FluxState`, solver capability, provenance | yes |
-| `omics` | expression → GPR → E-Flux2 / LAD, source→target directions | yes |
+| `omics` | expression → GPR → E-Flux2 / LAD / iMAT, source→target directions | yes |
 | `features` | MOMA/ROOM, yield, envelope, FSEOF/FVSEOF, flux response, sampling, OptKnock/RobustKnock, MTA/rMTA | yes |
 | `workflows` | SC-01 `production`, SC-02 `transformation` — composition and run schema only | delegates |
 | `reporting` | reads a completed run, renders R figures, validates the bundle | never |

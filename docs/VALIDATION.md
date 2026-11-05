@@ -103,10 +103,11 @@ part of result provenance.
 |---|---|---|
 | FBA, pFBA, FVA | Direct COBRApy calls on `e_coli_core` and iJO1366 | `test_validation.py`, `test_genome_scale.py` |
 | MOMA | Direct COBRApy L2 MOMA on an independently constructed branched network | `test_validation.py` |
-| E-Flux2 | Independent two-stage QP: maximize biological objective, fix it, minimize total squared flux | `test_validation.py`, `test_expression.py` |
+| E-Flux2 | Hand-computed expression-scaled bounds and an independent two-stage QP (maximize biological objective, fix it, minimize total squared flux) on the independently scaled model, with non-uniform expression that changes the optimum | `test_validation.py`, `test_expression.py` |
 | Yield and media | Direct objective/bound calculations in COBRApy | `test_validation.py`, `test_production.py`, `test_media.py` |
 | FSEOF/FVSEOF | Enforced product levels, biomass optimization/FVA, regression and boundary filtering | `test_production.py`; scan-resolution sensitivity in `test_scientific_sensitivity.py` |
 | MTA/rMTA | Official COBRA Toolbox test topology, expected score signs, published Equation 9 | `test_revert.py`; alpha sensitivity in `test_scientific_sensitivity.py` |
+| iMAT reference state | Hand-computed rMTA discretisation; MILP objective equals the matched-label count; samples honour the pattern and their mean satisfies S·v = 0 | `test_imat.py` |
 | OptKnock/RobustKnock | Distinct StrainDesign module types (`OPTKNOCK` and three-level `ROBUSTKNOCK`), explicit seed forwarding/provenance, plus post-solve max/min product evaluation | `test_strain_design.py` |
 | Flux response | Scanned optimum reproduces the known `e_coli_core` oxygen growth optimum; competing-branch model gives an exact −1 response gradient | `test_response.py` |
 | Flux sampling | Drawn samples satisfy `S · v = 0` and every model bound; identical seeds reproduce identical ensembles | `test_sampling.py` |
@@ -132,8 +133,8 @@ upstream artifact.
 
 ### Gene-protein-reaction resolution
 
-Two different GPR rules ship, because the source papers specify two different operations, and
-each result records which one produced it.
+Three GPR rules ship, because the source papers specify three different operations, and each
+result records which one produced it.
 
 - **Continuous expression values** (`gene_to_reaction_weights`, and therefore E-Flux2 and LAD):
   `AND` is `min`, `OR` is `or_rule`, defaulting to `"sum"`. Kim et al. (2016) take *"the sum of
@@ -146,6 +147,11 @@ each result records which one produced it.
   unchanged**. It is implemented as a two-pass binary decomposition, not by reusing the numeric
   `min`/`max` helper, and is recorded as `gpr_rule = "yizhak2013_two_pass_binary"`. A sum is
   not type-correct over direction labels, so the two rules are deliberately not shared.
+- **iMAT expression classes** (`cmm.omics.imat`, and therefore the MTA/rMTA reference state):
+  high (1), moderate (0) and low (−1) gene classes map to reactions with `AND` = `min` and
+  `OR` = `max`, imatpy's default: a complex is as available as its scarcest subunit, an isozyme
+  set as its most available member. The iMAT paper's Methods text states the reverse pairing;
+  the choice is recorded as `imat_gpr_rule` and disclosed as a difference from the paper.
 
 ### E-Flux2
 
@@ -154,6 +160,17 @@ maximizes the model's biological objective, enforces the requested fraction of t
 and minimizes the L2 norm of all fluxes. The default objective fraction is `1.0`. Without QP
 support the method raises; the opt-in `allow_l1_fallback=True` result is labeled
 `eflux2_l1_fallback` and must not be reported as E-Flux2.
+
+Uniform expression leaves every bound at its template value, so a test with equal weights
+passes whether or not expression reaches the bounds. The checks therefore use non-uniform
+expression whose scaled bound binds. On the branched network, a barely expressed R2 must have
+its bound cut to the hand-computed `1000 × 0.2/100 = 2`. The result must match an independent
+two-stage QP on a model scaled by hand, and the flux it routes through R2 (2) must differ from
+the uniform-expression answer (20/3). On `e_coli_core` with random weights, every scaled bound
+must equal `template × clip(w/max w, min_scale, 1)`, exchanges and biomass must stay unscaled,
+and a barely expressed PFK must cap glycolytic flux that uniform expression lets through.
+Setting the scaling ratio to 1 in the implementation fails both tests while every
+uniform-weight test still passes.
 
 Reference: Kim MK, Lane A, Kelley JJ, Lun DS (2016), *PLoS ONE* 11(6):e0157101,
 <https://doi.org/10.1371/journal.pone.0157101>. **Cite that author list.** "Kim, Woo, Choi" is
@@ -363,20 +380,64 @@ References: Megchelenbrink et al. (2014), <https://doi.org/10.1371/journal.pone.
 ### MTA and rMTA
 
 The optimization, transformation score, and robust Equation 9 are documented in
-[design-revert-metabolism.md](design-revert-metabolism.md). The GUI uses deterministic
-E-Flux2 source-state preprocessing, which differs from the original contextualization plus
-sampling protocol and must be disclosed in manuscripts.
+[design-revert-metabolism.md](design-revert-metabolism.md). SC-02 and the GUI build the source
+state as the papers do ([ADR-0005](adr/0005-imat-reference-and-per-reaction-epsilon.md)).
+
+**iMAT reference state.** `cmm.omics.discretize_expression` applies Valcárcel et al.'s rule:
+per sample, high above mean + δ·SD and low below mean − δ·SD of log2 expression over the kept
+genes, with β agreement across samples. `cmm.omics.imat` solves Shlomi et al.'s MILP through
+the MIT-licensed `imatpy` 0.3.0 public API, with ε = 1 and `threshold = 0` (the paper's v = 0).
+It reads the activity pattern from the solution with the solver tolerance.
+`cmm.features.imat_reference_state` fixes the matched reactions to that pattern and returns
+the mean of seeded OptGP samples. `test_imat.py` checks:
+
+- the discretisation against a hand-computed mean ± δ·SD and β consensus, and the effect of
+  restricting the gene set;
+- that the MILP objective equals the number of matched labels, both when every label can be
+  met and when one cannot;
+- the AND = min / OR = max mapping, with unlisted genes treated as moderate;
+- that pattern bounds keep the solved direction;
+- that every sample honours the pattern and v_ref is the sample mean and satisfies S·v = 0;
+- that sampling is seeded and the model is left unchanged;
+- that a model with no iMAT optimum raises instead of returning a state.
+
+Three differences from the published runs are recorded in every SC-02 run
+(`reference_state_deviations`) and stated in its report:
+
+- The GPR pairing is the reverse of the iMAT paper's Methods wording.
+- COBRApy builds its own warm-up points (two per reaction); optGpSampler was run with 5,000.
+- Sampling runs on a single seeded chain.
+
+Using one of possibly several iMAT optima is the papers' own procedure, not a difference; the
+pattern the solver returned is written to `02_reference/imat_reference_pattern.csv`.
 
 Two of Yizhak et al.'s preprocessing parameters are exposed rather than assumed, and a run
 that intends to follow the paper must set both:
 
-- **ε**, the flux change that counts as significant. `revert.DEFAULT_EPSILON` is a fixed
-  scalar; the paper derives ε per data set from a sampled reference distribution. State the
-  value used.
+- **ε**, the flux change that counts as significant. `revert_targets` accepts one scalar
+  (`revert.DEFAULT_EPSILON` when omitted) or a per-reaction map.
+  `cmm.features.epsilons_from_samples` derives the map by the paper's rule. For each changed
+  reaction it takes the change at which a one-sided one-sample t-test over 2,000 samples calls
+  `v_ref,i ± ε` significant (P < 0.05), `εᵢ = max(t₀.₉₅,ₙ₋₁·sᵢ/√n, 0.001)`, with Valcárcel et
+  al.'s 0.001 minimum. The samples are the iMAT-pattern samples behind v_ref. SC-02 and the GUI
+  use this by default. `test_revert_epsilon.py` checks that the threshold closes the t-test at
+  exactly P = 0.05 and applies the floor. `test_revert.py` checks that a uniform
+  map reproduces the scalar ranking and that the map reaches the MIQP thresholds.
 - **the changed-set size.** The paper keeps only the top 100–200 most differentially expressed
   reactions as "changed"; pass `differential_expression(top_n_changed=…)` or call
   `restrict_to_top_changed()`. Left unset, every reaction clearing the fold-change thresholds
   stays changed, which is not the published protocol and adds one MIQP binary variable each.
+  Valcárcel et al. instead vary the P, FDR or B-statistic filter per data set "to obtain around
+  100–200 altered reactions". SC-02 records the actual changed count and warns when it falls
+  outside that range. `p_adjust="fdr_bh"` provides their prostate-cancer FDR filter; it is
+  monotone in P, so it alters a top-N set only when fewer genes pass than N.
+  `min_abs_log2fc` adds their fold-change floor (20% on the AD data); it is off by default.
+  The GUI's Revert tab exports each run to a new folder: `ranking.csv` (rTS with
+  bTS/mTS/wTS, and `equivalent_targets`: the genes with the same knockout effect, or the fully
+  coupled reactions, that each candidate was scored for),
+  `reaction_epsilons.csv`, the changed reactions' 2,000 sampled fluxes, the direction map,
+  gene-level evidence, the source genes' iMAT classes (`gene_expression_states.csv`), the iMAT
+  pattern with v_ref (`imat_reference_pattern.csv`) and `settings.json`.
 
 The published significance test is a Student's t-test over replicates, implemented as
 `gene_directions_from_replicates`. It is what the SC-02 workflow and the GUI's Revert
@@ -385,13 +446,22 @@ that cannot support it fall back to a fold-change cut — `gene_directions` on a
 or `gene_directions_by_fold_change` on the same replicate frames — which is not the published
 test, and a run that used it must say so.
 
-SC-02 accepts finite, non-negative linear expression measurements. It keeps linear replicate
-means for reference inference and applies `log2(value + 1)` to each replicate before direction
-tests, matching the desktop comparison. Regression tests distinguish a small relative change
-(`100 → 102`) from a two-unit log2 change and check the replicate-level t-test transform.
+SC-02 and the GUI accept linear (finite, non-negative) or log2 expression, declared through
+`expression_scale`. Both the iMAT discretisation and the direction tests work on log2 values:
+`log2(value + 1)` for a linear file, and the values as given for a log2 file, so nothing is
+logged twice and no step converts back to linear. A linear-declared file with negative values
+is refused. Preflight warns (`<role>_expression_scale`) when a linear-declared file never
+exceeds 20, which looks like log2, or a log2-declared file exceeds 32; the report lists every
+preflight warning. `test_transformation_workflow.py` checks that a log2 file gives exactly the
+directions of its linear original, that a file holding `log2(x + 1)` gives the same v_ref and
+MOMA-baseline target as its linear original, and both directions of the scale warning.
+Regression tests distinguish a small relative change (`100 → 102`) from a two-unit log2 change
+and check the replicate-level t-test transform.
 
-References: Yizhak K, Gabay O, Cohen H, Ruppin E (2013), *Nat Commun* 4:2632,
-<https://doi.org/10.1038/ncomms3632>; Valcárcel LV, Torrano V, Tobalina L, Carracedo A,
+References: Shlomi T, Cabili MN, Herrgård MJ, Palsson BØ, Ruppin E (2008), *Nat Biotechnol*
+26(9):1003–1010, <https://doi.org/10.1038/nbt.1487> (iMAT); Griebel B, iMATpy 0.3.0 (MIT),
+<https://github.com/correctjellyfish/imatpy>; Yizhak K, Gabay O, Cohen H, Ruppin E (2013),
+*Nat Commun* 4:2632, <https://doi.org/10.1038/ncomms3632>; Valcárcel LV, Torrano V, Tobalina L, Carracedo A,
 Planes FJ (2019), *Bioinformatics* 35(21):4350–4355,
 <https://doi.org/10.1093/bioinformatics/btz231>.
 
@@ -512,7 +582,8 @@ Numerical result metadata includes:
   (`null` when the method has none — a statement that this run had no seed, not an omission;
   OptKnock/RobustKnock record the explicit strain-design seed, default `0`);
 - the platform, machine and processor;
-- Python, CMM, COBRApy, NumPy, pandas, and SciPy versions;
+- Python, CMM, COBRApy, NumPy, pandas, and SciPy versions, plus the imatpy version
+  (`implementation_version`) on an iMAT result;
 - method parameters, source-state provenance, and counts of non-optimal scan levels where
   applicable;
 - for the production family, `applied_condition`: the medium as applied (with the components
@@ -537,8 +608,13 @@ model changes; they do not replace archival storage of the model file.
 - No current automated test validates novel target predictions against new wet-lab data.
 - MIQP/MILP genome-scale runtime and feasibility depend strongly on the solver license,
   tolerances, candidate set, and network compression.
-- rMTA source-state preprocessing and FVSEOF's `linear_flux_couplings` must be described
-  exactly; CMM does not silently claim the full preprocessing protocol of either paper.
+- The MTA/rMTA source state follows the papers' iMAT-plus-sampling protocol with three
+  recorded differences (ADR-0005), which a manuscript must state. FVSEOF's
+  `linear_flux_couplings` must likewise be described exactly.
+- No test compares CMM's iMAT reference state with a published v_ref. `test_imat.py`
+  establishes that the discretisation, the MILP and the pattern-constrained sampling are
+  implemented as specified, on small networks; it does not establish agreement with the
+  papers' own runs.
 - MTA/rMTA transformation scores floor the published denominator at the run's own `epsilon`, so
   a "perfect transformation" receives a large finite score rather than `+∞`. The scale is a
   documented function of a documented parameter. Check `n_distinct_scores`,
@@ -550,4 +626,6 @@ model changes; they do not replace archival storage of the model file.
 - Sampler convergence is not asserted. OptGP needs large sample counts (roughly >1000) to mix;
   a small or heavily thinned run can under-represent the feasible space without failing. Report
   the sampler, sample count, thinning, and seed, and check stability across seeds before
-  drawing conclusions from sampled means.
+  drawing conclusions from sampled means. This applies to SC-02 as well: its v_ref and
+  per-reaction ε are sampled means and spreads, so they move with `reference_seed` and
+  `reference_thinning`.

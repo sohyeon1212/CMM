@@ -7,8 +7,8 @@ same functions, and result objects carry enough metadata to reproduce a run.
 
 - `cmm.core` owns conditions, media, FBA/pFBA/FVA, immutable flux states, solver-capability
   checks, common ranking types, and deterministic provenance.
-- `cmm.omics` maps expression through GPR rules, runs E-Flux2 or LAD, predicts multiple
-  conditions, and derives source-to-target reaction directions.
+- `cmm.omics` maps expression through GPR rules, runs E-Flux2, LAD or iMAT (through `imatpy`),
+  predicts multiple conditions, and derives source-to-target reaction directions.
 - `cmm.features` owns perturbation resolution, MOMA/ROOM, theoretical yield and production
   scans, flux-response scans, random and reference-constrained flux sampling,
   OptKnock/RobustKnock, MTA/rMTA, and A→B transformation ranking.

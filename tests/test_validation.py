@@ -92,6 +92,59 @@ def test_apply_medium_matches_cobra_medium(ecoli_core):
     assert ecoli_core.medium[GLC] == pytest.approx(10.0)
 
 
+def _direct_two_stage_qp(model):
+    """Maximise the biological objective, hold it, then minimise total squared flux."""
+
+    with model:
+        optimum = model.slim_optimize()
+        problem = model.problem
+        model.add_cons_vars(
+            [
+                problem.Constraint(
+                    model.objective.expression, lb=optimum, name="direct_optimum"
+                )
+            ]
+        )
+        model.objective = problem.Objective(
+            sum(r.flux_expression * r.flux_expression for r in model.reactions),
+            direction="min",
+        )
+        return optimum, model.optimize()
+
+
+@pytest.mark.requires_qp
+def test_eflux2_scales_bounds_by_expression_and_matches_an_independent_solve(
+    branched_model,
+):
+    # Uniform weights leave every bound at its template value, so they cannot tell a working
+    # E-Flux2 from one that ignores expression. Here R2 is barely expressed: its bound must
+    # shrink to 1000 * 0.2 / 100 = 2, which binds, because the unscaled L2 optimum puts
+    # 20/3 through R2 (minimising R2^2 + 2 R3^2 with R2 + R3 = 10).
+    weights = {"R1": 100.0, "R2": 0.2, "R3": 100.0, "R5": 100.0, "BIOMASS": 100.0}
+    result = eflux2(branched_model, weights)
+
+    # Bounds by Kim et al.'s scaling with CMM's max normalisation, written out by hand.
+    assert result.bounds["R2"] == pytest.approx((0.0, 2.0))
+    for rid in ("R1", "R3", "R5"):
+        assert result.bounds[rid] == pytest.approx((0.0, 1000.0))
+    assert "BIOMASS" not in result.bounds and "SUP_A" not in result.bounds  # excluded
+
+    with branched_model:
+        branched_model.reactions.R2.upper_bound = 2.0
+        optimum, direct = _direct_two_stage_qp(branched_model)
+    assert result.status == direct.status == "optimal"
+    assert result.objective_value == pytest.approx(optimum, abs=1e-7)
+    for rid in ("SUP_A", "BIOMASS", "R1", "R2", "R3", "R5"):
+        assert result.fluxes[rid] == pytest.approx(direct.fluxes[rid], abs=1e-5)
+    assert result.fluxes["R2"] == pytest.approx(2.0, abs=1e-5)
+    assert result.fluxes["R3"] == pytest.approx(8.0, abs=1e-5)
+
+    # The same model with uniform expression routes 20/3 through R2: expression moved the
+    # answer, which is the property a uniform-weight test cannot see.
+    uniform = eflux2(branched_model, {rid: 100.0 for rid in weights})
+    assert uniform.fluxes["R2"] == pytest.approx(20.0 / 3.0, abs=1e-4)
+
+
 @pytest.mark.requires_qp
 def test_eflux2_matches_direct_two_stage_qp(branched_model):
     weights = {

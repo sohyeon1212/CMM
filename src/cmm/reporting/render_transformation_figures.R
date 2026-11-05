@@ -378,6 +378,37 @@ render_panel(
 )
 
 # --- Figure 2 — transformation score against rank ---------------------------------------
+# rMTA's Equation 9 multiplies the amplified tier by k * (bTS - wTS), so on one linear axis
+# that tier sits an order of magnitude above the rest and every other candidate collapses onto
+# a flat line. A log axis is not an option: scores can be negative. The two branches are drawn
+# as separate panels with their own y range instead, sharing the rank axis.
+amplified_flag <- function(frame) {
+  if (!all(c("bTS", "mTS", "wTS") %in% names(frame))) return(rep(FALSE, nrow(frame)))
+  flag <- as.numeric(frame$bTS) > 0 & as.numeric(frame$mTS) > 0 & as.numeric(frame$wTS) < 0
+  flag[is.na(flag)] <- FALSE
+  flag
+}
+
+# The largest run of equal scores, by rank. Ties break on target id, so a top-k ending inside
+# this block is alphabetical; the block is shaded so that reading is visible on the figure.
+largest_tie_block <- function(frame) {
+  key <- round(frame$score, 9)
+  counts <- table(key)
+  if (length(counts) == 0L || max(counts) < 2L) return(NULL)
+  value <- names(counts)[which.max(counts)]
+  members <- frame[as.character(key) == value, , drop = FALSE]
+  list(size = nrow(members), first = min(members$rank), last = max(members$rank), members = members)
+}
+
+fig02_height <- local({
+  height <- 60
+  if (artifact_available("transformation_ranking")) {
+    ranking <- tryCatch(read_artifact_csv("transformation_ranking"), error = function(e) NULL)
+    if (!is.null(ranking) && any(amplified_flag(ranking))) height <- 80
+  }
+  height
+})
+
 render_panel(
   id = "fig02_transformation_ranking",
   label = "Figure 2",
@@ -388,23 +419,48 @@ render_panel(
   alt = "Scatter of transformation score against rank for every scored candidate",
   roles = c("transformation_ranking"),
   width_mm = 89,
-  height_mm = 60,
+  height_mm = fig02_height,
   required = TRUE,
   build = function() {
     frame <- read_artifact_csv("transformation_ranking")
-    frame <- frame[!is.na(frame$score) & !is.na(frame$rank), , drop = FALSE]
-    if (nrow(frame) == 0L) stop("the ranking contains no scored candidate")
     frame$rank <- as.integer(frame$rank)
     frame$score <- as.numeric(frame$score)
+    unscored <- sum(!is.finite(frame$score) | is.na(frame$rank))
+    frame <- frame[is.finite(frame$score) & !is.na(frame$rank), , drop = FALSE]
+    if (nrow(frame) == 0L) stop("the ranking contains no scored candidate")
     frame$label <- display_label(frame)
     frame$marked <- highlight_flag(as.character(frame$target_id))
+    amplified <- amplified_flag(frame)
+    split <- any(amplified)
+    tier_levels <- c("Amplified (Equation 9 branch)", "Not amplified (rTS = mTS)")
+    frame$tier <- factor(ifelse(amplified, tier_levels[[1]], tier_levels[[2]]), levels = tier_levels)
     marked <- frame[frame$marked, , drop = FALSE]
+    tie <- largest_tie_block(frame)
 
-    plot <- ggplot2::ggplot(frame, ggplot2::aes(x = .data$rank, y = .data$score)) +
+    plot <- ggplot2::ggplot(frame, ggplot2::aes(x = .data$rank, y = .data$score))
+    if (!is.null(tie)) {
+      shade <- data.frame(
+        xmin = tie$first - 0.5,
+        xmax = tie$last + 0.5,
+        tier = tie$members$tier[[1]]
+      )
+      plot <- plot +
+        ggplot2::geom_rect(
+          data = shade,
+          mapping = ggplot2::aes(xmin = .data$xmin, xmax = .data$xmax),
+          ymin = -Inf, ymax = Inf,
+          inherit.aes = FALSE,
+          fill = light_grey, alpha = 0.6
+        )
+    }
+    plot <- plot +
       ggplot2::geom_line(linewidth = 0.3, colour = light_grey) +
       ggplot2::geom_point(size = 0.7, colour = blue) +
       ggplot2::labs(x = "Rank", y = "Transformation score") +
       theme_nature()
+    if (split) {
+      plot <- plot + ggplot2::facet_grid(tier ~ ., scales = "free_y")
+    }
     if (nrow(marked) > 0L) {
       plot <- plot +
         ggplot2::geom_point(data = marked, size = 1.4, colour = orange) +
@@ -420,60 +476,116 @@ render_panel(
         )
     }
     caption <- sprintf(
-      paste(
-        "Transformation score against rank for %d scored %s.",
-        "A score that decays smoothly rather than falling away means the cut between the",
-        "leading candidates and the rest is a choice, not a boundary."
-      ),
+      "Transformation score against rank for %d scored %s.",
       nrow(frame),
       if (nrow(frame) == 1L) "candidate" else "candidates"
     )
+    if (split) {
+      caption <- paste(
+        caption,
+        sprintf(
+          paste(
+            "The %d %s satisfying Equation 9's amplification branch (top panel) %s scaled",
+            "by k(bTS - wTS) and %s on a different scale from the rest (bottom panel, where",
+            "rTS equals the MOMA component); each panel has its own y axis."
+          ),
+          sum(amplified),
+          if (sum(amplified) == 1L) "candidate" else "candidates",
+          if (sum(amplified) == 1L) "is" else "are",
+          if (sum(amplified) == 1L) "sits" else "sit"
+        )
+      )
+    }
+    if (!is.null(tie)) {
+      caption <- paste(
+        caption,
+        sprintf(
+          paste(
+            "The shaded band is the largest tie block (%d candidates, ranks %d-%d): ties",
+            "break on target id, so a top-k ending inside it is alphabetical."
+          ),
+          tie$size, tie$first, tie$last
+        )
+      )
+    }
+    caption <- paste(
+      caption,
+      "A score that decays smoothly rather than falling away means the cut between the",
+      "leading candidates and the rest is a choice, not a boundary."
+    )
+    if (unscored > 0L) {
+      caption <- paste(caption, sprintf("%d unsuccessful solves are not drawn.", unscored))
+    }
     attr(plot, "cmm_caption") <- caption
     attr(plot, "cmm_alt") <- caption
     plot
   }
 )
 
-# --- Figure 3 — transformation rank against the MOMA baseline ---------------------------
+# --- Figure 3 — rank against a comparator ------------------------------------------------
+# rMTA: rank under rTS against rank under its own MOMA component (mTS), from the score
+# decomposition, with no extra solve. MTA has no components, so it uses the optional external
+# MOMA baseline when that stage was run.
+fig03_uses_decomposition <- artifact_available("score_decomposition")
 render_panel(
   id = "fig03_ranking_vs_moma",
   label = "Figure 3",
   caption = paste(
-    "Each candidate's rank under the transformation method and under the MOMA baseline.",
-    "Points on the diagonal are candidates the two methods agree on."
+    "Each candidate's rank under the transformation score and under a MOMA comparator.",
+    "Points on the diagonal are candidates the two rankings agree on."
   ),
-  alt = "Scatter of transformation rank against MOMA rank, with the identity line drawn",
-  roles = c("transformation_ranking", "moma_baseline"),
+  alt = "Scatter of transformation rank against MOMA-comparator rank, with the identity line drawn",
+  roles = if (fig03_uses_decomposition) c("score_decomposition") else c("transformation_ranking", "moma_baseline"),
   width_mm = 89,
-  height_mm = 60,
+  height_mm = 65,
   required = FALSE,
   build = function() {
-    ranking <- read_artifact_csv("transformation_ranking")
-    baseline <- read_artifact_csv("moma_baseline")
-    scored <- is.finite(as.numeric(baseline$moma_score))
-    if ("status" %in% names(baseline)) {
-      scored <- scored & !is.na(baseline$status) & baseline$status == "optimal"
+    excluded <- 0L
+    if (fig03_uses_decomposition) {
+      decomposition <- read_artifact_csv("score_decomposition")
+      if (nrow(decomposition) == 0L) stop("the score decomposition contains no candidate")
+      merged <- data.frame(
+        target_id = as.character(decomposition$target_id),
+        label = display_label(decomposition),
+        transformation_rank = as.integer(decomposition$rank_rTS),
+        moma_rank = as.integer(decomposition$rank_mTS),
+        amplified = toupper(as.character(decomposition$amplified)) == "TRUE",
+        stringsAsFactors = FALSE
+      )
+      y_label <- "Rank by MOMA component (mTS)"
+      x_label <- "Rank by rMTA score (rTS)"
+    } else {
+      ranking <- read_artifact_csv("transformation_ranking")
+      baseline <- read_artifact_csv("moma_baseline")
+      scored <- is.finite(as.numeric(baseline$moma_score))
+      if ("status" %in% names(baseline)) {
+        scored <- scored & !is.na(baseline$status) & baseline$status == "optimal"
+      }
+      excluded <- sum(!scored)
+      baseline <- baseline[scored, , drop = FALSE]
+      merged <- merge(
+        data.frame(
+          target_id = as.character(ranking$target_id),
+          label = display_label(ranking),
+          transformation_rank = as.integer(ranking$rank),
+          stringsAsFactors = FALSE
+        ),
+        data.frame(
+          target_id = as.character(baseline$target_id),
+          moma_rank = as.integer(baseline$rank),
+          stringsAsFactors = FALSE
+        ),
+        by = "target_id"
+      )
+      if (nrow(merged) == 0L) stop("no candidate has a successful MOMA solve for rank comparison")
+      merged$amplified <- rep(FALSE, nrow(merged))
+      y_label <- "MOMA-baseline rank"
+      x_label <- "Transformation rank"
     }
-    excluded <- sum(!scored)
-    baseline <- baseline[scored, , drop = FALSE]
-    merged <- merge(
-      data.frame(
-        target_id = as.character(ranking$target_id),
-        label = display_label(ranking),
-        transformation_rank = as.integer(ranking$rank),
-        stringsAsFactors = FALSE
-      ),
-      data.frame(
-        target_id = as.character(baseline$target_id),
-        moma_rank = as.integer(baseline$rank),
-        stringsAsFactors = FALSE
-      ),
-      by = "target_id"
-    )
     merged <- merged[stats::complete.cases(merged), , drop = FALSE]
-    if (nrow(merged) == 0L) stop("no candidate has a successful MOMA solve for rank comparison")
+    if (nrow(merged) == 0L) stop("no candidate has both ranks for comparison")
     merged$marked <- highlight_flag(merged$target_id)
-    marked <- merged[merged$marked, , drop = FALSE]
+    marked <- merged[merged$marked | merged$amplified, , drop = FALSE]
     limit <- max(merged$transformation_rank, merged$moma_rank)
 
     plot <- ggplot2::ggplot(
@@ -481,32 +593,53 @@ render_panel(
       ggplot2::aes(x = .data$transformation_rank, y = .data$moma_rank)
     ) +
       ggplot2::geom_abline(slope = 1, intercept = 0, linewidth = 0.3, colour = grey, linetype = "dashed") +
-      ggplot2::geom_point(size = 0.9, colour = blue) +
+      ggplot2::geom_point(
+        data = merged[!merged$amplified, , drop = FALSE], size = 0.9, colour = blue
+      ) +
       ggplot2::coord_equal(xlim = c(1, limit), ylim = c(1, limit)) +
-      ggplot2::labs(x = "Transformation rank", y = "MOMA rank") +
+      ggplot2::labs(x = x_label, y = y_label) +
       theme_nature()
+    if (any(merged$amplified)) {
+      plot <- plot +
+        ggplot2::geom_point(
+          data = merged[merged$amplified, , drop = FALSE], size = 1.6, colour = orange, shape = 17
+        )
+    }
     if (nrow(marked) > 0L) {
       plot <- plot +
-        ggplot2::geom_point(data = marked, size = 1.5, colour = orange) +
         ggrepel::geom_text_repel(
           data = marked,
           mapping = ggplot2::aes(label = .data$label),
           size = 2,
-          colour = orange,
+          colour = "black",
           family = font_family,
           min.segment.length = 0,
           segment.size = 0.25,
+          max.overlaps = 20L,
           seed = 0L
         )
     }
-    caption <- sprintf(
-      paste(
-        "Ranks for %d candidates with successful MOMA solves; points on the diagonal",
-        "are candidates the two methods agree on.",
-        "%d unsuccessful MOMA solves are excluded from this comparison and retained in the CSV."
-      ),
-      nrow(merged), excluded
-    )
+    caption <- if (fig03_uses_decomposition) {
+      sprintf(
+        paste(
+          "Rank under the rMTA score (rTS) against rank under its MOMA component alone (mTS)",
+          "for %d candidates, from the score decomposition with no extra solve. Equation 9",
+          "leaves rTS = mTS unless the amplification branch fires, so points off the diagonal",
+          "are moved only by the %d amplified %s (orange triangles) overtaking them."
+        ),
+        nrow(merged), sum(merged$amplified),
+        if (sum(merged$amplified) == 1L) "candidate" else "candidates"
+      )
+    } else {
+      sprintf(
+        paste(
+          "Ranks for %d candidates with successful MOMA-baseline solves; points on the",
+          "diagonal are candidates the two methods agree on.",
+          "%d unsuccessful MOMA solves are excluded from this comparison and retained in the CSV."
+        ),
+        nrow(merged), excluded
+      )
+    }
     attr(plot, "cmm_caption") <- caption
     attr(plot, "cmm_alt") <- caption
     plot

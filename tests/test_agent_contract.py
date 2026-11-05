@@ -127,7 +127,13 @@ def test_transformation_skill_states_the_deviations_it_must_disclose() -> None:
     # published pipeline it does not reproduce.
     skill = (TRANSFORMATION_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "iMAT" in skill
-    assert "chosen, not derived" in skill  # epsilon
+    # v_ref is built from iMAT; what still differs from the papers is named.
+    assert "three stated differences" in skill
+    assert "AND=min/OR=max" in skill and "warm-up" in skill
+    # Epsilon follows the published per-reaction rule, from the samples behind v_ref.
+    assert "derived by the published rule from the same samples" in skill
+    # imat_delta is a per-data-set choice, so the interview asks for it.
+    assert "imat_delta" in skill
     # Coupling is not a third deviation. Yizhak et al. apply partial coupling only in their
     # reaction-level validation analyses, and rMTA ranks gene knockouts with no coupling
     # reduction at all, so disclosing it as a departure from the published pipeline overstates

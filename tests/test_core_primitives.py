@@ -185,21 +185,21 @@ def test_target_ranking_export_frame_is_deterministic():
 
 
 def test_target_name_is_exported_beside_the_id_and_never_replaces_it():
-    # Report tables and figure labels read "6510_AT1" or "b1602" without it, which no reader
+    # Report tables and figure labels read "b1602" without it, which no reader
     # can interpret. It sits beside the id rather than replacing it because names are neither
     # unique nor always present, while the id is what provenance is written against.
     ranking = TargetRanking(
         method="m",
         targets=(
-            TargetScore("6510_AT1", 2.0, {"bTS": 1.0}, target_name="SLC1A5"),
-            TargetScore("343_AT1", 1.0, {"bTS": 0.5}),
+            TargetScore("b1602", 2.0, {"bTS": 1.0}, target_name="pntB"),
+            TargetScore("b0002", 1.0, {"bTS": 0.5}),
         ),
     )
     frame = ranking.to_frame()
     assert list(frame.columns) == ["rank", "target_id", "target_name", "score", "bTS"]
-    assert list(frame["target_id"]) == ["6510_AT1", "343_AT1"]
+    assert list(frame["target_id"]) == ["b1602", "b0002"]
     # An unnamed target keeps its row and exports an empty label, not a missing one.
-    assert list(frame["target_name"]) == ["SLC1A5", ""]
+    assert list(frame["target_name"]) == ["pntB", ""]
 
 
 def test_a_ranking_that_names_nothing_exports_the_table_it_did_before():

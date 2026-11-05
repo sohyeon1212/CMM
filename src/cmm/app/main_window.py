@@ -42,6 +42,7 @@ from qtpy.QtWidgets import (
     QSlider,
     QFrame,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStyledItemDelegate,
@@ -82,7 +83,13 @@ from cmm.features.production import (
 )
 from cmm.features.response import flux_response
 from cmm.features.revert import DEFAULT_EPSILON as REVERT_DEFAULT_EPSILON
-from cmm.features.revert import revert_targets
+from cmm.features.revert import revert_candidates, revert_targets
+from cmm.features.revert_epsilon import PUBLISHED_EPSILON_SAMPLES, epsilons_from_samples
+from cmm.features.revert_reference import (
+    PUBLISHED_REFERENCE_SAMPLES,
+    PUBLISHED_REFERENCE_THINNING,
+    imat_reference_state,
+)
 from cmm.features.sampling import (
     random_flux_sampling,
     reference_constrained_sampling,
@@ -98,7 +105,15 @@ from cmm.omics.differential import (
     reaction_directions,
     restrict_to_top_changed,
 )
-from cmm.omics.expression import integrate_expression
+from cmm.omics.expression import (
+    describe_expression_columns,
+    log2_expression,
+)
+from cmm.omics.imat import (
+    PUBLISHED_IMAT_BETA,
+    PUBLISHED_IMAT_EPSILON,
+    discretize_expression,
+)
 from cmm.app.svg_background import svg_background
 from cmm.resources import bundled_map_for, map_reaction_ids
 
@@ -297,7 +312,9 @@ _FIELD_MAX_WIDTH = 260
 _LABEL_PAD = 4
 
 
-def _read_expression_matrix(path: str) -> "pd.DataFrame":
+def _read_expression_matrix(
+    path: str, *, allow_negative: bool = False
+) -> "pd.DataFrame":
     """Read a gene-expression file into a gene-indexed frame of one column per measurement.
 
     One numeric column is a single measurement per gene and supports a fold-change cut only.
@@ -305,7 +322,9 @@ def _read_expression_matrix(path: str) -> "pd.DataFrame":
     The shape is a fact about the file, so it is read and reported rather than asked about.
 
     Values are linear expression — counts, TPM, FPKM — as everywhere else in the app, so a
-    negative one is rejected here rather than left to surface as a solver error later.
+    negative one is rejected here rather than left to surface as a solver error later. The
+    Revert tab also accepts log2 tables, which go below zero; it reads with
+    ``allow_negative=True`` and checks against the scale chosen when the run starts.
     """
 
     import numpy as np
@@ -321,7 +340,9 @@ def _read_expression_matrix(path: str) -> "pd.DataFrame":
     if numeric.isna().any().any():
         raise ValueError("expression file carries missing values")
     values = numeric.to_numpy(dtype=float)
-    if not np.isfinite(values).all() or (values < 0).any():
+    if not np.isfinite(values).all():
+        raise ValueError("expression values must be finite and non-negative")
+    if not allow_negative and (values < 0).any():
         raise ValueError("expression values must be finite and non-negative")
     numeric.index = [str(value) for value in numeric.index]
     if numeric.index.has_duplicates:
@@ -355,9 +376,7 @@ def _expression_in_log2(matrix: "pd.DataFrame") -> "pd.DataFrame":
     agree exactly with the fold-change cut this tab applied before it accepted replicates.
     """
 
-    import numpy as np
-
-    return np.log2(matrix + _LOG2_PSEUDOCOUNT)
+    return log2_expression(matrix, "linear", _LOG2_PSEUDOCOUNT)
 
 
 class _AnalysisWorker(QObject):
@@ -489,6 +508,8 @@ class CmmMainWindow(QMainWindow):
         # separate that fallback from a fold-change run the user asked for.
         self._revert_significance_forced = False
         self._revert_significance_syncing = False
+        # Everything the last successful revert run produced, kept for "Export results…".
+        self._revert_last_run: dict[str, object] | None = None
         self._stage_labels_aligned = False
         # Real gene expression loaded from a CSV on the Omics tab, reused as the LAD/E-Flux2
         # reference template on the Comparison tab so that path is not left to synthetic data.
@@ -839,6 +860,9 @@ class CmmMainWindow(QMainWindow):
         self._refresh_comparison_templates()  # disable LAD/E-Flux2 until recomputed
         self._revert_source_expression = None
         self._revert_target_expression = None
+        self._revert_last_run = None
+        if hasattr(self, "revert_export_btn"):
+            self.revert_export_btn.setEnabled(False)
         self._omics_table_df = None
         self._omics_fluxes_by_condition = None
         self.omics_map_btn.setEnabled(False)
@@ -3035,10 +3059,19 @@ class CmmMainWindow(QMainWindow):
         # --- inputs -----------------------------------------------------------------------
         inputs_box, inputs_form = self._stage_box(
             "Input — two expression states",
-            "CSV or TSV: a gene id column, then one column per replicate. Values are linear "
-            "expression (counts, TPM, FPKM), not log-transformed. Two or more replicates on "
-            "each side unlock the published t-test. Source = the state to move away from.",
+            "CSV or TSV: a gene id column, then one column per replicate, linear (counts, "
+            "TPM, FPKM) or log2. Two or more replicates on each side unlock the published "
+            "t-test. Source = the state to move away from.",
         )
+        self.revert_scale_combo = QComboBox()
+        self.revert_scale_combo.addItem("linear (counts, TPM, intensity)", "linear")
+        self.revert_scale_combo.addItem("log2 (e.g. RMA, log2 CPM)", "log2")
+        self.revert_scale_combo.setToolTip(
+            "How both files are scaled. The iMAT discretisation and the direction tests both "
+            "work in log2, so a linear file is converted with log2(x + 1). A log2 file is "
+            "never logged twice. Valcárcel et al. worked from log2 quantile-normalised data."
+        )
+        inputs_form.addRow("Expression scale:", self.revert_scale_combo)
         source_row = QHBoxLayout()
         source_btn = QPushButton("Load source CSV/TSV…")
         source_btn.clicked.connect(lambda: self.load_revert_expression("source"))
@@ -3051,6 +3084,14 @@ class CmmMainWindow(QMainWindow):
         target_btn = QPushButton("Load target CSV/TSV…")
         target_btn.clicked.connect(lambda: self.load_revert_expression("target"))
         self.revert_target_label = QLabel("not loaded")
+        # The caption names the sample columns, so it can be long; wrap it rather than let it
+        # widen the stage column past the window and clip everything else in it.
+        for caption_label in (self.revert_source_label, self.revert_target_label):
+            caption_label.setWordWrap(True)
+            caption_policy = caption_label.sizePolicy()
+            caption_policy.setHeightForWidth(True)
+            caption_policy.setHorizontalPolicy(QSizePolicy.Ignored)
+            caption_label.setSizePolicy(caption_policy)
         target_row.addWidget(target_btn)
         target_row.addWidget(self.revert_target_label, 1)
         inputs_form.addRow("Target expression:", target_row)
@@ -3059,20 +3100,41 @@ class CmmMainWindow(QMainWindow):
         # --- stage 1: source reference state ----------------------------------------------
         vref_box, vref_form = self._stage_box(
             "Stage 1 — source flux state (v_ref)",
-            "Turns the source expression into fluxes. Everything below is measured against it.",
+            "As in the papers: source genes are classed high/moderate/low, iMAT finds an "
+            "activity pattern consistent with them, and v_ref is the mean of "
+            f"{PUBLISHED_REFERENCE_SAMPLES} flux samples from that pattern's space.",
         )
-        self.revert_reference_combo = QComboBox()
-        self.revert_reference_combo.addItems(["eflux2", "lad"])
-        self.revert_reference_combo.setToolTip(
-            "eflux2 (Kim et al. 2016): scales each reaction's bounds by its expression, then "
-            "minimises total flux.\n"
-            "lad (Lee et al. 2012): fits |flux| to expression-derived targets by least "
-            "absolute deviation; needs only an LP solver.\n\n"
-            "Yizhak et al. use iMAT, which CMM does not implement. iMAT places no objective "
-            "on growth, so the ranking is conditioned on whichever estimator is used. Supply "
-            "an external state through the Python API to reproduce the published pipeline."
+        self.revert_delta_spin = QDoubleSpinBox()
+        self.revert_delta_spin.setDecimals(2)
+        self.revert_delta_spin.setRange(0.0, 3.0)
+        self.revert_delta_spin.setSingleStep(0.1)
+        self.revert_delta_spin.setValue(0.3)
+        self.revert_delta_spin.setToolTip(
+            "In each source sample a gene is high above mean + δ·SD and low below "
+            "mean − δ·SD of that sample's log2 expression over the model's genes "
+            "(Valcárcel et al. 2019). They chose δ per data set: 0.3 for Alzheimer's, 0.7 for "
+            "prostate cancer, 0.7–1 for knockout experiments. State the value used."
         )
-        vref_form.addRow("Estimator:", self.revert_reference_combo)
+        self.revert_beta_spin = QDoubleSpinBox()
+        self.revert_beta_spin.setDecimals(0)
+        self.revert_beta_spin.setRange(1.0, 100.0)
+        self.revert_beta_spin.setSuffix(" %")
+        self.revert_beta_spin.setValue(PUBLISHED_IMAT_BETA * 100)
+        self.revert_beta_spin.setToolTip(
+            "A gene keeps its high or low class only when at least this share of the source "
+            "samples agree; otherwise it is moderate. Valcárcel et al. used 100%."
+        )
+        self.revert_imat_epsilon_spin = QDoubleSpinBox()
+        self.revert_imat_epsilon_spin.setDecimals(3)
+        self.revert_imat_epsilon_spin.setRange(0.001, 1000.0)
+        self.revert_imat_epsilon_spin.setValue(PUBLISHED_IMAT_EPSILON)
+        self.revert_imat_epsilon_spin.setToolTip(
+            "The flux a highly expressed reaction must carry to count as active in iMAT "
+            "(Shlomi et al. 2008 use 1). Distinct from the MTA ε below."
+        )
+        vref_form.addRow("Discretisation δ (SD):", self.revert_delta_spin)
+        vref_form.addRow("Sample agreement β:", self.revert_beta_spin)
+        vref_form.addRow("iMAT activity ε:", self.revert_imat_epsilon_spin)
         layout.addWidget(vref_box)
 
         # --- stage 2: direction map -------------------------------------------------------
@@ -3095,13 +3157,15 @@ class CmmMainWindow(QMainWindow):
         self.revert_top_changed_spin = QSpinBox()
         self.revert_top_changed_spin.setRange(0, 100000)
         self.revert_top_changed_spin.setSpecialValueText("all (no cut)")
-        self.revert_top_changed_spin.setValue(0)
+        self.revert_top_changed_spin.setValue(200)
         self.revert_top_changed_spin.setToolTip(
             "Keep only this many of the most differentially expressed changed reactions; the "
-            "rest are treated as steady. Yizhak et al. use the top 100-200. Each changed "
-            "reaction adds one binary variable to the search, so on a genome-scale model this "
-            "cut is also what decides whether the run finishes. 0 keeps every reaction that "
-            "clears the fold-change threshold."
+            "rest are treated as steady. Yizhak et al. use the top 100-200, and Valcárcel et "
+            "al. tune their filter until the changed set lands there. Each changed reaction "
+            "adds one binary variable to the search, so on a genome-scale model this cut is "
+            "also what decides whether the run finishes. 0 keeps every reaction that clears "
+            "the significance threshold. The result reports the actual count and warns when "
+            "it falls outside 100-200."
         )
         self.revert_significance_combo = QComboBox()
         self.revert_significance_combo.addItem("t-test (P value)", "ttest")
@@ -3123,14 +3187,38 @@ class CmmMainWindow(QMainWindow):
         self.revert_p_value_spin.setToolTip(
             "A gene counts as changed when its two-sided Student's t-test P value falls "
             "below this. Yizhak et al. use P < 0.05.\n\n"
-            "The test is run per gene with no multiple-testing correction, as the paper "
-            "specifies; the 'top changed reactions' cut is what limits the changed set."
+            "Yizhak et al. cut on the raw P value; Valcárcel et al. cut on the FDR-adjusted "
+            "one for the prostate cancer data. Either way the 'top changed reactions' cut is "
+            "what limits the changed set."
+        )
+        self.revert_p_adjust_combo = QComboBox()
+        self.revert_p_adjust_combo.addItem("none (raw P, Yizhak et al.)", "none")
+        self.revert_p_adjust_combo.addItem("FDR (Benjamini-Hochberg)", "fdr_bh")
+        self.revert_p_adjust_combo.setToolTip(
+            "Which P value the cutoff applies to. FDR adjustment never changes the gene order, "
+            "so it changes the result only when fewer genes pass than the 'top changed "
+            "reactions' cut would keep."
         )
         self.revert_significance_combo.currentIndexChanged.connect(
             self._on_revert_significance_changed
         )
         direction_form.addRow("Significance test:", self.revert_significance_combo)
         direction_form.addRow("t-test P cutoff:", self.revert_p_value_spin)
+        direction_form.addRow("P-value adjustment:", self.revert_p_adjust_combo)
+        self.revert_min_fc_spin = QDoubleSpinBox()
+        self.revert_min_fc_spin.setDecimals(3)
+        self.revert_min_fc_spin.setRange(0.0, 20.0)
+        self.revert_min_fc_spin.setSingleStep(0.05)
+        self.revert_min_fc_spin.setValue(0.0)
+        self.revert_min_fc_spin.setSpecialValueText("off (P only)")
+        self.revert_min_fc_spin.setToolTip(
+            "With the t-test, also require |log2 fold change| to reach this before a gene "
+            "counts as changed. Off is Yizhak et al.'s test alone.\n\n"
+            "With many replicates the t-test calls even tiny changes significant, and the "
+            "'top changed reactions' cut then fills with them. Valcárcel et al. pair their "
+            "filter with a fold change of at least 20%: log2(1.2) = 0.263."
+        )
+        direction_form.addRow("Minimum |log2FC|:", self.revert_min_fc_spin)
         direction_form.addRow("Fold-change threshold:", self.revert_fold_change_spin)
         direction_form.addRow("Top changed reactions:", self.revert_top_changed_spin)
         self.revert_replicate_note = QLabel("")
@@ -3177,6 +3265,18 @@ class CmmMainWindow(QMainWindow):
             "Yizhak et al. report a = 0.66 in the main text and find the ranking robust over "
             "0.1-0.9."
         )
+        self.revert_epsilon_mode_combo = QComboBox()
+        self.revert_epsilon_mode_combo.addItem(
+            "per reaction (sampled, published)", "per_reaction"
+        )
+        self.revert_epsilon_mode_combo.addItem("single value", "uniform")
+        self.revert_epsilon_mode_combo.setToolTip(
+            "per reaction: as in Yizhak et al. (2013), each changed reaction gets the change "
+            f"that a one-sided t-test over {PUBLISHED_EPSILON_SAMPLES} sampled flux "
+            "distributions calls significant (P < 0.05), with a minimum of 0.001. The samples "
+            "are the ones behind v_ref, drawn from the iMAT pattern's space.\n"
+            "single value: the number below for every reaction, chosen rather than derived."
+        )
         self.revert_epsilon_spin = QDoubleSpinBox()
         self.revert_epsilon_spin.setDecimals(4)
         self.revert_epsilon_spin.setRange(0.0, 1000.0)
@@ -3185,15 +3285,29 @@ class CmmMainWindow(QMainWindow):
         self.revert_epsilon_spin.setToolTip(
             "How far a reaction must move from v_ref before the move counts: v >= v_ref + e to "
             "increase, v <= v_ref - e to decrease. Also floors the score's denominator.\n\n"
-            "This is measured in the model's own flux units, so there is no safe default — a "
-            "value suited to a core model is not suited to a genome-scale one. Yizhak et al. "
-            "derive it per data set from a sampled reference distribution; CMM uses the fixed "
-            "value set here, so state it when reporting a result."
+            "Used only when ε is a single value. It is measured in the model's own flux "
+            "units, so there is no safe default — a value suited to a core model is not "
+            "suited to a genome-scale one. State it when reporting a result."
         )
         search_form.addRow("Method:", self.method_combo)
         search_form.addRow("Knockout level:", self.perturbation_combo)
         search_form.addRow("Transformation weight α:", self.alpha_spin)
-        search_form.addRow("Significant flux change ε:", self.revert_epsilon_spin)
+        search_form.addRow("Significant flux change ε:", self.revert_epsilon_mode_combo)
+        search_form.addRow("Single ε value:", self.revert_epsilon_spin)
+        self.revert_candidate_filter_check = QCheckBox("Drop blocked && essential")
+        self.revert_candidate_filter_check.setChecked(True)
+        self.revert_candidate_filter_check.setToolTip(
+            "Yizhak et al. drop dead-end reactions and essential ones (growth reduced by more "
+            "than 80%), and score one member per set of knockouts with the same effect "
+            "(deduplication is part of this filter). The "
+            "candidate count is the denominator of any 'top N%' statement. Unchecked scores "
+            "every gene or reaction."
+        )
+        search_form.addRow("Candidates:", self.revert_candidate_filter_check)
+        self.revert_epsilon_mode_combo.currentIndexChanged.connect(
+            self._update_revert_epsilon_controls
+        )
+        self._update_revert_epsilon_controls()
 
         layout.addWidget(search_box)
         layout.addStretch(1)
@@ -3227,6 +3341,12 @@ class CmmMainWindow(QMainWindow):
             "Load source and target expression files to rank normalization targets."
         )
         self.revert_summary.setWordWrap(True)
+        # Several wrapped lines (target, direction map, ε, candidates): without height-for-
+        # width the label is sized for fewer lines than it wraps to and clips the last ones.
+        summary_policy = self.revert_summary.sizePolicy()
+        summary_policy.setHeightForWidth(True)
+        self.revert_summary.setSizePolicy(summary_policy)
+        self.revert_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         right.addWidget(self.revert_summary)
 
         self.revert_table = QTableWidget(0, 3)
@@ -3239,7 +3359,42 @@ class CmmMainWindow(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         self.revert_table.verticalHeader().setVisible(False)
         self.revert_table.setAlternatingRowColors(True)
-        right.addWidget(self.revert_table, 1)
+
+        # ε lives in its own tab rather than only in the summary sentence above, where it
+        # was easy to miss and could be clipped on a small screen.
+        epsilon_page = QWidget()
+        epsilon_layout = QVBoxLayout(epsilon_page)
+        epsilon_layout.setContentsMargins(0, 6, 0, 0)
+        self.revert_epsilon_label = QLabel("Run Revert to see the per-reaction ε.")
+        self.revert_epsilon_label.setWordWrap(True)
+        epsilon_layout.addWidget(self.revert_epsilon_label)
+        self.revert_epsilon_table = QTableWidget(0, 4)
+        self.revert_epsilon_table.setHorizontalHeaderLabels(
+            ["Reaction", "Sample SD", "ε", "At 0.001 minimum"]
+        )
+        eps_header = self.revert_epsilon_table.horizontalHeader()
+        eps_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in (1, 2, 3):
+            eps_header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.revert_epsilon_table.verticalHeader().setVisible(False)
+        self.revert_epsilon_table.setAlternatingRowColors(True)
+        self.revert_epsilon_table.setSortingEnabled(True)
+        epsilon_layout.addWidget(self.revert_epsilon_table, 1)
+
+        self.revert_results_tabs = QTabWidget()
+        self.revert_results_tabs.addTab(self.revert_table, "Ranking")
+        self.revert_results_tabs.addTab(epsilon_page, "ε per reaction")
+        right.addWidget(self.revert_results_tabs, 1)
+        self.revert_export_btn = QPushButton("Export results…")
+        self.revert_export_btn.setEnabled(False)
+        self.revert_export_btn.setToolTip(
+            "Write the last run to a new folder: ranking with rTS, bTS, mTS and wTS; the "
+            "per-reaction ε and the sampled fluxes of the changed reactions; the direction map "
+            "and gene-level evidence; and every setting with its provenance."
+        )
+        # clicked(bool) would otherwise arrive as the ``directory`` argument.
+        self.revert_export_btn.clicked.connect(lambda: self.export_revert_results())
+        right.addWidget(self.revert_export_btn)
 
         columns.addWidget(left_column, 1)
         columns.addWidget(results, 1)
@@ -4328,6 +4483,13 @@ class CmmMainWindow(QMainWindow):
         ]
         return counts[0], counts[1]
 
+    def _update_revert_epsilon_controls(self) -> None:
+        """The single-ε spin box only applies when ε is one value for every reaction."""
+
+        self.revert_epsilon_spin.setEnabled(
+            self.revert_epsilon_mode_combo.currentData() == "uniform"
+        )
+
     def _on_revert_significance_changed(self) -> None:
         """A user-driven pick of the test overrides the tab's own fallback for good."""
 
@@ -4366,6 +4528,8 @@ class CmmMainWindow(QMainWindow):
             self._revert_significance_syncing = False
         significance = combo.currentData()
         self.revert_p_value_spin.setEnabled(significance == "ttest")
+        self.revert_p_adjust_combo.setEnabled(significance == "ttest")
+        self.revert_min_fc_spin.setEnabled(significance == "ttest")
         self.revert_fold_change_spin.setEnabled(significance != "ttest")
 
         if not loaded:
@@ -4386,6 +4550,148 @@ class CmmMainWindow(QMainWindow):
             )
         self.revert_replicate_note.setText(note)
 
+    def _show_revert_epsilons(self, thresholds, epsilon_value: float) -> None:
+        """Fill the ε tab: the per-reaction table, or say that one value was used."""
+
+        table = self.revert_epsilon_table
+        table.setSortingEnabled(False)
+        if thresholds is None:
+            table.setRowCount(0)
+            self.revert_epsilon_label.setText(
+                f"A single ε = {epsilon_value:g} was used for every changed reaction; no "
+                "per-reaction values were derived."
+            )
+            self.revert_results_tabs.setTabText(1, "ε per reaction")
+            return
+        frame = thresholds.to_frame()
+        eps = thresholds.summary()
+        self.revert_epsilon_label.setText(
+            f"ε per changed reaction from {thresholds.n_samples} samples of the iMAT "
+            f"pattern space (one-sided t-test, P &lt; {thresholds.p_value:g}, minimum "
+            f"{thresholds.minimum:g}). {eps['n_reactions']} reactions: median "
+            f"{eps['median']:.3g}, range {eps['minimum']:.3g}&ndash;{eps['maximum']:.3g}, "
+            f"{eps['n_floored']} at the minimum."
+        )
+        table.setRowCount(len(frame))
+        for i, row in enumerate(frame.itertuples(index=False)):
+            table.setItem(i, 0, QTableWidgetItem(str(row.reaction_id)))
+            for col, value in ((1, row.sample_std), (2, row.epsilon)):
+                item = QTableWidgetItem()
+                item.setData(Qt.DisplayRole, float(value))  # numeric sort, not text
+                table.setItem(i, col, item)
+            table.setItem(i, 3, QTableWidgetItem("yes" if row.floored else ""))
+        table.setSortingEnabled(True)
+        table.sortItems(2, Qt.DescendingOrder)  # largest threshold first
+        self.revert_results_tabs.setTabText(1, f"ε per reaction ({len(frame)})")
+
+    def export_revert_results(self, directory: str | None = None) -> "Path | None":
+        """Write the last revert run into a new, timestamped folder under ``directory``.
+
+        A fresh folder per export, so an earlier export is never overwritten.
+        """
+
+        import datetime
+        import json
+
+        import pandas as pd
+
+        run = self._revert_last_run
+        if run is None:
+            self.revert_summary.setText("Run Revert first; there is nothing to export.")
+            return None
+        if directory is None:
+            directory = QFileDialog.getExistingDirectory(
+                self, "Choose a folder for the revert results"
+            )
+            if not directory:
+                return None
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = Path(directory) / f"cmm_revert_{stamp}"
+        suffix = 1
+        while out.exists():
+            suffix += 1
+            out = Path(directory) / f"cmm_revert_{stamp}_{suffix}"
+        out.mkdir(parents=True)
+
+        ranking = run["ranking"]
+        genes = run["genes"]
+        direction = run["direction"]
+        thresholds = run["thresholds"]
+        written = []
+
+        def save(name: str, frame: "pd.DataFrame") -> None:
+            frame.to_csv(out / name, index=False)
+            written.append(name)
+
+        ranking_frame = ranking.to_frame()  # score is rTS for rmta, TS for mta
+        represented = run.get("represented") or {}
+        if represented:
+            members = ranking_frame["target_id"].map(
+                lambda tid: represented.get(tid, [tid])
+            )
+            # Every id with the same knockout effect as target_id, target_id included.
+            ranking_frame["n_equivalent"] = members.map(len)
+            ranking_frame["equivalent_targets"] = members.map(";".join)
+        save("ranking.csv", ranking_frame)
+        save(
+            "direction_map.csv",
+            pd.DataFrame(
+                sorted(direction.directions.items()),
+                columns=["reaction_id", "direction"],
+            ),
+        )
+        save(
+            "gene_differential_expression.csv",
+            genes.reset_index().rename(columns={"index": "gene_id"}),
+        )
+        for name, key in (
+            ("gene_expression_states.csv", "gene_states"),
+            ("imat_reference_pattern.csv", "reference_pattern"),
+        ):
+            frame = run.get(key)
+            if isinstance(frame, pd.DataFrame):
+                save(name, frame)
+        if thresholds is not None:
+            save("reaction_epsilons.csv", thresholds.to_frame())
+            thresholds.samples_frame().to_csv(
+                out / "epsilon_samples_changed_reactions.csv"
+            )
+            written.append("epsilon_samples_changed_reactions.csv")
+
+        def jsonable(value):
+            if isinstance(value, dict):
+                return {str(k): jsonable(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return [jsonable(v) for v in value]
+            if isinstance(value, (str, int, bool)) or value is None:
+                return value
+            if isinstance(value, float):
+                return value if math.isfinite(value) else str(value)
+            return str(value)
+
+        settings = {
+            "settings": run["settings"],
+            "equivalent_targets_column": (
+                "ids whose knockout has the same effect as target_id (same blocked "
+                "reactions for genes, full flux coupling for reactions), target_id "
+                "included; scored once and sharing target_id's score"
+            ),
+            "score_column": (
+                "rTS (Valcárcel et al. 2019, Eq. 9; bTS/mTS/wTS are its components)"
+                if run["settings"]["method"] == "rmta"
+                else "transformation score TS (Yizhak et al. 2013)"
+            ),
+            "files": written,
+            "ranking_provenance": dict(ranking.metadata),
+            "epsilon_provenance": dict(thresholds.metadata) if thresholds else None,
+        }
+        (out / "settings.json").write_text(
+            json.dumps(jsonable(settings), indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        self.status_label.setText(f"Revert results exported to {out}")
+        return out
+
     def load_revert_expression(self, role: str) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -4395,8 +4701,13 @@ class CmmMainWindow(QMainWindow):
         )
         if not path:
             return
+        import pandas as pd
+
         try:
-            expression = _read_expression_matrix(path)
+            expression = _read_expression_matrix(path, allow_negative=True)
+            columns = describe_expression_columns(
+                pd.read_csv(path, sep=None, engine="python", index_col=0)
+            )
         except Exception as exc:
             self.revert_summary.setText(
                 f"Could not read {html.escape(role)} expression: {html.escape(str(exc))}"
@@ -4407,7 +4718,17 @@ class CmmMainWindow(QMainWindow):
         name = os.path.basename(path)
         n_genes, n_replicates = expression.shape
         plural = "" if n_replicates == 1 else "s"
-        caption = f"{name} ({n_genes} genes x {n_replicates} column{plural})"
+        shown = ", ".join(columns.samples[:4]) + (
+            ", …" if len(columns.samples) > 4 else ""
+        )
+        caption = f"{name} ({n_genes} genes x {n_replicates} column{plural}: {shown})"
+        notes = columns.warnings()
+        if notes:
+            # Said where the user is looking, before a run uses the wrong columns.
+            self.revert_summary.setText(
+                f"<b>Check {html.escape(role)} file {html.escape(name)}:</b> "
+                + html.escape("; ".join(notes))
+            )
         if role == "source":
             self._revert_source_expression = expression
             self.revert_source_label.setText(caption)
@@ -4439,9 +4760,16 @@ class CmmMainWindow(QMainWindow):
         method = self.method_combo.currentText()
         perturbation = self.perturbation_combo.currentText()
         alpha = self.alpha_spin.value()
-        epsilon = self.revert_epsilon_spin.value()
+        epsilon_mode = self.revert_epsilon_mode_combo.currentData() or "uniform"
+        epsilon_value = self.revert_epsilon_spin.value()
+        scale = self.revert_scale_combo.currentData() or "linear"
+        p_adjust = self.revert_p_adjust_combo.currentData() or "none"
+        min_abs_log2fc = self.revert_min_fc_spin.value()
+        filter_candidates = self.revert_candidate_filter_check.isChecked()
         top_changed = self.revert_top_changed_spin.value() or None
-        reference_method = self.revert_reference_combo.currentText()
+        imat_delta = self.revert_delta_spin.value()
+        imat_beta = self.revert_beta_spin.value() / 100.0
+        imat_epsilon = self.revert_imat_epsilon_spin.value()
         fold_change = self.revert_fold_change_spin.value()
         p_value_cutoff = self.revert_p_value_spin.value()
         source_matrix = _as_expression_matrix(source_expression)
@@ -4454,36 +4782,44 @@ class CmmMainWindow(QMainWindow):
         ):
             significance = "fold_change"
 
-        # E-Flux2 and LAD scale reaction bounds by a linear expression level, so the flux
-        # state gets the replicate mean as measured; only the comparison moves to log space.
-        source_linear = {
-            str(gene): float(value)
-            for gene, value in source_matrix.mean(axis=1).items()
-        }
-        source_log2 = _expression_in_log2(source_matrix)
-        target_log2 = _expression_in_log2(target_matrix)
+        if scale == "linear" and (
+            (source_matrix < 0).any().any() or (target_matrix < 0).any().any()
+        ):
+            # Clear the previous ranking: left in place it reads as this run's result.
+            self.revert_table.setRowCount(0)
+            self._revert_last_run = None
+            self.revert_export_btn.setEnabled(False)
+            self.revert_epsilon_table.setRowCount(0)
+            self.revert_summary.setText(
+                "The expression files contain negative values, so they are not linear "
+                "expression. If they are log2-scaled, set Expression scale to log2."
+            )
+            return
+
+        source_log2 = log2_expression(source_matrix, scale, _LOG2_PSEUDOCOUNT)
+        target_log2 = log2_expression(target_matrix, scale, _LOG2_PSEUDOCOUNT)
 
         def _compute(worker_model):
-            # LAD takes no objective fraction: it fits |flux| to expression-derived targets
-            # rather than holding an optimum, so passing one would be meaningless.
-            extra = {"objective_fraction": 1.0} if reference_method == "eflux2" else {}
-            source_result = integrate_expression(
-                worker_model,
-                source_linear,
-                method=reference_method,
-                **extra,
+            # The papers' v_ref: rMTA discretisation over the model's measured genes, one
+            # optimal iMAT pattern, and the mean of samples from that pattern's space.
+            model_genes = {gene.id for gene in worker_model.genes}
+            gene_states = discretize_expression(
+                source_log2,
+                delta=imat_delta,
+                beta=imat_beta,
+                genes=sorted(model_genes & {str(g) for g in source_log2.index}),
             )
-            if source_result.status != "optimal" or not source_result.fluxes:
-                raise ValueError(
-                    f"source expression could not produce a valid source-state flux with "
-                    f"{reference_method} ({source_result.status})"
-                )
-            reference = source_result.to_flux_state(
-                f"source_expression_state_{reference_method}"
+            imat_state = imat_reference_state(
+                worker_model, gene_states.states, epsilon=imat_epsilon
             )
+            reference = imat_state.to_flux_state("source_expression_state_imat")
             if significance == "ttest":
                 genes = gene_directions_from_replicates(
-                    source_log2, target_log2, p_value_cutoff=p_value_cutoff
+                    source_log2,
+                    target_log2,
+                    p_value_cutoff=p_value_cutoff,
+                    p_adjust=p_adjust,
+                    min_abs_log2fc=min_abs_log2fc,
                 )
             else:
                 genes = gene_directions_by_fold_change(
@@ -4515,52 +4851,209 @@ class CmmMainWindow(QMainWindow):
                     "no reaction was labelled as changed; loosen the significance threshold "
                     "or check that the two expression states differ"
                 )
+            thresholds = None
+            epsilon: float | dict[str, float] = epsilon_value
+            if epsilon_mode == "per_reaction":
+                assert imat_state.samples is not None
+                thresholds = epsilons_from_samples(
+                    imat_state.samples, sorted(direction.nonsteady())
+                )
+                epsilon = thresholds.epsilons
+            targets = None
+            represented: dict[str, list[str]] = {}
+            if filter_candidates:
+                targets, construction = revert_candidates(
+                    worker_model, perturbation=perturbation
+                )
+                represented = dict(
+                    construction.get("represented_genes")
+                    or construction.get("represented_reactions")
+                    or {}
+                )
             ranking = revert_targets(
                 worker_model,
                 None,
                 reference,
                 direction,
+                targets=targets,
                 method=method,
                 alpha=alpha,
                 epsilon=epsilon,
                 perturbation=perturbation,
             )
-            return ranking, genes, direction
+            # The full sample table is large at genome scale and nothing below needs it.
+            reference_frame = imat_state.to_frame()
+            return (
+                ranking,
+                genes,
+                direction,
+                thresholds,
+                represented,
+                gene_states.to_frame(),
+                reference_frame,
+            )
 
         try:
-            ranking, genes, direction = self._run_model_in_background(
+            result = self._run_model_in_background(
                 _compute, label=f"Running revert ({method})…"
             )
+            (
+                ranking,
+                genes,
+                direction,
+                thresholds,
+                represented,
+                gene_state_frame,
+                reference_frame,
+            ) = result
         except (
             Exception
         ) as exc:  # surface solver-capability/model errors instead of freezing
             self.revert_summary.setText(f"Revert prediction failed: {exc}")
             self.status_label.setText(f"Revert prediction failed ({method}).")
+            self._revert_last_run = None
+            self.revert_export_btn.setEnabled(False)
+            self.revert_epsilon_table.setRowCount(0)
             return
+        self._revert_last_run = {
+            "ranking": ranking,
+            "genes": genes,
+            "direction": direction,
+            "thresholds": thresholds,
+            "represented": represented,
+            "gene_states": gene_state_frame,
+            "reference_pattern": reference_frame,
+            "settings": {
+                "method": method,
+                "perturbation": perturbation,
+                "alpha": alpha,
+                "reference_method": "imat",
+                "imat_delta": imat_delta,
+                "imat_beta": imat_beta,
+                "imat_epsilon": imat_epsilon,
+                "reference_samples": PUBLISHED_REFERENCE_SAMPLES,
+                "reference_thinning": PUBLISHED_REFERENCE_THINNING,
+                "reference_seed": 0,
+                "expression_scale": scale,
+                "significance": significance,
+                "p_value_cutoff": p_value_cutoff if significance == "ttest" else None,
+                "p_adjust": p_adjust if significance == "ttest" else None,
+                "min_abs_log2fc": min_abs_log2fc if significance == "ttest" else None,
+                "fold_change_threshold": fold_change
+                if significance == "fold_change"
+                else None,
+                "top_n_changed": top_changed,
+                "epsilon_mode": epsilon_mode,
+                "epsilon": "per_reaction"
+                if epsilon_mode == "per_reaction"
+                else epsilon_value,
+                "candidate_filter": filter_candidates,
+                "source_replicates": int(source_matrix.shape[1]),
+                "target_replicates": int(target_matrix.shape[1]),
+                "n_changed_reactions": len(direction.nonsteady()),
+            },
+        }
+        self.revert_export_btn.setEnabled(True)
         rows = ranking.to_records()
+        # rMTA's score combines three solves; show them, since the combination is not linear
+        # and a reader cannot tell a robust candidate from the score alone.
+        components = ("bTS", "mTS", "wTS") if method == "rmta" else ()
+        headers = [
+            "Rank",
+            "Target",
+            "rTS" if method == "rmta" else "Score",
+            *components,
+        ]
+        # A deduplicated candidate stands for every gene (or coupled reaction) with the same
+        # knockout effect; without this column a top "b3731" hides that it is all of ATP
+        # synthase.
+        show_represented = any(len(v) > 1 for v in represented.values())
+        if show_represented:
+            headers.append(
+                "Same-effect genes" if perturbation == "gene" else "Coupled reactions"
+            )
+        self.revert_table.setColumnCount(len(headers))
+        self.revert_table.setHorizontalHeaderLabels(headers)
+        if show_represented:
+            self.revert_table.horizontalHeaderItem(len(headers) - 1).setToolTip(
+                "Other genes whose knockout blocks exactly the same reactions, so they were "
+                "scored once under the Target gene and share its score (e.g. the subunits of "
+                "one enzyme complex)."
+                if perturbation == "gene"
+                else "Other reactions fully coupled to the Target reaction: their fluxes "
+                "always move in a fixed ratio, so blocking one blocks all and they share "
+                "its score."
+            )
+        header = self.revert_table.horizontalHeader()
+        # Numbers take their own width; the free width goes to the identifiers, so neither
+        # a score nor the group list is cut to "so represen".
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        for col in range(2, len(headers)):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        if show_represented:
+            # Fixed at the header's own width (user-resizable): a stretched column is only
+            # given what is left over, and that clipped its title to "ame-effect gene".
+            last = len(headers) - 1
+            header.setSectionResizeMode(last, QHeaderView.Interactive)
+            title_width = header.fontMetrics().horizontalAdvance(headers[last])
+            self.revert_table.setColumnWidth(last, title_width + 32)
         self.revert_table.setRowCount(len(rows))
         for i, record in enumerate(rows):
             self.revert_table.setItem(i, 0, QTableWidgetItem(str(record["rank"])))
             self.revert_table.setItem(i, 1, QTableWidgetItem(record["target_id"]))
             self.revert_table.setItem(i, 2, QTableWidgetItem(f"{record['score']:.4g}"))
+            for offset, key in enumerate(components, start=3):
+                value = record.get(key)
+                text = f"{value:.4g}" if isinstance(value, (int, float)) else ""
+                self.revert_table.setItem(i, offset, QTableWidgetItem(text))
+            if show_represented:
+                group = represented.get(record["target_id"], [])
+                item = QTableWidgetItem(
+                    ", ".join(m for m in group if m != record["target_id"])
+                )
+                item.setToolTip(", ".join(group))
+                self.revert_table.setItem(i, len(headers) - 1, item)
             if i == 0:
-                for col in range(3):
+                for col in range(len(headers)):
                     self.revert_table.item(i, col).setBackground(QColor("#dce9d6"))
+        self._show_revert_epsilons(thresholds, epsilon_value)
         # The direction map is the run's largest hidden assumption — the same model and
         # method rank differently under a t-test and a fold-change cut — so how it was built
         # is stated with the result rather than left in the controls.
         if significance == "ttest":
+            adjusted = " (FDR-adjusted)" if p_adjust == "fdr_bh" else ""
+            size = (
+                f" and |log2FC| &ge; {min_abs_log2fc:g}" if min_abs_log2fc > 0 else ""
+            )
             test = (
-                f"Student's t-test at P &lt; {p_value_cutoff:g} over "
+                f"Student's t-test at P{adjusted} &lt; {p_value_cutoff:g}{size} over "
                 f"{source_matrix.shape[1]}v{target_matrix.shape[1]} replicates"
             )
         else:
             test = f"|log2 fold change| &ge; {fold_change:g}"
         n_significant = int(genes["significant"].sum())
+        n_changed = len(direction.nonsteady())
         evidence = (
-            f"Direction map: {test} &mdash; "
+            f"Direction map ({scale} input): {test} &mdash; "
             f"{n_significant} of {len(genes)} shared genes changed, "
-            f"{len(direction.nonsteady())} reactions labelled."
+            f"{n_changed} reactions labelled."
+        )
+        if not 100 <= n_changed <= 200:
+            evidence += (
+                " <b>Outside the published 100&ndash;200 changed reactions</b>; adjust the "
+                "P cutoff, adjustment, or top-changed cut, and state it when reporting."
+            )
+        if thresholds is not None:
+            eps = thresholds.summary()
+            evidence += (
+                f"<br>ε per reaction from {thresholds.n_samples} samples of the iMAT "
+                f"pattern space: median {eps['median']:.3g}, range {eps['minimum']:.3g}&ndash;"
+                f"{eps['maximum']:.3g}, {eps['n_floored']} at the 0.001 minimum."
+            )
+        else:
+            evidence += f"<br>ε = {epsilon_value:g} for every reaction (single value)."
+        evidence += f"<br>{len(ranking.targets)} candidates scored" + (
+            " after dropping blocked/essential knockouts." if filter_candidates else "."
         )
         best = ranking.best()
         if best is not None:

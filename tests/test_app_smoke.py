@@ -1640,3 +1640,267 @@ def test_omics_condition_chooser_says_how_many_it_holds(app, tmp_path):
     window._set_omics_source(read_expression_table(str(path)), "conditions.csv")
     assert window.omics_map_combo.count() == 0
     assert window.omics_map_label.text() == "Draw:"
+
+
+def test_revert_controls_start_at_the_published_settings(app):
+    window = CmmMainWindow(build_demo_model())
+    mode = window.revert_epsilon_mode_combo
+    # Published defaults: per-reaction ε, top 200 changed, raw P, linear input, filtered.
+    assert mode.currentData() == "per_reaction"
+    assert not window.revert_epsilon_spin.isEnabled()
+    assert window.revert_top_changed_spin.value() == 200
+    assert window.revert_p_adjust_combo.currentData() == "none"
+    assert window.revert_scale_combo.currentData() == "linear"
+    assert window.revert_candidate_filter_check.isChecked()
+
+    # v_ref is iMAT's: rMTA's beta = 100% and Shlomi et al.'s activity epsilon of 1.
+    assert window.revert_beta_spin.value() == 100.0
+    assert window.revert_imat_epsilon_spin.value() == 1.0
+    assert (
+        "0.7" in window.revert_delta_spin.toolTip()
+    )  # the published per-data-set values
+    # The single-value box applies only when ε is one value.
+    mode.setCurrentIndex(mode.findData("uniform"))
+    assert window.revert_epsilon_spin.isEnabled()
+    mode.setCurrentIndex(mode.findData("per_reaction"))
+    assert not window.revert_epsilon_spin.isEnabled()
+
+
+def test_revert_tab_refuses_negative_values_on_a_linear_scale(app, tmp_path):
+    import pandas as pd
+
+    window = CmmMainWindow(build_demo_model())
+    path = tmp_path / "log2.csv"
+    pd.DataFrame({"r1": [-1.0, 2.0], "r2": [-1.1, 2.1]}, index=["g1", "g2"]).to_csv(
+        path
+    )
+    frame = _read_expression_matrix(str(path), allow_negative=True)
+    window.revert_table.setRowCount(3)  # a ranking left over from an earlier run
+    window.run_revert(frame, frame)
+    assert "set Expression scale to log2" in window.revert_summary.text()
+    assert window.revert_table.rowCount() == 0
+
+
+@pytest.mark.requires_miqp
+def test_revert_tab_derives_epsilon_per_reaction_from_log2_input(app, tmp_path):
+    import numpy as np
+
+    window = CmmMainWindow(build_demo_model())
+    source = _write_replicates(
+        tmp_path / "source.csv", SOURCE_EXPRESSION, [-0.02, 0.0, 0.02]
+    )
+    target = _write_replicates(
+        tmp_path / "target.csv", TARGET_EXPRESSION, [-0.02, 0.0, 0.02]
+    )
+    as_log2 = {
+        name: np.log2(_read_expression_matrix(str(path)) + 1.0)
+        for name, path in (("source", source), ("target", target))
+    }
+    window.revert_scale_combo.setCurrentIndex(
+        window.revert_scale_combo.findData("log2")
+    )
+    window.run_revert(as_log2["source"], as_log2["target"])
+
+    summary = window.revert_summary.text()
+    assert window.revert_table.item(0, 1).text() == "g2"
+    assert "log2 input" in summary
+    assert "ε per reaction from 2000 samples" in summary
+    assert "Outside the published 100" in summary  # a toy model cannot reach 100
+    assert "after dropping blocked/essential" in summary
+
+
+def test_loading_revert_expression_names_its_columns_and_flags_ids(app, tmp_path):
+    import pandas as pd
+
+    from cmm.app import main_window as mw
+
+    window = CmmMainWindow(build_demo_model())
+    path = tmp_path / "source.csv"
+    pd.DataFrame(
+        {
+            "symbol": ["a", "b", "c"],
+            "entrez": [101, 202, 303],
+            "r1": [1.5, 2.5, 2.5],
+            "r2": [1.6, 2.4, 2.6],
+        },
+        index=["g1", "g2", "g3"],
+    ).to_csv(path)
+    original = mw.QFileDialog.getOpenFileName
+    mw.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(path), ""))
+    try:
+        window.load_revert_expression("source")
+    finally:
+        mw.QFileDialog.getOpenFileName = original
+
+    assert "entrez, r1, r2" in window.revert_source_label.text()
+    summary = window.revert_summary.text()
+    assert "symbol" in summary and "entrez" in summary and "identifiers" in summary
+
+
+def test_revert_minimum_fold_change_follows_the_significance_test(app):
+    window = CmmMainWindow(build_demo_model())
+    spin = window.revert_min_fc_spin
+    assert spin.value() == 0.0
+    combo = window.revert_significance_combo
+    combo.setCurrentIndex(combo.findData("fold_change"))
+    assert not spin.isEnabled()
+
+
+def test_revert_export_needs_a_run_first(app, tmp_path):
+    window = CmmMainWindow(build_demo_model())
+    assert not window.revert_export_btn.isEnabled()
+    assert window.export_revert_results(str(tmp_path)) is None
+    assert "Run Revert first" in window.revert_summary.text()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.requires_miqp
+def test_revert_export_writes_every_result_file(app, tmp_path):
+    import json
+
+    import pandas as pd
+
+    window = CmmMainWindow(build_demo_model())
+    window._revert_source_expression = dict(SOURCE_EXPRESSION)
+    window._revert_target_expression = dict(TARGET_EXPRESSION)
+    window._update_revert_run_state()
+    window.run_loaded_revert()
+    assert window.revert_export_btn.isEnabled()
+    # The ε line is part of the summary itself, not only of the export.
+    assert "ε per reaction from 2000 samples" in window.revert_summary.text()
+
+    first = window.export_revert_results(str(tmp_path))
+    second = window.export_revert_results(str(tmp_path))
+    assert first != second  # a second export never overwrites the first
+    names = {path.name for path in first.iterdir()}
+    assert names == {
+        "ranking.csv",
+        "direction_map.csv",
+        "gene_differential_expression.csv",
+        "reaction_epsilons.csv",
+        "epsilon_samples_changed_reactions.csv",
+        "gene_expression_states.csv",
+        "imat_reference_pattern.csv",
+        "settings.json",
+    }
+    ranking = pd.read_csv(first / "ranking.csv")
+    assert {"rank", "target_id", "score", "bTS", "mTS", "wTS"} <= set(ranking.columns)
+    assert ranking.loc[0, "target_id"] == "g2"
+    eps = pd.read_csv(first / "reaction_epsilons.csv")
+    changed = set(
+        pd.read_csv(first / "direction_map.csv").query("direction != 0")["reaction_id"]
+    )
+    assert set(eps["reaction_id"]) == changed
+    samples = pd.read_csv(first / "epsilon_samples_changed_reactions.csv")
+    assert len(samples) == 2000
+    assert set(samples.columns) - {"sample_id"} == changed  # changed reactions only
+    pattern = pd.read_csv(first / "imat_reference_pattern.csv")
+    assert {"activity", "v_ref"} <= set(pattern.columns)
+    settings = json.loads((first / "settings.json").read_text())
+    assert settings["settings"]["epsilon"] == "per_reaction"
+    assert settings["settings"]["reference_method"] == "imat"
+    assert settings["settings"]["imat_delta"] == pytest.approx(0.3)
+    assert settings["score_column"].startswith("rTS")
+    assert settings["ranking_provenance"]["epsilon_mode"] == "per_reaction"
+
+    # A failed or refused run withdraws the export rather than exporting stale results.
+    window.run_revert({"g1": -1.0}, {"g1": -2.0})
+    assert not window.revert_export_btn.isEnabled()
+
+
+@pytest.mark.requires_miqp
+def test_revert_export_without_per_reaction_epsilon_skips_its_files(app, tmp_path):
+    window = CmmMainWindow(build_demo_model())
+    window.revert_epsilon_mode_combo.setCurrentIndex(
+        window.revert_epsilon_mode_combo.findData("uniform")
+    )
+    window.run_revert(dict(SOURCE_EXPRESSION), dict(TARGET_EXPRESSION))
+    out = window.export_revert_results(str(tmp_path))
+    names = {path.name for path in out.iterdir()}
+    assert "reaction_epsilons.csv" not in names
+    assert "epsilon_samples_changed_reactions.csv" not in names
+    assert "ranking.csv" in names and "settings.json" in names
+
+
+@pytest.mark.requires_miqp
+def test_revert_export_button_click_writes_to_the_chosen_folder(app, tmp_path):
+    # Through the real button: clicked(bool) must not reach export_revert_results as its
+    # directory argument (it did, and closed the window with a TypeError).
+    from cmm.app import main_window as mw
+
+    window = CmmMainWindow(build_demo_model())
+    window.run_revert(dict(SOURCE_EXPRESSION), dict(TARGET_EXPRESSION))
+    original = mw.QFileDialog.getExistingDirectory
+    mw.QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: str(tmp_path))
+    try:
+        window.revert_export_btn.click()
+    finally:
+        mw.QFileDialog.getExistingDirectory = original
+    exported = list(tmp_path.glob("cmm_revert_*"))
+    assert len(exported) == 1 and (exported[0] / "ranking.csv").is_file()
+
+    # Cancelling the dialog writes nothing.
+    mw.QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: "")
+    try:
+        window.revert_export_btn.click()
+    finally:
+        mw.QFileDialog.getExistingDirectory = original
+    assert len(list(tmp_path.glob("cmm_revert_*"))) == 1
+
+
+@pytest.mark.requires_miqp
+def test_revert_results_show_rmta_components_and_the_epsilon_tab(app):
+    window = CmmMainWindow(build_demo_model())
+    window.run_revert(dict(SOURCE_EXPRESSION), dict(TARGET_EXPRESSION))
+    table = window.revert_table
+    headers = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+    assert headers == ["Rank", "Target", "rTS", "bTS", "mTS", "wTS"]
+    assert table.item(0, 1).text() == "g2" and table.item(0, 3).text()
+
+    eps = window.revert_epsilon_table
+    assert eps.rowCount() == 3  # one row per changed reaction of the demo
+    assert window.revert_results_tabs.tabText(1) == "ε per reaction (3)"
+    assert "from 2000 samples" in window.revert_epsilon_label.text()
+    assert float(eps.item(0, 2).data(Qt.DisplayRole)) >= 1e-3
+
+    # MTA has one score, and a single ε leaves the tab saying so.
+    window.method_combo.setCurrentText("mta")
+    mode = window.revert_epsilon_mode_combo
+    mode.setCurrentIndex(mode.findData("uniform"))
+    window.run_revert(dict(SOURCE_EXPRESSION), dict(TARGET_EXPRESSION))
+    assert table.columnCount() == 3
+    assert table.horizontalHeaderItem(2).text() == "Score"
+    assert eps.rowCount() == 0
+    assert "single ε = 0.001" in window.revert_epsilon_label.text()
+
+
+@pytest.mark.requires_miqp
+def test_revert_ranking_names_the_genes_a_candidate_stands_for(
+    app, ecoli_core, tmp_path
+):
+    import pandas as pd
+
+    # ATP synthase's eight subunits block the same reaction, so they are scored once.
+    genes = sorted(g.id for g in ecoli_core.genes)
+    source = {g: 100.0 for g in genes}
+    target = dict(source, b3731=10.0, b2779=400.0, b1611=10.0)
+    window = CmmMainWindow(ecoli_core)
+    window.method_combo.setCurrentText("mta")
+    mode = window.revert_epsilon_mode_combo
+    mode.setCurrentIndex(mode.findData("uniform"))
+    window.run_revert(source, target)
+
+    table = window.revert_table
+    headers = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+    assert headers[-1] == "Same-effect genes"
+    assert "same reactions" in table.horizontalHeaderItem(len(headers) - 1).toolTip()
+    row = next(r for r in range(table.rowCount()) if table.item(r, 1).text() == "b3731")
+    assert table.item(row, len(headers) - 1).text() == ", ".join(
+        f"b373{i}" for i in range(2, 9)
+    )
+
+    out = window.export_revert_results(str(tmp_path))
+    ranking = pd.read_csv(out / "ranking.csv").set_index("target_id")
+    assert ranking.loc["b3731", "n_equivalent"] == 8
+    assert ranking.loc["b3731", "equivalent_targets"].split(";")[-1] == "b3738"
+    assert (ranking["n_equivalent"] >= 1).all()

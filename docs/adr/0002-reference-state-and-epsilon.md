@@ -1,6 +1,9 @@
 # ADR-0002 — `v_ref` is an E-Flux2/LAD state, and ε has no default
 
-**Status:** Accepted · recorded 2026-09-16 (decision predates this record)
+**Status:** Superseded · recorded 2026-09-16 (decision predates this record). Both halves are
+superseded by [ADR-0005](0005-imat-reference-and-per-reaction-epsilon.md): `v_ref` is now the
+papers' iMAT-plus-sampling state and ε is derived per reaction from the same samples. Kept for
+the history of runs made before it.
 
 ## Context
 

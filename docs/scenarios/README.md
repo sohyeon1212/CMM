@@ -20,7 +20,7 @@ another installed workflow should use the
 | ID | Goal | Requires | Minimum solver | Key outputs |
 |---|---|---|---|---|
 | [SC-01](SC-01-production-target-discovery.md) | Increase production of a target metabolite, and design a strain where it is guaranteed | confirmed model, product exchange, condition | **QP + MILP**; strain design also needs importable `straindesign` | MOMA/ROOM single-deletion candidates, OptKnock/RobustKnock designs, FSEOF/FVSEOF targets, forward validation |
-| [SC-02](SC-02-transformation-target-discovery.md) | Rank knockouts that move a source metabolic state toward a target state | confirmed model, source and target expression, condition | **MIQP** — no LP or QP substitute exists | ranked candidates with their transformation scores, the MOMA baseline, optional epsilon sensitivity |
+| [SC-02](SC-02-transformation-target-discovery.md) | Rank knockouts that move a source metabolic state toward a target state | confirmed model, source and target expression, condition | **MIQP** — no LP or QP substitute exists | ranked candidates with their transformation scores, the rMTA score decomposition, optional MOMA baseline and epsilon sensitivity |
 
 Each is scientifically complete on its own and neither is a prerequisite for the other. Both
 supply their report and artifact contract automatically.

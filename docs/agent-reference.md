@@ -94,29 +94,67 @@ config = TransformationWorkflowConfig(
     output_dir="results/transformation",
     method="mta",              # or "rmta": three solves per candidate, ~3x the cost
     perturbation="gene",       # "reaction" to reproduce a published coupled-set ranking
-    epsilon=0.01,
+    expression_scale="log2",   # how BOTH files are stored: "linear" (default) or "log2"
+    imat_delta=0.7,            # required: rMTA discretisation, chosen per data set
+    epsilon="per_reaction",    # default; or one number for every changed reaction
     condition=anaerobic,
 )
 result = run_transformation_target_discovery(config)
 ```
 
 `TransformationWorkflowConfig(model_path, source_expression_path, target_expression_path,
-output_dir=None, solver=None, medium=None, condition=None, reference_method="eflux2",
-reference_objective_fraction=1.0, direction=DirectionConfig(), candidates=CandidateConfig(),
-method="mta", perturbation="gene", alpha=0.66, epsilon=1e-3, parameter_k=100.0,
-validation=TransformationValidationConfig(), overwrite=False)`.
+output_dir=None, solver=None, medium=None, condition=None, expression_scale="linear",
+imat_delta=None, imat_beta=1.0, imat_epsilon=1.0, reference_samples=2000,
+reference_thinning=500, reference_seed=0, direction=DirectionConfig(),
+candidates=CandidateConfig(), method="mta", perturbation="gene", alpha=0.66,
+epsilon="per_reaction", parameter_k=100.0, validation=TransformationValidationConfig(),
+overwrite=False)`. `imat_delta` must be set; the removed `reference_method`,
+`reference_objective_fraction` and `epsilon_samples/_thinning/_seed` keys are rejected with
+the reason. `model_path` must be SBML (`.xml`/`.sbml`, optionally `.gz`); any other file is
+refused before the run with the conversion to use.
 
 `DirectionConfig(significance="ttest", p_value_cutoff=0.05, up_threshold=1.0,
-down_threshold=1.0, top_n_changed=200, ranking="p_value")`;
+down_threshold=1.0, p_adjust="none", min_abs_log2fc=0.0, top_n_changed=200,
+ranking="p_value")`;
 `CandidateConfig(exclude_blocked=True, exclude_essential=True, essential_growth_fraction=0.20,
 collapse_coupled_sets=None, explicit=None)`;
-`TransformationValidationConfig(enabled=True, run_moma_baseline=True, epsilon_sweep=())`.
+`TransformationValidationConfig(enabled=True, run_moma_baseline=False, epsilon_sweep=())`.
+An rMTA run always writes `06_validation/score_decomposition.csv` (branch, `rank_rTS`,
+`rank_mTS`; no extra solve) and `ranking_structure` / `data_coverage` in `00_summary.json`;
+the external MOMA baseline is an opt-in cross-check.
 
 - **Source and target are not interchangeable.** The same pair asks two different questions and
   nothing in the model can detect a swap. Confirm the direction; never infer it from filenames.
-- Both expression files must contain finite, non-negative **linear** measurements. Reference
-  inference uses linear replicate means; direction tests compare `log2(value + 1)` per
-  replicate. The transform and pseudocount are recorded in provenance.
+- **v_ref is the papers' iMAT-plus-sampling state** (ADR-0005). The source file is discretised
+  per sample at mean ± `imat_delta`·SD over the model's measured genes (`imat_beta` agreement,
+  Valcárcel et al. 2019). iMAT (`imat_epsilon`=1, no growth objective, AND=min/OR=max) then
+  finds one activity pattern. v_ref is the mean of `reference_samples` OptGP samples from that
+  pattern's space. The pattern and v_ref are in `02_reference/imat_reference_pattern.csv`, the
+  gene classes in `02_reference/gene_expression_states.csv`, and the three remaining
+  differences from the papers in provenance `reference_state_deviations`. Preflight warns
+  (`imat_pattern`) when iMAT matches no reaction.
+- **`expression_scale` says how both files are stored.** `"linear"` (default): finite,
+  non-negative values; the iMAT discretisation and the direction tests use `log2(value + 1)`.
+  `"log2"`: both use the values as given, so a log2 file is never logged twice. A linear-declared file with negative
+  values is rejected with that hint, and preflight warns (`<role>_expression_scale`) when a
+  linear file never exceeds 20 or a log2 file exceeds 32. Both transforms are recorded in provenance. Inspect the
+  file before choosing: negative values or a range of roughly 0–20 indicate log2.
+- **`epsilon="per_reaction"` is the default.** Each changed reaction's threshold is
+  `max(t₀.₉₅,ₙ₋₁·sᵢ/√n, 0.001)` from the `reference_samples` (2,000, as published) samples
+  behind v_ref — Yizhak et al.'s per-reaction rule (`cmm.features.epsilons_from_samples`). The
+  thresholds are written to `05_transformation/reaction_epsilons.csv`.
+- **The changed-set size is checked on the actual count.** The papers tune their filter until
+  100–200 reactions are changed; the `changed_set_size` preflight record and
+  `direction_construction.changed_set_in_published_range` say whether this run did.
+  `p_adjust="fdr_bh"` cuts on Benjamini–Hochberg adjusted P (Valcárcel et al.'s prostate-cancer
+  filter). Because the adjustment is monotone, it changes the top-N set only when fewer genes
+  pass than the cut would keep. `min_abs_log2fc` also requires a minimum |log2FC| for a t-test
+  gene (Valcárcel et al.'s 20% is 0.263); with many replicates tiny changes reach significance
+  and would otherwise fill a P-ranked top-N set. 0 (default) is Yizhak et al.'s test alone.
+- **Every numeric column after the gene id is one sample.** Preflight records
+  `source_sample_columns` / `target_sample_columns` with the columns used, any non-numeric
+  columns ignored, and any column holding one distinct integer per gene (an identifier such as
+  Entrez, counted as a sample by mistake) as a warning. Read them before trusting a t-test.
 - **MIQP is required and has no substitute.** `rmta_continuous` is a QP heuristic and is not
   published rMTA.
 - `collapse_coupled_sets=None` follows the perturbation level — on for reactions, off for genes,
@@ -124,10 +162,10 @@ collapse_coupled_sets=None, explicit=None)`;
   Coupling uses the full model even when only a subset is eligible for deletion. Gene candidates
   retain their complete blocked-reaction signatures and are screened for joint deletion growth;
   `candidate_construction.represented_genes` preserves equivalent gene ids.
-- **`suggest_epsilon(reference_fluxes)`** returns percentiles of |v_ref| so epsilon can be
-  chosen against the model at hand. It is a flux magnitude; there is no safe default.
-- Every run's provenance states that v_ref is not the published iMAT-plus-sampling state, and
-  `result.summary()["candidate_construction"]` carries the count that is the denominator of any
+- **`suggest_epsilon(reference_fluxes)`** returns percentiles of |v_ref| for a run that uses a
+  single numeric epsilon. A number is a flux magnitude; there is no safe one.
+- Every run's provenance records how v_ref was built and what still differs from the papers,
+  and `result.summary()["candidate_construction"]` carries the count that is the denominator of any
   percentile claim.
 - Run bundles archive the original expression files under `inputs/` alongside the source model.
   Both configs use relative input paths, so `scripts/reproduce.py` works after moving the bundle.
@@ -642,12 +680,19 @@ flux_log_change(source_fluxes, target_fluxes, *, reactions=None, pseudocount=1e-
 sign_flips(source_fluxes, target_fluxes, *, reactions=None, tol=1e-6)
 differential_expression(model, source, target, *, reference=None, up_threshold=1.0,
                         down_threshold=1.0, pseudocount=1.0, reactions=None)
-gene_directions_from_replicates(source, target, *, p_value_cutoff=0.05)  # -> evidence frame
+gene_directions_from_replicates(source, target, *, p_value_cutoff=0.05,
+                                p_adjust="none", min_abs_log2fc=0.0)  # -> evidence frame
+describe_expression_columns(frame)  # -> ExpressionColumns: .samples, .dropped,
+                                    #    .identifier_like, .warnings()
+linear_expression(values, scale)          # 2**x for scale="log2"; values as given if "linear"
+log2_expression(values, scale, pseudocount=1.0)  # log2(x+1) for "linear"; as given if "log2"
 gene_directions_by_fold_change(source, target, *, up_threshold=1.0, down_threshold=1.0)
 ```
 
 - `OmicsFluxResult`: `.method`, `.status`, `.objective_value`, `.fluxes`, `.detail`,
-  `.metadata`, `.to_flux_state(name="omics")`.
+  `.metadata`, `.bounds`, `.bounds_frame()`, `.to_flux_state(name="omics")`. `.bounds` holds
+  every expression-scaled `(lb, ub)` E-Flux2 imposed, so its constrained space can be
+  reconstructed and sampled; LAD changes no bounds and leaves it empty.
 - `ConditionFluxes`: `.conditions()`, `.fluxes(condition)` (raises if that condition's solve
   was not optimal).
 - E-Flux2 scales bounds by normalized expression then minimizes total squared flux (**QP**);
@@ -694,11 +739,26 @@ confident, meaningless answer. Check the overlap before integrating.
 ## 9. Reversion and transformation — `cmm.features.revert`, `.transformation`
 
 ```python
-from cmm.features import direction_from_states, revert_targets, transformation_targets
+from cmm.features import (
+    direction_from_states, epsilons_from_samples, imat_reference_state, revert_candidates,
+    revert_targets, transformation_targets,
+)
+from cmm.omics import discretize_expression, imat
 
 revert_targets(model, source_condition, reference_state, direction, *, targets=None,
                method="rmta", alpha=0.66, epsilon=DEFAULT_EPSILON, parameter_k=100.0,
                perturbation="gene", transcript_separator=None)
+# epsilon: one float, or {reaction_id: epsilon}; ids missing from the map use 0.001
+discretize_expression(log2_table, *, delta, beta=1.0, genes=None)  # -> ExpressionStates
+imat(model, gene_states, *, epsilon=1.0)                             # -> IMATResult
+imat_reference_state(model, gene_states, *, epsilon=1.0, n_samples=2000, thinning=500,
+                     seed=0)                                         # -> IMATReferenceState
+epsilons_from_samples(samples, reactions, *, p_value=0.05, minimum=1e-3)  # -> ReactionEpsilons
+revert_candidates(model, *, perturbation="gene", exclude_blocked=True,
+                  exclude_essential=True, essential_growth_fraction=0.20,
+                  collapse_coupled_sets=None, explicit=None)  # -> (ids, construction record)
+# record["represented_genes"] (gene level) / ["represented_reactions"] (reaction level):
+# representative -> every id with the same knockout effect, itself included
 transformation_targets(model, source_state, target_state, *, method="moma",
                        perturbation="gene", targets=None, order=2, alpha=0.66)
 direction_from_states(source, target, *, reactions=None, tol=1e-6)
@@ -721,12 +781,23 @@ Both return a `TargetRanking`: `.sorted(descending=True)`, `.top(n)`, `.best()`,
   71 genes even after 0.4.0 floored the score denominator and removed a 38-gene `+∞` block.
 - `direction` is the *goal*, not the intervention. The top-ranked knockout need not be one of
   the differentially expressed genes.
-- **To follow Yizhak et al., set `epsilon` and cut the changed set.** `epsilon` defaults to
-  `revert.DEFAULT_EPSILON`, a fixed scalar where the paper derives one per data set; the
+- **To follow Yizhak et al. from the API, build v_ref from iMAT, derive epsilon, cut the
+  changed set, and filter the candidates.** `discretize_expression` (rMTA rule, log2 input,
+  restrict `genes` to the model's measured genes) gives `.states`; `imat_reference_state(model,
+  states.states)` solves iMAT (MILP; GLPK suffices, through `imatpy` with `threshold=0`) and
+  returns `.to_flux_state()` (v_ref, the sample mean), `.samples`, `.imat` (an `IMATResult`:
+  `.activity`, `.reaction_states`, `.pattern_bounds(model)`, `.summary()`) and `.to_frame()`.
+  It raises `IMATReferenceError` when iMAT has no optimum. Pass
+  `epsilons_from_samples(state.samples, direction.nonsteady()).epsilons` as `epsilon`
+  (`ReactionEpsilons`: `.epsilons`, `.sample_std`, `.summary()`,
+  `.to_frame()`, `.samples_frame()` — the sampled fluxes of the requested reactions only,
+  `.metadata`); a bare call keeps the scalar `revert.DEFAULT_EPSILON`. The
   changed set is uncut unless you pass `differential_expression(..., top_n_changed=N)` with
-  the paper's `N` of 100–200 (or call `restrict_to_top_changed`). The cut is not cosmetic —
-  every changed reaction is one more MIQP binary, so on a genome-scale model it decides
-  whether the run finishes.
+  the paper's `N` of 100–200 (or call `restrict_to_top_changed`); every changed reaction is
+  one more MIQP binary, so on a genome-scale model the cut decides whether the run finishes.
+  `revert_candidates` drops blocked and essential knockouts and deduplicates equivalent ones,
+  as the paper does; pass its ids as `targets`. The metadata records `epsilon_mode` and, for
+  a map, `epsilon_summary`.
 - rMTA is optimistic per knockout — a prioritization tool robustified by its worst-case term,
   not a proof.
 - **`transformation_targets` is not a CMM invention.** Both paths map to published Yizhak et al.

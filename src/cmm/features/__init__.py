@@ -43,7 +43,13 @@ from cmm.features.response import (
     ResponsePoint,
     flux_response,
 )
-from cmm.features.revert import revert_targets, tie_structure
+from cmm.features.revert import revert_candidates, revert_targets, tie_structure
+from cmm.features.revert_epsilon import ReactionEpsilons, epsilons_from_samples
+from cmm.features.revert_reference import (
+    IMATReferenceError,
+    IMATReferenceState,
+    imat_reference_state,
+)
 from cmm.features.sampling import (
     SamplingResult,
     random_flux_sampling,
@@ -72,6 +78,7 @@ INCLUDED_FEATURES = (
     "fseof",
     "fvseof",
     "omics_integration",
+    "imat",
     "transformation_targets",
     "optknock",
     "robustknock",
@@ -121,6 +128,9 @@ __all__ = [
     "PerturbationList",
     "ProductionEnvelope",
     "ProductionYield",
+    "ReactionEpsilons",
+    "IMATReferenceError",
+    "IMATReferenceState",
     "ResponseLimit",
     "ResponsePhase",
     "ResponsePoint",
@@ -130,6 +140,8 @@ __all__ = [
     "batch_comparison",
     "blocked_reactions_for_genes",
     "direction_from_states",
+    "epsilons_from_samples",
+    "imat_reference_state",
     "flux_response",
     "fseof",
     "fvseof",
@@ -146,6 +158,7 @@ __all__ = [
     "optknock",
     "robustknock",
     "room",
+    "revert_candidates",
     "revert_targets",
     "theoretical_yield",
     "tie_structure",

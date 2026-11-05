@@ -14,10 +14,12 @@ results cannot be mistaken for rMTA.
 
 **Deviations from the published pipelines, disclosed rather than changed.**
 
-1. ``epsilon`` is a fixed scalar (:data:`DEFAULT_EPSILON`). Yizhak et al. and Valcárcel et al.
-   derive the required change per reaction from a *sampled* reference distribution, or use a
-   per-reaction epsilon with 1e-3 only as a floor. Deriving it requires the flux sampling CMM
-   deliberately avoids for determinism, so the scalar is kept and stated.
+1. ``epsilon`` is either one scalar for every changed reaction or a per-reaction mapping.
+   Yizhak et al. and Valcárcel et al. derive the per-reaction value from a *sampled* source
+   distribution with 1e-3 as a floor; :func:`cmm.features.revert_epsilon.epsilons_from_samples`
+   applies that rule to the samples behind an iMAT reference state
+   (:func:`cmm.features.revert_reference.imat_reference_state`). A scalar keeps CMM's
+   earlier behaviour, and the provenance records which form was used.
 2. For ``rmta``, the impossible-change mask is applied to the *already reversed* direction map
    when building the worst-case problem, whereas the COBRA Toolbox masks in preprocessing
    (``diffexprs2rxnFBS.m``) and reverses the masked map. The two orders disagree for an
@@ -26,13 +28,10 @@ results cannot be mistaken for rMTA.
    consistent reading — a backward move on an inactive irreversible reaction is impossible in
    either frame — but it is not the reference implementation's order, and it changes ``wTS``
    and therefore Equation 9's branch. Unverified against ``rMTA.m`` itself.
-3. The source state CMM's callers usually supply is a deterministic E-Flux2 solve at
-   ``objective_fraction=1.0``, i.e. contextualization is replaced by a single growth-maximal
-   flux vector rather than the contextualization-plus-sampling of the papers, and the
-   diseased/source state is forced to be growth-maximal — an assumption Yizhak et al.
-   explicitly argue against for non-proliferating cells. ``reference_state`` is a plain
-   :class:`~cmm.core.flux_state.FluxState` argument, so passing an externally sampled state
-   restores the published pipeline exactly; that escape hatch is the supported route.
+3. ``reference_state`` is a plain :class:`~cmm.core.flux_state.FluxState` argument; this
+   module does not build it. SC-02 and the GUI pass the papers' iMAT-plus-sampling mean from
+   :func:`cmm.features.revert_reference.imat_reference_state`, whose remaining differences
+   from the published runs are listed there.
 4. The published transformation score divides by the steady-set L1 deviation, which is zero
    for a large fraction of candidates on small models (38 of 69 on ``e_coli_core``) and makes
    the score ``±inf``. The denominator is floored at ``epsilon`` — the method's own threshold
@@ -43,7 +42,8 @@ results cannot be mistaken for rMTA.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Sequence
+import math
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -68,10 +68,30 @@ from cmm.omics.differential import DirectionMap
 RevertMethod = Literal["rmta", "mta", "mta_miqp", "rmta_continuous"]
 
 #: Flux change a changed reaction must clear, measured from the source reference, before the
-#: move counts as a success. Yizhak et al. derive this per data set from a sampled reference
-#: distribution; CMM keeps a fixed scalar (see the module docstring, deviation 1). Callers who
-#: know their flux scale should set it explicitly.
+#: move counts as a success, when no per-reaction map is given. It is also the value a map
+#: falls back to for a reaction it omits, and Valcárcel et al.'s minimum. Yizhak et al. derive
+#: the threshold per reaction from a sampled reference distribution; see
+#: :func:`cmm.features.revert_epsilon.epsilons_from_samples`.
 DEFAULT_EPSILON = 1e-3
+
+#: One threshold for every changed reaction, or one per reaction id.
+Epsilon = float | Mapping[str, float]
+
+
+def _epsilon_for(epsilon: Epsilon, rid: str) -> float:
+    """The threshold for one reaction; a mapping falls back to :data:`DEFAULT_EPSILON`."""
+
+    if isinstance(epsilon, Mapping):
+        return float(epsilon.get(rid, DEFAULT_EPSILON))
+    return float(epsilon)
+
+
+def _steady_floor(epsilon: Epsilon) -> float:
+    """The transformation-score denominator floor: the smallest threshold in use."""
+
+    if isinstance(epsilon, Mapping):
+        return min((float(v) for v in epsilon.values()), default=DEFAULT_EPSILON)
+    return float(epsilon)
 
 
 def tie_structure(scored: Sequence[TargetScore]) -> dict[str, object]:
@@ -171,7 +191,7 @@ def _mta_miqp(
     direction: DirectionMap,
     target_rxns: list[str],
     alpha: float,
-    eps: float,
+    eps: Epsilon,
 ) -> tuple[dict[str, float], str]:
     """Published MTA MIQP objective from COBRA Toolbox ``buildMTAproblemFromModel``.
 
@@ -189,14 +209,15 @@ def _mta_miqp(
     # Phase 1: add the binary variables and FLUSH, so the constraints that reference them in
     # phase 2 do not make optlang re-queue the same variable (the duplicate-add trap).
     switches: list = []
-    specs: list[tuple[str, int, float, float]] = []
+    specs: list[tuple[str, int, float, float, float]] = []
     for rid in target_rxns:
         d = direction.get(rid, 0)
         if d == 0:
             continue
         rxn = work.reactions.get_by_id(rid)
         vref = reference.get(rid)
-        required = vref + eps if d > 0 else vref - eps
+        eps_i = _epsilon_for(eps, rid)
+        required = vref + eps_i if d > 0 else vref - eps_i
         big_m = (
             max(1.0, required - rxn.lower_bound)
             if d > 0
@@ -204,22 +225,22 @@ def _mta_miqp(
         )
         z = prob.Variable(f"mta_z_{rid}", type="binary")
         switches.append(z)
-        specs.append((rid, d, vref, big_m))
+        specs.append((rid, d, vref, eps_i, big_m))
     if switches:
         work.add_cons_vars(switches)
         work.solver.update()
 
     # Phase 2: constraints referencing the now-existing binaries.
     constraints = []
-    for (rid, d, vref, big_m), z in zip(specs, switches, strict=True):
+    for (rid, d, vref, eps_i, big_m), z in zip(specs, switches, strict=True):
         flux = work.reactions.get_by_id(rid).flux_expression
         if d > 0:
             c = prob.Constraint(
-                flux - big_m * z, lb=vref + eps - big_m, name=f"mta_up_{rid}"
+                flux - big_m * z, lb=vref + eps_i - big_m, name=f"mta_up_{rid}"
             )
         else:
             c = prob.Constraint(
-                flux + big_m * z, ub=vref - eps + big_m, name=f"mta_dn_{rid}"
+                flux + big_m * z, ub=vref - eps_i + big_m, name=f"mta_dn_{rid}"
             )
         constraints.append(c)
     if constraints:
@@ -361,7 +382,7 @@ def _score_knockout(
     target_rxns: list[str],
     method: RevertMethod,
     alpha: float,
-    epsilon: float = DEFAULT_EPSILON,
+    epsilon: Epsilon = DEFAULT_EPSILON,
     parameter_k: float = 100.0,
 ) -> _Scores:
     """Score one candidate. Both direction maps are prepared once by the caller.
@@ -373,6 +394,7 @@ def _score_knockout(
     against the unperturbed model, which is what the caller now does.
     """
 
+    floor = _steady_floor(epsilon)
     if method in {"mta", "mta_miqp"}:
         flux, status = _mta_miqp(
             model, reference, best_direction, target_rxns, alpha=alpha, eps=epsilon
@@ -386,7 +408,7 @@ def _score_knockout(
                 status=status,
             )
         ts = _transformation_score(
-            flux, reference, best_direction, target_rxns, steady_floor=epsilon
+            flux, reference, best_direction, target_rxns, steady_floor=floor
         )
         return _Scores(moma=ts, best=ts, worst=ts, robust=ts, status="optimal")
 
@@ -411,14 +433,14 @@ def _score_knockout(
                 status=status,
             )
         best_ts = _transformation_score(
-            best_flux, reference, best_direction, target_rxns, steady_floor=epsilon
+            best_flux, reference, best_direction, target_rxns, steady_floor=floor
         )
         moma_ts = _transformation_score(
-            moma_flux, reference, best_direction, target_rxns, steady_floor=epsilon
+            moma_flux, reference, best_direction, target_rxns, steady_floor=floor
         )
         # Published wTS is scored against the swapped F/B direction.
         worst_ts = _transformation_score(
-            worst_flux, reference, worst_direction, target_rxns, steady_floor=epsilon
+            worst_flux, reference, worst_direction, target_rxns, steady_floor=floor
         )
         robust = _robust_score(moma_ts, best_ts, worst_ts, parameter_k=parameter_k)
         return _Scores(
@@ -488,6 +510,157 @@ def _continuous_robust_score(moma_ts: float, best_ts: float, worst_ts: float) ->
     return 0.0
 
 
+def revert_candidates(
+    model: Model,
+    *,
+    perturbation: Literal["gene", "reaction"] = "gene",
+    exclude_blocked: bool = True,
+    exclude_essential: bool = True,
+    essential_growth_fraction: float = 0.20,
+    collapse_coupled_sets: bool | None = None,
+    explicit: Sequence[str] | None = None,
+) -> tuple[tuple[str, ...], dict[str, object]]:
+    """The MTA/rMTA knockout universe, and a record of how many each filter removed.
+
+    Pass the result as ``revert_targets(..., targets=...)``. The model should already carry
+    the run's medium, since blocked and essential reactions depend on it.
+
+    Yizhak et al. drop dead-end reactions, drop essential ones, and then keep one member per
+    coupled set. That reduction is what makes each candidate a distinct intervention; without
+    it a linear pathway contributes one intervention several times and inflates the
+    denominator of any "top *N*%" reading. Every step's count is returned because the report
+    is required to state how the candidate set was built.
+
+    ``essential_growth_fraction=0.20`` is the paper's "growth reduced by more than 80%".
+    ``collapse_coupled_sets`` (reaction level only) keeps one representative per fully coupled
+    set; ``None`` turns it on for reaction knockouts and off for gene knockouts, which are
+    deduplicated on their blocked-reaction signature instead. ``explicit`` skips construction.
+    """
+
+    if not 0.0 <= essential_growth_fraction < 1.0:
+        raise ValueError("essential_growth_fraction must be in [0, 1)")
+    if perturbation not in ("gene", "reaction"):
+        raise ValueError("perturbation must be 'gene' or 'reaction'")
+    collapse = (
+        perturbation == "reaction"
+        if collapse_coupled_sets is None
+        else collapse_coupled_sets
+    )
+
+    from cobra.flux_analysis import find_blocked_reactions, single_reaction_deletion
+
+    from cmm.features.coupling import coupled_reaction_sets
+
+    if explicit is not None:
+        chosen = tuple(explicit)
+        return chosen, {
+            "source": "explicit",
+            "n_candidates": len(chosen),
+            "perturbation": perturbation,
+        }
+
+    record: dict[str, object] = {
+        "source": "constructed",
+        "perturbation": perturbation,
+        "n_reactions": len(model.reactions),
+    }
+    wild_type = model.slim_optimize()
+    record["wild_type_growth"] = float(wild_type) if wild_type == wild_type else None
+
+    open_reactions = [reaction.id for reaction in model.reactions]
+    if exclude_blocked:
+        # Both this and the deletion screen below are pinned to one process. COBRApy's
+        # defaults fork a pool, and under spawn-based multiprocessing that re-imports the
+        # caller — any script without an ``if __name__ == '__main__'`` guard then recurses
+        # instead of running. A workflow has to be callable from anywhere.
+        blocked = set(find_blocked_reactions(model, processes=1))
+        open_reactions = [rid for rid in open_reactions if rid not in blocked]
+        record["n_blocked_removed"] = len(blocked)
+
+    active_reactions = set(open_reactions)
+    threshold = None
+    if exclude_essential and wild_type == wild_type and wild_type > 0:
+        deletion = single_reaction_deletion(
+            model, reaction_list=open_reactions, processes=1
+        )
+        growth = {
+            next(iter(ids)): (0.0 if value != value else float(value))
+            for ids, value in zip(deletion["ids"], deletion["growth"])
+        }
+        threshold = essential_growth_fraction * wild_type
+        essential = {rid for rid, value in growth.items() if value < threshold}
+        open_reactions = [rid for rid in open_reactions if rid not in essential]
+        record["n_essential_removed"] = len(essential)
+        record["essential_growth_threshold"] = float(threshold)
+    record["n_reactions_allowed"] = len(open_reactions)
+
+    if perturbation == "reaction":
+        if collapse:
+            sets = coupled_reaction_sets(model, open_reactions)
+            record["coupling"] = sets.to_provenance()
+            # Mirrors represented_genes: which reactions each scored representative stands for.
+            record["represented_reactions"] = {
+                rid: list(sets.members(rid)) for rid in sets.representatives
+            }
+            return tuple(sets.representatives), record
+        return tuple(sorted(open_reactions)), record
+
+    # A candidate filter does not change the phenotype of a gene deletion. Keep its full
+    # signature, then test each distinct deletion for growth: jointly blocking individually
+    # nonessential reactions can also be lethal.
+    signatures: dict[tuple[str, ...], list[str]] = {}
+    inert = 0
+    for gene_knockout in gene_perturbations(model):
+        signature = tuple(sorted(gene_knockout.reaction_ids))
+        if not active_reactions.intersection(signature):
+            inert += 1
+            continue
+        signatures.setdefault(signature, []).append(gene_knockout.target_id)
+    gene_groups: dict[str, list[str]] = {}
+    essential_genes = 0
+    for signature, genes in signatures.items():
+        if threshold is not None:
+            with model:
+                for rid in signature:
+                    model.reactions.get_by_id(rid).bounds = (0.0, 0.0)
+                growth = model.slim_optimize()
+                viable = (
+                    model.solver.status == "optimal"
+                    and math.isfinite(growth)
+                    and growth > 0.0
+                    and growth >= threshold
+                )
+            if not viable:
+                essential_genes += len(genes)
+                continue
+        represented = sorted(genes)
+        gene_groups[represented[0]] = represented
+    record["n_genes_inert"] = inert
+    record["n_genes_essential_removed"] = essential_genes
+    record["n_distinct_blocked_signatures"] = len(gene_groups)
+    record["represented_genes"] = gene_groups
+    return tuple(sorted(gene_groups)), record
+
+
+def _epsilon_record(epsilon: Epsilon) -> dict[str, object]:
+    """Provenance for the threshold: the scalar itself, or a summary of a per-reaction map."""
+
+    if not isinstance(epsilon, Mapping):
+        return {"epsilon": float(epsilon), "epsilon_mode": "uniform"}
+    values = sorted(float(v) for v in epsilon.values())
+    return {
+        "epsilon": "per_reaction",
+        "epsilon_mode": "per_reaction",
+        "epsilon_summary": {
+            "n_reactions": len(values),
+            "minimum": values[0] if values else None,
+            "median": values[len(values) // 2] if values else None,
+            "maximum": values[-1] if values else None,
+            "missing_reactions_use": DEFAULT_EPSILON,
+        },
+    }
+
+
 def revert_targets(
     model: Model,
     source_condition: Condition | None,
@@ -497,7 +670,7 @@ def revert_targets(
     targets: Iterable[str] | None = None,
     method: RevertMethod = "rmta",
     alpha: float = 0.66,
-    epsilon: float = DEFAULT_EPSILON,
+    epsilon: Epsilon = DEFAULT_EPSILON,
     parameter_k: float = 100.0,
     perturbation: Literal["gene", "reaction"] = "gene",
     transcript_separator: str | None = None,
@@ -508,9 +681,9 @@ def revert_targets(
     flux distribution, ``direction`` is the per-reaction desired flux direction from
     two-state differential expression, and ``alpha`` is the transformation weight.
 
-    ``reference_state`` accepts any :class:`~cmm.core.flux_state.FluxState`, so the published
-    contextualization-plus-sampling source state can be supplied from outside CMM; the module
-    docstring lists that and the other disclosed deviations.
+    ``reference_state`` accepts any :class:`~cmm.core.flux_state.FluxState`;
+    :func:`cmm.features.revert_reference.imat_reference_state` builds the papers' one. The
+    module docstring lists the disclosed deviations.
 
     The returned ranking's metadata carries the direction map's own provenance (including
     ``gpr_rule``), the enumeration counts — an inert gene that blocks no reaction is not
@@ -527,8 +700,12 @@ def revert_targets(
         raise ValueError("perturbation must be 'gene' or 'reaction'")
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("alpha must be between 0 and 1")
-    if epsilon < 0:
+    if isinstance(epsilon, Mapping):
+        if any(float(value) < 0 for value in epsilon.values()):
+            raise ValueError("every per-reaction epsilon must be non-negative")
+    elif epsilon < 0:
         raise ValueError("epsilon must be non-negative")
+    epsilon_record = _epsilon_record(epsilon)
     if parameter_k <= 0:
         raise ValueError("parameter_k must be positive")
     reference_state.validate()
@@ -551,7 +728,7 @@ def revert_targets(
         method=method,
         source_condition=source_condition.name if source_condition else None,
         alpha=alpha,
-        epsilon=epsilon,
+        epsilon=epsilon_record["epsilon"],
         parameter_k=parameter_k,
         perturbation=perturbation,
         transcript_separator=transcript_separator,
@@ -629,7 +806,7 @@ def revert_targets(
         metadata={
             **provenance,
             "alpha": alpha,
-            "epsilon": epsilon,
+            **epsilon_record,
             "parameter_k": parameter_k,
             "perturbation": perturbation,
             "transcript_separator": transcript_separator,

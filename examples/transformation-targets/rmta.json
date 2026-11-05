@@ -6,7 +6,7 @@
   "solver": "gurobi",
   "method": "rmta",
   "perturbation": "gene",
-  "reference_method": "eflux2",
+  "imat_delta": 0.5,
   "epsilon": 0.01,
   "direction": {
     "significance": "fold_change",

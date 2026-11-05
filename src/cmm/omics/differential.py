@@ -15,7 +15,7 @@ import ast
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from cobra import Model
 
@@ -130,6 +130,8 @@ def gene_directions_from_replicates(
     target: "pd.DataFrame",
     *,
     p_value_cutoff: float = 0.05,
+    p_adjust: Literal["none", "fdr_bh"] = "none",
+    min_abs_log2fc: float = 0.0,
 ) -> "pd.DataFrame":
     """Discretize replicate expression by Student's t-test, as Yizhak et al. (2013) specify.
 
@@ -142,6 +144,18 @@ def gene_directions_from_replicates(
     already log-scaled — as microarray and RNA-seq summaries usually are — so the difference
     of means is the log2 fold change.
 
+    ``p_adjust="fdr_bh"`` applies the Benjamini-Hochberg correction across the compared genes
+    and cuts on the adjusted value, the filter Valcárcel et al. (2019) used for the prostate
+    cancer data. Yizhak et al. cut on the raw P value, which stays the default. The adjusted
+    value is monotone in the raw one, so the gene *order* — and therefore any top-N changed
+    set taken from it — is the same either way; only how many genes pass can differ.
+
+    ``min_abs_log2fc`` additionally requires ``|log2 fold change|`` to reach a size. With many
+    replicates the t-test calls even very small changes significant, and a P-ranked top-N set
+    then fills with them. Valcárcel et al. pair their significance filter with a fold change of
+    at least 20% (``log2(1.2) ≈ 0.263``). The default ``0.0`` is
+    Yizhak et al.'s test alone.
+
     Returns the evidence alongside the label, because a direction map on its own cannot be
     audited: the report has to be able to say which genes drove it and how strongly.
     """
@@ -150,8 +164,13 @@ def gene_directions_from_replicates(
     import pandas as pd
     from scipy import stats
 
+    if min_abs_log2fc < 0.0:
+        raise ValueError("min_abs_log2fc must be non-negative")
+
     if not 0.0 < p_value_cutoff <= 1.0:
         raise ValueError("p_value_cutoff must be in (0, 1]")
+    if p_adjust not in ("none", "fdr_bh"):
+        raise ValueError("p_adjust must be 'none' or 'fdr_bh'")
     shared = source.index.intersection(target.index)
     if not len(shared):
         raise ValueError(
@@ -176,7 +195,19 @@ def gene_directions_from_replicates(
         },
         index=shared,
     )
-    frame["significant"] = frame["p_value"] < p_value_cutoff
+    if p_adjust == "fdr_bh":
+        tested = frame["p_value"].notna()
+        adjusted = pd.Series(np.nan, index=frame.index)
+        if tested.any():
+            adjusted[tested] = stats.false_discovery_control(
+                frame.loc[tested, "p_value"].to_numpy(), method="bh"
+            )
+        frame["p_adjusted"] = adjusted
+        frame["significant"] = frame["p_adjusted"] < p_value_cutoff
+    else:
+        frame["significant"] = frame["p_value"] < p_value_cutoff
+    if min_abs_log2fc > 0.0:
+        frame["significant"] &= frame["log2_fold_change"].abs() >= min_abs_log2fc
     # +1 means elevated in the target, so the source reaction's activity must rise.
     frame["direction"] = np.where(
         ~frame["significant"], 0, np.where(frame["log2_fold_change"] > 0, 1, -1)

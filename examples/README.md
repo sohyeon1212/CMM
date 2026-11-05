@@ -9,10 +9,9 @@ installed. Both use the public CLI and write a validated, self-contained report 
 | SC-01 production-target discovery, restricted licence | [Synthetic mixed-acid network](production-targets-small/README.md) | `results/example-production-small/` |
 | SC-02 transformation-target discovery | [MTA and rMTA on the existing synthetic model](transformation-targets/README.md) | `results/example-transformation-mta/`, `results/example-transformation-rmta/` |
 
-The small SC-02 model demonstrates execution and reporting. The historical Recon1 runtime
-mentioned in the main README does not include a reproducible input bundle in this repository.
-See [adapting SC-02 to Recon](transformation-targets/README.md#using-recon-or-another-model)
-for the required study inputs; the synthetic example does not validate Recon predictions.
+The small SC-02 model demonstrates execution and reporting. See
+[adapting SC-02 to Recon](transformation-targets/README.md#using-recon-or-another-model) for the
+required study inputs; the synthetic example does not validate Recon predictions.
 
 For a new product, model, expression pair or condition, copy the corresponding example and
 change its config. For a new scientific workflow with different stages or artifacts, follow

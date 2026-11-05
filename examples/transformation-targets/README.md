@@ -14,8 +14,9 @@ uv run --frozen --all-extras cmm report validate results/example-transformation-
 ```
 
 `prepare.py` only exports the existing model and expression constants; it creates no window
-and performs no analysis. The public workflow owns preflight, E-Flux2 reference inference,
-direction tests, candidate construction, MTA, the MOMA baseline, epsilon sensitivity, rendering
+and performs no analysis. The public workflow owns preflight, the iMAT reference state,
+direction tests, candidate construction, MTA, the MOMA baseline (enabled explicitly in
+`config.json`, since MTA has no internal score decomposition), epsilon sensitivity, rendering
 and validation. It requires MIQP-capable Gurobi; this small model fits its restricted license.
 The condition caps A supply at 10 and declares all six reaction bounds. There is no oxygen
 exchange in this synthetic network.
@@ -27,14 +28,17 @@ uv run --frozen --all-extras cmm transformation-targets --config examples/transf
 uv run --frozen --all-extras cmm report validate results/example-transformation-rmta --json
 ```
 
-[rmta.json](rmta.json) differs only in method and output directory. rMTA uses roughly three
-solves per candidate and adds the bTS/mTS/wTS component figure. Both methods retain three
+[rmta.json](rmta.json) differs in method and output directory, and leaves the MOMA baseline
+at its default (off): rMTA's score decomposition (`06_validation/score_decomposition.csv`) answers
+the same question with no extra solve. rMTA uses roughly three solves per candidate and adds the
+bTS/mTS/wTS component figure. Both methods retain three
 eligible gene candidates in this fixture and rank `g2` first. Two other candidates tie, so
 their ordering is alphabetical. Infeasible/failed results and tie warnings remain explicit.
 
 There is one linear measurement per gene, so the config explicitly uses fold-change direction
-tests instead of the published replicate t-test. E-Flux2 supplies the reference instead of
-iMAT. Epsilon 0.01 and the sensitivity values 0.001/0.01 are demonstration settings for this
+tests instead of the published replicate t-test. `imat_delta` 0.5 classes g1, g2 and gb high and
+g3 and g5 low in this five-gene fixture. Epsilon 0.01 and the sensitivity values 0.001/0.01 are
+demonstration settings for this
 model's flux scale. These choices are recorded in the run and must not be inherited as
 scientific defaults for another dataset.
 
@@ -45,10 +49,7 @@ inputs after relocation. Choose a new `output_dir` to repeat a run; overwrite is
 
 ## Using Recon or another model
 
-The main README retains a historical Recon1 rMTA timing observation. Its original model,
-expression pair, condition and resolved run config are **not bundled in this checkout**, so
-the commands above do not reproduce that observation. A Recon1/Recon2/Recon3D model alone
-does not define a transformation study.
+A Recon1/Recon2/Recon3D model alone does not define a transformation study.
 
 Copy this example into a study directory, then resolve these fields before invoking the same
 `cmm transformation-targets --config CONFIG` command:
@@ -56,11 +57,11 @@ Copy this example into a study directory, then resolve these fields before invok
 | Field | What must be supplied for the new study |
 |---|---|
 | `model_path` | The exact Recon release and SBML file, with its source recorded; do not interchange releases. |
-| `source_expression_path`, `target_expression_path` | The original finite, non-negative linear expression tables and the confirmed source → target direction. Gene ids must overlap this model's genes; map ids explicitly if needed. |
+| `source_expression_path`, `target_expression_path` | The original expression tables, on the scale declared by `expression_scale` (default linear: finite, non-negative), and the confirmed source → target direction. Gene ids must overlap this model's genes; map ids explicitly if needed. |
 | `medium`, `condition` | The accepted full medium, substrate uptake, oxygen/aeration and all changed bounds, using this model's reaction ids. Remove the synthetic six-reaction condition. Inspect growth before screening. |
 | `direction` | Use `significance="ttest"` for replicated measurements; choose and record the ranking and changed-reaction cutoff. Single measurements need the disclosed fold-change alternative. |
 | `method`, `perturbation` | Choose `mta` or `rmta` and gene or reaction interventions for the intended question; do not replace published methods with a continuous heuristic. |
-| `reference_method`, `epsilon`, `validation.epsilon_sweep` | Resolve the reference estimator and epsilon in the actual model's flux units. `TransformationWorkflowConfig.suggest_epsilon` can inform the choice; sensitivity values repeat the full ranking. |
+| `imat_delta`, `reference_thinning`, `epsilon`, `validation.epsilon_sweep` | Choose δ for the rMTA discretisation (Valcárcel et al.: 0.3 Alzheimer's, 0.7 prostate cancer). Omit `epsilon` to use the default `"per_reaction"` (each changed reaction's threshold derived from the 2,000 samples behind v_ref). A numeric epsilon is in the actual model's flux units, and `TransformationWorkflowConfig.suggest_epsilon` can inform it. Sensitivity values repeat the full ranking. |
 | `solver`, `output_dir` | A full Gurobi/CPLEX license for genome-scale MIQP and a fresh output directory. Relative paths resolve from the JSON file. |
 
 Record data/model sources and mappings beside the config, then preserve the workflow's archived

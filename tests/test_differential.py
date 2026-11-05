@@ -324,3 +324,56 @@ def test_top_changed_cut_can_rank_on_p_value_when_replicates_exist():
     assert by_p.nonsteady() == {"R2"}
     assert "log2FC" in by_fold.metadata["changed_ranking"]
     assert "p-value" in by_p.metadata["changed_ranking"]
+
+
+def test_fdr_adjustment_cuts_on_benjamini_hochberg_and_keeps_the_order():
+    import numpy as np
+    import pandas as pd
+    from scipy import stats
+
+    from cmm.omics.differential import gene_directions_from_replicates
+
+    rng = np.random.default_rng(0)
+    genes = [f"g{i}" for i in range(40)]
+    source = pd.DataFrame(rng.normal(8.0, 0.2, (40, 3)), index=genes)
+    target = source + rng.normal(0.0, 0.2, (40, 3))
+    target.iloc[:5] += 3.0  # five clear changes among noise
+    raw = gene_directions_from_replicates(source, target)
+    fdr = gene_directions_from_replicates(source, target, p_adjust="fdr_bh")
+
+    assert "p_adjusted" not in raw.columns
+    expected = stats.false_discovery_control(raw["p_value"].to_numpy(), method="bh")
+    assert np.allclose(fdr["p_adjusted"].to_numpy(), expected)
+    assert (fdr["significant"] == (fdr["p_adjusted"] < 0.05)).all()
+    # The adjusted value is monotone (non-decreasing) in the raw one, so ordering genes by
+    # either never reverses a pair; a P-ranked top-N set is the same.
+    ordered = fdr.sort_values("p_value")["p_adjusted"].to_numpy()
+    assert np.all(np.diff(ordered) >= -1e-15)
+    assert fdr["significant"].sum() <= raw["significant"].sum()
+    assert fdr.loc[genes[:5], "significant"].all()
+    with pytest.raises(ValueError, match="p_adjust"):
+        gene_directions_from_replicates(source, target, p_adjust="bonferroni")
+
+
+def test_minimum_fold_change_keeps_only_large_significant_changes():
+    import numpy as np
+    import pandas as pd
+
+    from cmm.omics.differential import gene_directions_from_replicates
+
+    rng = np.random.default_rng(2)
+    genes = ["small", "large", "flat"]
+    source = pd.DataFrame(8.0 + rng.normal(0, 0.01, (3, 20)), index=genes)
+    target = source.copy()
+    target.loc["small"] += 0.1  # 7% change: significant with 20 replicates
+    target.loc["large"] -= 1.0
+    plain = gene_directions_from_replicates(source, target)
+    sized = gene_directions_from_replicates(source, target, min_abs_log2fc=0.263)
+
+    assert plain.loc["small", "significant"] and plain.loc["large", "significant"]
+    assert not sized.loc["small", "significant"]
+    assert sized.loc["small", "direction"] == 0
+    assert sized.loc["large", "direction"] == -1
+    assert not sized.loc["flat", "significant"]
+    with pytest.raises(ValueError, match="min_abs_log2fc"):
+        gene_directions_from_replicates(source, target, min_abs_log2fc=-1.0)

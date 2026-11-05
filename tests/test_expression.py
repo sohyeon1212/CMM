@@ -68,6 +68,50 @@ def test_eflux2_runs_and_holds_objective(ecoli_core):
 
 
 @pytest.mark.requires_qp
+def test_eflux2_bounds_follow_each_reactions_own_expression(ecoli_core):
+    # Non-uniform weights, so every scaled bound differs from its template by its own ratio.
+    import numpy as np
+
+    rng = np.random.default_rng(1)
+    gene_reactions = [r.id for r in ecoli_core.reactions if r.genes]
+    weights = {rid: float(rng.uniform(1.0, 100.0)) for rid in gene_reactions}
+    weights["PFK"] = 0.01  # floored at min_scale: ub 1000 -> 1
+    denom = max(weights.values())
+
+    result = eflux2(ecoli_core, weights)
+    assert result.status == "optimal"
+    n_changed = 0
+    for rid, (lb, ub) in result.bounds.items():
+        template = ecoli_core.reactions.get_by_id(rid)
+        ratio = min(1.0, max(1e-3, weights[rid] / denom))
+        expected_lb = (
+            template.lower_bound * ratio
+            if template.lower_bound < 0
+            else template.lower_bound
+        )
+        expected_ub = (
+            template.upper_bound * ratio
+            if template.upper_bound > 0
+            else template.upper_bound
+        )
+        assert (lb, ub) == pytest.approx((expected_lb, expected_ub)), rid
+        n_changed += (lb, ub) != template.bounds
+        assert lb - 1e-6 <= result.fluxes[rid] <= ub + 1e-6
+    assert n_changed > len(result.bounds) // 2
+    # Exchanges and the biomass reaction are never scaled.
+    assert not any(
+        ecoli_core.reactions.get_by_id(rid).boundary for rid in result.bounds
+    )
+    assert BIOMASS not in result.bounds
+
+    # A barely expressed PFK caps glycolytic flux that uniform expression lets through.
+    assert result.bounds["PFK"][1] == pytest.approx(1.0)
+    uniform = eflux2(ecoli_core, {rid: 50.0 for rid in gene_reactions})
+    assert uniform.fluxes["PFK"] > 1.0 + 1e-3
+    assert result.fluxes["PFK"] <= 1.0 + 1e-6
+
+
+@pytest.mark.requires_qp
 def test_eflux2_does_not_mutate_model(ecoli_core):
     growth = ecoli_core.slim_optimize()
     weights = {r.id: 50.0 for r in ecoli_core.reactions if r.genes}
@@ -196,3 +240,64 @@ def test_omics_rejects_negative_or_nonfinite_expression(ecoli_core):
     gene = next(iter(ecoli_core.genes)).id
     with pytest.raises(ValueError, match="finite"):
         gene_to_reaction_weights(ecoli_core, {gene: float("nan")})
+
+
+@pytest.mark.requires_qp
+def test_eflux2_reports_the_bounds_it_imposed(ecoli_core):
+    weights = {r.id: 50.0 for r in ecoli_core.reactions if r.genes}
+    weights[next(iter(weights))] = 0.0  # one reaction squeezed to the noise floor
+    result = eflux2(ecoli_core, weights)
+    assert result.bounds
+    for rid, (lb, ub) in result.bounds.items():
+        template = ecoli_core.reactions.get_by_id(rid)
+        assert template.lower_bound <= lb <= max(0.0, template.lower_bound) or lb == 0
+        assert min(0.0, template.upper_bound) <= ub <= template.upper_bound
+        assert result.fluxes[rid] >= lb - 1e-6 and result.fluxes[rid] <= ub + 1e-6
+    frame = result.bounds_frame()
+    assert list(frame.columns) == ["reaction_id", "lower_bound", "upper_bound"]
+    assert len(frame) == len(result.bounds)
+    # LAD changes no bounds and says so by leaving the field empty.
+    assert lad(ecoli_core, weights).bounds == {}
+
+
+def test_expression_scale_helpers_never_log_twice():
+    import numpy as np
+    import pandas as pd
+
+    from cmm.omics import linear_expression, log2_expression
+
+    linear = pd.Series([0.0, 1.0, 3.0])
+    log2 = np.log2(linear + 1.0)
+    assert log2_expression(linear, "linear").tolist() == log2.tolist()
+    assert log2_expression(log2, "log2") is log2
+    assert linear_expression(pd.Series([0.0, 3.0]), "log2").tolist() == [1.0, 8.0]
+    assert linear_expression(linear, "linear") is linear
+    for helper in (linear_expression, log2_expression):
+        with pytest.raises(ValueError, match="expression scale"):
+            helper(linear, "ln")
+
+
+def test_expression_columns_report_dropped_and_identifier_like_columns():
+    import pandas as pd
+
+    from cmm.omics import describe_expression_columns
+
+    frame = pd.DataFrame(
+        {
+            "symbol": ["pgi", "pfkA", "eno"],
+            "entrez": [948535, 948412, 945032],
+            "s1": [10.0, 3.0, 3.0],
+            "s2": [12, 4, 4],  # integer counts with ties are measurements
+        },
+        index=["b4025", "b3916", "b2779"],
+    )
+    columns = describe_expression_columns(frame)
+    assert columns.samples == ("entrez", "s1", "s2")
+    assert columns.dropped == ("symbol",)
+    assert columns.identifier_like == ("entrez",)
+    notes = columns.warnings()
+    assert any("symbol" in note for note in notes)
+    assert any("entrez" in note and "identifiers" in note for note in notes)
+
+    clean = describe_expression_columns(frame[["s1", "s2"]])
+    assert clean.warnings() == []

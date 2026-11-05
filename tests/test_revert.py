@@ -305,3 +305,84 @@ def test_continuous_heuristic_marks_its_own_csv(branched_model):
     assert "continuous_heuristic_not_rmta" in continuous.to_frame().columns
     assert (continuous.to_frame()["continuous_heuristic_not_rmta"] == 1.0).all()
     assert "continuous_heuristic_not_rmta" not in published.to_frame().columns
+
+
+@pytest.mark.requires_miqp
+def test_per_reaction_epsilon_matches_a_uniform_one_when_every_value_agrees(
+    branched_model,
+):
+    reference, direction = _setup(branched_model)
+    uniform = revert_targets(
+        branched_model, None, reference, direction, method="mta", epsilon=0.01
+    )
+    mapped = revert_targets(
+        branched_model,
+        None,
+        reference,
+        direction,
+        method="mta",
+        epsilon={r.id: 0.01 for r in branched_model.reactions},
+    )
+    assert [(t.target_id, t.score) for t in uniform.sorted()] == [
+        (t.target_id, t.score) for t in mapped.sorted()
+    ]
+    assert uniform.metadata["epsilon_mode"] == "uniform"
+    assert uniform.metadata["epsilon"] == 0.01
+    assert mapped.metadata["epsilon"] == "per_reaction"
+    summary = mapped.metadata["epsilon_summary"]
+    assert summary["n_reactions"] == len(branched_model.reactions)
+    assert summary["minimum"] == summary["maximum"] == 0.01
+
+
+@pytest.mark.requires_miqp
+def test_per_reaction_epsilon_reaches_the_miqp_threshold(branched_model):
+    # An unreachable threshold on every changed reaction leaves nothing transformed, so the
+    # ranking collapses; a reachable one does not. The map, not a scalar, decides it.
+    reference, direction = _setup(branched_model)
+    changed = sorted(direction.nonsteady())
+    reachable = revert_targets(
+        branched_model,
+        None,
+        reference,
+        direction,
+        method="mta",
+        epsilon={rid: 0.01 for rid in changed},
+    )
+    unreachable = revert_targets(
+        branched_model,
+        None,
+        reference,
+        direction,
+        method="mta",
+        epsilon={rid: 1e6 for rid in changed},
+    )
+    assert reachable.best().target_id == "g2"
+    assert {t.target_id: t.score for t in reachable} != {
+        t.target_id: t.score for t in unreachable
+    }
+
+
+def test_per_reaction_epsilon_must_be_non_negative(branched_model):
+    reference, direction = _setup(branched_model)
+    with pytest.raises(ValueError, match="per-reaction epsilon"):
+        revert_targets(branched_model, None, reference, direction, epsilon={"R1": -1.0})
+
+
+def test_revert_candidates_is_the_public_knockout_universe(branched_model):
+    from cmm.features import revert_candidates
+
+    genes, record = revert_candidates(branched_model)
+    assert record["source"] == "constructed" and record["perturbation"] == "gene"
+    assert set(genes) <= {g.id for g in branched_model.genes}
+    reactions, record = revert_candidates(branched_model, perturbation="reaction")
+    assert "coupling" in record  # reaction level collapses coupled sets by default
+    # Each representative names the coupled reactions it stands for, itself included.
+    assert set(record["represented_reactions"]) == set(reactions)
+    for rid, members in record["represented_reactions"].items():
+        assert rid in members
+    chosen, record = revert_candidates(branched_model, explicit=["g2"])
+    assert chosen == ("g2",) and record["source"] == "explicit"
+    with pytest.raises(ValueError, match="essential_growth_fraction"):
+        revert_candidates(branched_model, essential_growth_fraction=1.0)
+    with pytest.raises(ValueError, match="perturbation"):
+        revert_candidates(branched_model, perturbation="enzyme")  # type: ignore[arg-type]

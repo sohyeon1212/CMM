@@ -90,9 +90,10 @@ Non-optimal candidates receive `-∞`; the ranking metadata records the count. E
 ## Source-state preprocessing
 
 The original MTA/rMTA studies construct the source model with expression contextualization
-and flux sampling. CMM's desktop workflow instead creates a deterministic source state by
-running E-Flux2 on the source expression at full objective (`objective_fraction=1.0`) and
-derives source→target directions from differential expression plus GPR logic. The GPR rule
+and flux sampling, and CMM does the same: the source expression is discretised by the rMTA rule,
+iMAT finds one activity pattern, and the source state is the mean of OptGP samples from that
+pattern's space (`cmm.features.imat_reference_state`;
+[ADR-0005](adr/0005-imat-reference-and-per-reaction-epsilon.md)). CMM then derives source→target directions from differential expression plus GPR logic. The GPR rule
 there is Yizhak et al.'s own ternary rule — all genes elevated or all reduced under `AND`, at
 least one under `OR`, and **mixed ⇒ unchanged** — implemented as a two-pass binary
 decomposition and recorded as `gpr_rule = "yizhak2013_two_pass_binary"`. (Before 0.4.0 CMM used
@@ -102,9 +103,8 @@ ranking produced before 0.4.0 is affected.) Deriving the directions from express
 documented CMM preprocessing variant; the optimization and score stages described above are
 the published formulations.
 
-For a manuscript that claims the complete original pipeline, supply an externally generated
-source `FluxState` from the study's contextualization/sampling protocol through the Python
-API. Record that provenance in the state metadata.
+`revert_targets` still accepts any source `FluxState`, so a state produced by another
+protocol can be supplied through the Python API; record that provenance in the state metadata.
 
 ## Validation
 

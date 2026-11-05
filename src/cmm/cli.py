@@ -171,7 +171,7 @@ def _run_transformation(args: argparse.Namespace) -> int:
                 "n_candidates": summary["n_candidates"],
                 "top_target": summary["top_target"],
                 "top_score": summary["top_score"],
-                # Stated on every run: the reference state is not the published iMAT one.
+                # Stated on every run: how the reference state was built.
                 "reference_method": summary["reference_method"],
             },
             indent=2,

@@ -61,7 +61,7 @@ PerturbationKind = Literal["gene", "reaction"]
 def target_display_name(model: Model, target_id: str, kind: PerturbationKind) -> str:
     """The model's own label for a target id, or ``""`` when it names nothing useful.
 
-    Report tables and figure labels read ``6510_AT1`` or ``b1602`` otherwise, which no reader
+    Report tables and figure labels read an id such as ``b1602`` otherwise, which no reader
     can interpret. The name is taken from the SBML the run already stores — never from an
     imported expression table, which is untrusted data — and a grouped gene target whose id is
     a join of several ids resolves each part it can.

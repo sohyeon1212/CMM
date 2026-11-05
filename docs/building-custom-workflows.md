@@ -222,9 +222,10 @@ point; neither requires copying numerical workflow code.
 2. Set the medium and condition, including substrate and oxygen bounds, for that exact model.
    Inspect exchange ids and verify growth; a Recon1 condition cannot be transferred unchanged
    to another Recon release with different ids or reactions.
-3. Provide finite, non-negative linear expression with matching model gene ids, one row per
-   gene and one column per replicate. Keep the original measurements: SC-02 performs the
-   `log2(value + 1)` comparison itself. For replicated data use `direction.significance="ttest"`;
+3. Provide expression with matching model gene ids, one row per gene and one column per
+   replicate, and declare its scale with `expression_scale` (`"linear"`: finite, non-negative;
+   `"log2"`: as stored, e.g. RMA). Keep the stored values: SC-02 converts between scales itself
+   and never logs a log2 file twice. For replicated data use `direction.significance="ttest"`;
    single measurements require an explicit fold-change configuration and disclosure.
 4. Choose `method` (`mta` or `rmta`), `perturbation`, the reference method, `epsilon`, the
    changed-reaction cutoff, and any `validation.epsilon_sweep`. Epsilon is a flux magnitude;
@@ -237,7 +238,8 @@ point; neither requires copying numerical workflow code.
    ```
 
 The workflow archives the model and both expression files, constructs candidates, ranks them,
-compares the MOMA baseline, and writes R figures plus both HTML reports. Preserve explicit
+decomposes the rMTA score (and runs the MOMA baseline when enabled), and writes R figures plus
+both HTML reports. Preserve explicit
 failure/status rows and tie warnings. A new dataset or condition is a new **configuration** of
 SC-02; it does not need copied solver code or a third installed workflow. A different scientific
 question that needs its own analyses and artifact contract belongs in Track B below.

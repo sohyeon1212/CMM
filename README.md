@@ -63,19 +63,19 @@ uv run --frozen --all-extras cmm report validate results/example-transformation-
 ```
 
 This [checked-in MTA/rMTA example](examples/transformation-targets/README.md) exports CMM's
-existing synthetic disease → healthy fixture. It also explains how to provide Recon inputs;
-the historical Recon1 timing below has no bundled input pair or run config. Both runnable
-workflows are indexed in [examples](examples/README.md).
+existing synthetic disease → healthy fixture. It also explains how to provide Recon inputs.
+Both runnable workflows are indexed in [examples](examples/README.md).
 
 For a new study, set the exact model, source/target expression files, condition and epsilon.
 Expression inputs are finite, non-negative **linear**
-measurements: reference inference uses linear replicate means, while direction tests compare
-`log2(value + 1)` per replicate. Use the t-test for replicated measurements and explicitly
+measurements: a linear file is put on the log2 scale (`log2(value + 1)` per replicate) for both
+the iMAT discretisation and the direction tests. Use the t-test for replicated measurements and explicitly
 select fold-change thresholds for single measurements. Confirm source → target before running.
 
-Both methods require an MIQP-capable Gurobi or CPLEX installation. The default reference is
-E-Flux2, not the original paper's iMAT-plus-sampling reference, and epsilon must be chosen for
-the data; these departures are recorded in the report. See the
+Both methods require an MIQP-capable Gurobi or CPLEX installation. The reference state follows
+the papers: the rMTA discretisation (`imat_delta`, chosen per data set), iMAT, and the mean of
+2,000 samples from the iMAT pattern's space. Per-reaction epsilon comes from the same samples;
+the remaining differences are recorded in the report. See the
 [SC-02 contract](docs/scenarios/SC-02-transformation-target-discovery.md) and
 [config/API reference](docs/agent-reference.md#complete-transformation-workflow--cmmworkflowstransformation).
 The command writes raw tables, archives both expression inputs, renders R figures and both
@@ -318,12 +318,9 @@ labels its CSV as a continuous heuristic. It is not published rMTA. See
 
 ### Expect MTA/rMTA on a genome-scale model to take hours
 
-A slow MIQP screen is the normal cost of these methods, not a hang or a misconfiguration. One
-measured reference point: published rMTA over Recon1 (3741 reactions, 1905 genes) at the gene
-level, 413 candidates after the blocked-reaction reduction, with Gurobi 13 on an 8-core Apple
-M4, took **about 95 s per candidate and 11.5 h end to end**. rMTA solves three MIQPs per
-candidate — best case, MOMA and worst case — against MTA's one, and candidates are evaluated
-sequentially, so wall time scales with the candidate count and extra cores do not shorten it
+A slow MIQP screen is the normal cost of these methods, not a hang or a misconfiguration. rMTA
+solves three MIQPs per candidate — best case, MOMA and worst case — against MTA's one, and
+candidates are evaluated sequentially, so wall time scales with the candidate count and extra cores do not shorten it
 much. Each additional value in `validation.epsilon_sweep` re-ranks every candidate and costs
 another full pass.
 

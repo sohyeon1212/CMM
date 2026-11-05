@@ -7,10 +7,10 @@ standalone page carrying its figures, a 300-dpi raster plus editable vector per 
 ``report_validation.json`` recording whether the run passed its completion gate.
 
 The page is deliberately opinionated about what it must say. A transformation ranking is easy
-to over-read: it is produced from a reference state that is not the published one, with an
-epsilon that was chosen rather than derived, over a candidate set whose size is the denominator
-of any percentile claim. Those three facts are rendered as prose in the report body, not left
-in a provenance file for a reader to find.
+to over-read: it depends on how the reference state was built (and what still differs from the
+papers), on an epsilon that is either derived from the reference samples or chosen outright,
+and on a candidate set whose size is the denominator of any percentile claim. Those three facts are
+rendered as prose in the report body, not left in a provenance file for a reader to find.
 """
 
 from __future__ import annotations
@@ -122,9 +122,11 @@ _FIGURE_ORDER = (
     "fig04_epsilon_sensitivity",
 )
 #: Only the ranking is unconditional. The component-score panel needs the best/worst contrast
-#: that only rMTA computes, and the MOMA baseline and epsilon sweep are configurable stages; a
-#: run that switched one off, or ran MTA, is a valid run whose figure is legitimately absent —
-#: the manifest records why, which is what keeps "absent" distinguishable from "broken".
+#: that only rMTA computes; the rank comparison needs rMTA's score decomposition or the optional
+#: MOMA baseline; the epsilon sweep is a configurable stage. A run that switched one off, or
+#: ran MTA, is a valid run whose figure is legitimately absent — the manifest records why,
+#: which is what keeps "absent" distinguishable from "broken". Every id here is still expected
+#: *in* the manifest: an id the renderer never recorded is a broken renderer, not a choice.
 _REQUIRED_FIGURES = frozenset({"fig02_transformation_ranking"})
 
 
@@ -248,6 +250,23 @@ def _load_bundle(root: Path) -> dict[str, Any]:
     for row in sweep:
         row["epsilon"] = float(row["epsilon"])
         row["rank"] = int(row["rank"])
+    decomposition_path = path_for("score_decomposition")
+    decomposition = (
+        _read_csv(decomposition_path)
+        if decomposition_path
+        and (artifacts.get("score_decomposition") or {}).get("status") == "complete"
+        else []
+    )
+    for row in decomposition:
+        for key in ("bTS", "mTS", "wTS", "rTS"):
+            row[key] = float(row[key])
+        for key in ("rank_rTS", "rank_mTS", "rank_delta"):
+            row[key] = int(row[key])
+        row["amplified"] = str(row["amplified"]).strip().lower() == "true"
+    preflight_path = path_for("preflight")
+    preflight = (
+        _read_csv(preflight_path) if preflight_path and preflight_path.is_file() else []
+    )
 
     return {
         "manifest": manifest,
@@ -257,6 +276,8 @@ def _load_bundle(root: Path) -> dict[str, Any]:
         "ranking": ranking,
         "baseline": baseline,
         "sweep": sweep,
+        "decomposition": decomposition,
+        "preflight": preflight,
     }
 
 
@@ -288,6 +309,8 @@ def render_transformation_report(
         ranking=bundle["ranking"],
         baseline=bundle["baseline"],
         sweep=bundle["sweep"],
+        decomposition=bundle["decomposition"],
+        preflight=bundle["preflight"],
         figure_manifest=figure_manifest,
         highlight=highlight,
         top_n=top_n,
@@ -304,6 +327,8 @@ def render_transformation_report(
         ranking=bundle["ranking"],
         baseline=bundle["baseline"],
         sweep=bundle["sweep"],
+        decomposition=bundle["decomposition"],
+        preflight=bundle["preflight"],
         figure_manifest=figure_manifest,
         highlight=highlight,
         top_n=top_n,
@@ -374,6 +399,63 @@ def _assert_embedded(html_text: str) -> str:
     return html_text
 
 
+def _reference_text(provenance: Mapping[str, Any]) -> str:
+    """How v_ref was built, in one line, from the parameters the run recorded."""
+
+    if provenance.get("reference_method") != "imat":
+        return str(provenance.get("reference_method"))
+    return (
+        f"iMAT (delta {provenance.get('imat_delta')}, beta {provenance.get('imat_beta')}, "
+        f"epsilon {provenance.get('imat_epsilon')}, GPR {provenance.get('imat_gpr_rule')}); "
+        f"mean of {provenance.get('reference_samples')} OptGP samples, thinning "
+        f"{provenance.get('reference_thinning')}, seed {provenance.get('reference_seed')}"
+    )
+
+
+def _medium_text(provenance: Mapping[str, Any], coverage: Mapping[str, Any]) -> str:
+    """The medium as a reader must read it: a preset name, or what "as loaded" leaves open."""
+
+    open_count = coverage.get("n_exchanges_open_for_uptake")
+    total = coverage.get("n_exchanges")
+    openness = (
+        f"{open_count} of {total} exchanges permit uptake"
+        if open_count is not None and total is not None
+        else None
+    )
+    name = provenance.get("medium")
+    if name:
+        return f"{name} ({openness})" if openness else str(name)
+    return f"model as loaded — {openness}" if openness else "model as loaded"
+
+
+def _coverage_text(coverage: Mapping[str, Any]) -> str:
+    measured = coverage.get("genes_measured_in_model")
+    total = coverage.get("model_genes")
+    if measured is None or not total:
+        return "not recorded"
+    return f"{measured} of {total} ({100.0 * float(measured) / float(total):.1f}%)"
+
+
+def _masked_text(structure: Mapping[str, Any]) -> str:
+    text = str(structure.get("n_impossible_masked"))
+    reversed_count = structure.get("n_impossible_masked_reversed")
+    if reversed_count is not None:
+        text += f" (worst-case map: {reversed_count})"
+    return text
+
+
+def _applied_medium_text(applied: Mapping[str, Any]) -> str:
+    uptake = applied.get("applied") or {}
+    listed = ", ".join(
+        f"{exchange} {float(rate):g}" for exchange, rate in sorted(uptake.items())
+    )
+    dropped = applied.get("dropped") or []
+    text = f"{applied.get('medium')}: {listed or 'no exchanges'}"
+    if dropped:
+        text += f"; not in the model: {', '.join(map(str, dropped))}"
+    return text
+
+
 def _compose(
     *,
     root: Path,
@@ -385,6 +467,8 @@ def _compose(
     sweep: Sequence[Mapping[str, Any]],
     figure_manifest: FigureManifest,
     highlight: str | None,
+    decomposition: Sequence[Mapping[str, Any]] = (),
+    preflight: Sequence[Mapping[str, Any]] = (),
     top_n: int,
     standalone: bool,
 ) -> str:
@@ -399,6 +483,13 @@ def _compose(
     method = str(summary.get("method", "?")).upper()
     construction = summary.get("candidate_construction") or {}
     direction = summary.get("direction_construction") or {}
+    structure = summary.get("ranking_structure") or {}
+    coverage = summary.get("data_coverage") or {}
+    amplified_rows = sorted(
+        (row for row in decomposition if row["amplified"]),
+        key=lambda row: int(row["rank_rTS"]),
+    )
+    decomposed = {str(row["target_id"]): row for row in decomposition}
     by_id = {str(figure["id"]): figure for figure in figure_manifest.figures}
 
     def panel(figure_id: str) -> str:
@@ -406,7 +497,13 @@ def _compose(
 
         figure = by_id.get(figure_id)
         if figure is None:
-            return ""
+            # The one path that used to fail silently: an id the renderer never recorded —
+            # it errored before recording, or the id was renamed — left no figure and no note.
+            return (
+                f"<div class='note'><strong>{e(figure_id)} was not recorded by the "
+                "renderer.</strong> The figure manifest has no entry for it, so it was "
+                "neither drawn nor skipped with a reason; re-render the run.</div>"
+            )
         label = e(str(figure.get("label", figure_id)))
         caption = e(str(figure.get("caption", "")))
         if figure.get("status") != "rendered":
@@ -459,13 +556,32 @@ def _compose(
     # --- 1. Summary --------------------------------------------------------------------
     parts.append("<h2>1. Summary</h2>")
     top = ranking[0]
+    top_branch = ""
+    top_decomposed = decomposed.get(str(top.get("target_id")))
+    if top_decomposed is not None:
+        top_branch = (
+            " Its score comes from Equation 9&rsquo;s <b>amplification branch</b> "
+            "(bTS&nbsp;&gt;&nbsp;0, mTS&nbsp;&gt;&nbsp;0, wTS&nbsp;&lt;&nbsp;0), so it is "
+            "mTS multiplied by k&nbsp;&times;&nbsp;(bTS&nbsp;&minus;&nbsp;wTS)."
+            if top_decomposed["amplified"]
+            else " The amplification branch did not fire for it, so its score is its MOMA "
+            "component (rTS&nbsp;=&nbsp;mTS)."
+        )
     parts.append(
         f"<p>{method} scored <b>{len(ranking)}</b> knockout candidates. The highest-scoring "
         f"candidate is <b>{e(str(top.get('target_id')))}</b> at "
-        f"{_number(top.get('score'))}. <b>This candidate count is the denominator of any "
-        "&ldquo;ranked in the top <i>N</i>%&rdquo; statement about this run</b>, so it belongs "
-        "beside any percentile quoted from it.</p>"
+        f"{_number(top.get('score'))}.{top_branch} <b>This candidate count is the denominator "
+        "of any &ldquo;ranked in the top <i>N</i>%&rdquo; statement about this run</b>, so it "
+        "belongs beside any percentile quoted from it.</p>"
     )
+    if decomposition:
+        parts.append(
+            f"<p><b>{len(amplified_rows)}</b> of {len(decomposition)} scored candidates "
+            f"{'satisfies' if len(amplified_rows) == 1 else 'satisfy'} rMTA&rsquo;s "
+            "amplification branch (Equation 9: bTS&nbsp;&gt;&nbsp;0, "
+            "mTS&nbsp;&gt;&nbsp;0, wTS&nbsp;&lt;&nbsp;0). Every other candidate is ranked by "
+            "its MOMA component alone.</p>"
+        )
     parts.append(
         "<div class='note'><strong>The direction is an input, not a finding.</strong> "
         "The same pair of files asks a different question when exchanged: "
@@ -473,24 +589,53 @@ def _compose(
         "and the reverse asks which <em>reverts</em> it. Nothing in the model detects a swap."
         "</div>"
     )
+    deviations = provenance.get("reference_state_deviations") or []
     parts.append(
-        "<div class='note'><strong>The reference state is not the published one.</strong> "
-        f"{e(str(provenance.get('reference_state_deviation', '')))}. iMAT places no objective "
-        "on growth, so the ranking below is conditioned on the estimator that was used.</div>"
+        "<div class='note'><strong>How the reference state was built.</strong> As in "
+        "Yizhak et al. (2013) and Valcárcel et al. (2019): source genes were classed high, "
+        "moderate or low by the rMTA rule, iMAT found one activity pattern consistent with "
+        f"those classes, and v_ref is the mean of {e(str(provenance.get('reference_samples')))} "
+        "flux distributions sampled from that pattern&rsquo;s space. iMAT places no objective "
+        "on growth. What still differs from the papers: "
+        + "; ".join(e(str(item)) for item in deviations)
+        + ".</div>"
     )
-    parts.append(
-        "<div class='note'><strong>Epsilon was chosen, not derived.</strong> It is how far a "
-        "reaction's flux must move from v_ref before the move counts, measured in this model's "
-        "flux units. The source papers derive it per data set from a sampled reference "
-        "distribution, which CMM does not reproduce."
-        + (
-            " Section 4 reports how far the ranking moves across other values."
-            if sweep
-            else " No sensitivity sweep was run, so this run does not show whether the value "
-            "decided the answer."
+    sweep_note = (
+        " Section 4 reports how far the ranking moves across other values."
+        if sweep
+        else " No sensitivity sweep was run, so this run does not show whether the value "
+        "decided the answer."
+    )
+    if provenance.get("epsilon") == "per_reaction":
+        eps_summary = direction.get("epsilon_summary") or {}
+        parts.append(
+            "<div class='note'><strong>Epsilon was derived per reaction.</strong> As in "
+            "Yizhak et al. (2013), each changed reaction's threshold is the change that a "
+            "one-sided t-test over the "
+            f"{e(str(provenance.get('reference_samples')))} samples behind v_ref calls "
+            "significant (P&nbsp;&lt;&nbsp;0.05), with a minimum of 0.001. Across "
+            f"{e(str(eps_summary.get('n_reactions')))} reactions the median epsilon is "
+            f"{_number(eps_summary.get('median'))}; "
+            f"{e(str(eps_summary.get('n_floored')))} sit at the minimum."
+            + sweep_note
+            + "</div>"
         )
-        + "</div>"
-    )
+    else:
+        parts.append(
+            "<div class='note'><strong>Epsilon was chosen, not derived.</strong> It is how "
+            "far a reaction's flux must move from v_ref before the move counts, measured in "
+            "this model's flux units. The source papers derive it per reaction from a sampled "
+            "reference distribution; this run used one value for every reaction instead."
+            + sweep_note
+            + "</div>"
+        )
+    if direction.get("changed_set_in_published_range") is False:
+        parts.append(
+            "<div class='note'><strong>The changed set is outside the published range."
+            f"</strong> {e(str(direction.get('n_reactions_changed')))} reactions were "
+            "labelled changed; Yizhak et al. and Valcárcel et al. tune their differential-"
+            "expression filter until 100&ndash;200 are.</div>"
+        )
 
     # --- 2. Setup ----------------------------------------------------------------------
     parts.append("<h2>2. Setup</h2>")
@@ -506,16 +651,13 @@ def _compose(
                     "value": provenance.get("target_expression"),
                 },
                 {"field": "model", "value": provenance.get("model_path")},
-                {
-                    "field": "medium",
-                    "value": provenance.get("medium") or "model as loaded",
-                },
+                {"field": "medium", "value": _medium_text(provenance, coverage)},
                 {"field": "condition", "value": provenance.get("condition") or "none"},
                 {"field": "method", "value": provenance.get("method")},
                 {"field": "knockout level", "value": provenance.get("perturbation")},
                 {
                     "field": "reference state (v_ref)",
-                    "value": provenance.get("reference_method"),
+                    "value": _reference_text(provenance),
                 },
                 {"field": "alpha", "value": provenance.get("alpha")},
                 {"field": "epsilon", "value": provenance.get("epsilon")},
@@ -523,6 +665,14 @@ def _compose(
             ["field", "value"],
         )
     )
+    warnings = [row for row in preflight if row.get("status") == "warning"]
+    if warnings:
+        # A warning is a fact about this run's inputs; left in the CSV, no reader sees it.
+        parts.append(
+            "<div class='note'><strong>Preflight warnings.</strong> The run continued, but "
+            "these checks did not pass.</div>"
+        )
+        parts.append(_table(warnings, ["check", "message"]))
     parts.append(sources("workflow_configuration", "preflight"))
 
     # --- 3. Data and methods -----------------------------------------------------------
@@ -532,8 +682,24 @@ def _compose(
         _table(
             [
                 {
+                    "setting": "expression scale",
+                    "value": provenance.get("expression_scale"),
+                },
+                {
                     "setting": "significance test",
                     "value": direction.get("significance"),
+                },
+                {
+                    "setting": "P-value adjustment",
+                    "value": direction.get("p_adjust") or "none",
+                },
+                {
+                    "setting": "minimum |log2 fold change|",
+                    "value": direction.get("min_abs_log2fc", 0.0),
+                },
+                {
+                    "setting": "model genes with an expression value",
+                    "value": _coverage_text(coverage),
                 },
                 {
                     "setting": "genes compared",
@@ -556,15 +722,36 @@ def _compose(
                     "value": direction.get("changed_ranking")
                     or direction.get("ranking"),
                 },
+                *(
+                    [
+                        {
+                            "setting": "requested moves impossible under the reaction "
+                            "bounds (masked)",
+                            "value": _masked_text(structure),
+                        }
+                    ]
+                    if structure.get("n_impossible_masked") is not None
+                    else []
+                ),
             ],
             ["setting", "value"],
         )
     )
     parts.append(
+        "<p class='meta'>A model gene with no expression value is treated as "
+        "neither high nor low: iMAT classes an unmeasured gene as moderate, as the published "
+        "pipeline does, and the gene contributes no direction. A requested move is masked, as "
+        "in the published rMTA preprocessing, when it asks an inactive irreversible reaction "
+        "to run backwards.</p>"
+    )
+    parts.append(
         sources(
             "source_reference_fluxes",
+            "gene_expression_states",
+            "imat_reference_pattern",
             "gene_differential_expression",
             "reaction_direction_map",
+            "reaction_epsilons",
         )
     )
     parts.append("<h3>Candidate universe</h3>")
@@ -609,16 +796,70 @@ def _compose(
             "the components are reported alongside the combined score: which branch fired "
             "cannot be recovered from the score alone.</p>"
         )
-    parts.append(sources("transformation_ranking"))
-
-    parts.append("<h3>MOMA baseline</h3>")
-    if baseline:
-        parts.append(panel("fig03_ranking_vs_moma"))
+    if structure.get("n_distinct_scores") is not None:
         parts.append(
-            "<p>Yizhak et al. compare their method against a MOMA baseline and report it as "
-            "<i>markedly inferior</i> for this task. The comparison is here because a ranking "
-            "that merely reproduces MOMA's ordering has not shown that its signal comes from "
-            "the method rather than from the inputs.</p>"
+            _table(
+                [
+                    {"quantity": "scored candidates", "value": len(ranking)},
+                    {
+                        "quantity": "distinct scores",
+                        "value": structure.get("n_distinct_scores"),
+                    },
+                    {
+                        "quantity": "largest tie block",
+                        "value": structure.get("largest_tie_block"),
+                    },
+                ],
+                ["quantity", "value"],
+            )
+        )
+        parts.append(
+            "<p class='meta'>Ties break on target id, so a top-<i>k</i> that ends inside a "
+            "tie block is alphabetical past the block&rsquo;s first member.</p>"
+        )
+    parts.append(sources("transformation_ranking"))
+    if decomposition:
+        parts.append("<h3>Amplified candidates</h3>")
+        if amplified_rows:
+            amplified_columns = ["target_id"]
+            if "target_name" in amplified_rows[0]:
+                amplified_columns.append("target_name")
+            amplified_columns += ["rTS", "bTS", "mTS", "wTS", "rank_rTS", "rank_mTS"]
+            parts.append(
+                _table(
+                    amplified_rows,
+                    amplified_columns,
+                    mark=highlight,
+                )
+            )
+        else:
+            parts.append(
+                "<p>No candidate satisfies the amplification branch, so every score is the "
+                "candidate&rsquo;s MOMA component and the ranking equals the mTS ranking.</p>"
+            )
+        parts.append(sources("score_decomposition"))
+
+    parts.append("<h3>Score decomposition</h3>")
+    parts.append(panel("fig03_ranking_vs_moma"))
+    if decomposition:
+        parts.append(
+            "<p>When the amplification branch does not fire, rTS&nbsp;=&nbsp;mTS, so this "
+            "panel shows how much of the ranking is the MOMA component alone. Spearman&rsquo;s "
+            f"&rho; between rTS and mTS is <b>{_number(structure.get('spearman_rTS_vs_mTS'), 3)}"
+            "</b>. It is computed from the scores already in the ranking, with no extra "
+            "solve.</p>"
+        )
+        parts.append(sources("score_decomposition"))
+    if baseline:
+        parts.append(
+            "<p>An external MOMA baseline was also run: target expression put through the "
+            "same discretisation, iMAT and sampling as v_ref, and each knockout scored by how close MOMA brings it to "
+            "that target flux state. Yizhak et al. report such a baseline as markedly inferior "
+            "for this task; here it is a cross-check and negative control rather than a "
+            "superiority claim, and a high rank still says a knockout <i>could</i> produce the "
+            "difference, not that MOMA <i>would</i> fail to find it. Spearman&rsquo;s &rho; "
+            "between the transformation rank and the MOMA-baseline rank is "
+            f"<b>{_number(structure.get('spearman_rank_vs_moma_baseline'), 3)}</b>.</p>"
         )
         failed_baseline = [
             row
@@ -633,11 +874,17 @@ def _compose(
             )
             parts.append(_table(failed_baseline, ["target_id", "status"]))
         parts.append(sources("moma_baseline"))
+    elif decomposition:
+        parts.append(
+            "<p class='meta'>The external MOMA baseline was not run. The decomposition above "
+            "answers the same question without extra solves; the baseline is an optional "
+            "cross-check (<code>validation.run_moma_baseline</code>).</p>"
+        )
     else:
         parts.append(
-            "<div class='note'><strong>Not run.</strong> Without it this run does not "
-            "demonstrate that its ordering differs from the baseline the source paper reports "
-            "as inferior.</div>"
+            "<p class='meta'>MTA computes one score per candidate, so there is no internal "
+            "decomposition, and the optional external MOMA baseline "
+            "(<code>validation.run_moma_baseline</code>) was not run.</p>"
         )
 
     parts.append("<h3>Epsilon sensitivity</h3>")
@@ -646,8 +893,14 @@ def _compose(
         parts.append(sources("epsilon_sensitivity"))
     else:
         parts.append(
-            "<div class='note'><strong>Not run.</strong> Epsilon was chosen rather than "
-            "derived, so nothing here shows whether that choice decided the ranking.</div>"
+            "<div class='note'><strong>Not run.</strong> "
+            + (
+                "Epsilon was derived per reaction, so no single value was chosen; a sweep "
+                "would scale that derivation rather than test a choice.</div>"
+                if provenance.get("epsilon") == "per_reaction"
+                else "Epsilon was chosen rather than derived, so nothing here shows whether "
+                "that choice decided the ranking.</div>"
+            )
         )
 
     parts.append("<h3>Interpretation limits</h3>")
@@ -663,6 +916,16 @@ def _compose(
         "consequences, so the top of the list is a neighbourhood rather than a single call.</li>"
         "<li>Ties break on candidate id, so a slice taken inside a tie block is alphabetical "
         "rather than meaningful.</li>"
+        + (
+            "<li>Scores are not comparable across runs or implementations. The k multiplier "
+            "makes rTS discontinuous at the amplification branch, so the gap between the "
+            "amplified tier and the rest is set by k, not by biology. Compare ranks and branch "
+            "membership.</li>"
+            if decomposition
+            else ""
+        )
+        + "<li>Genes without an expression value are unconstrained rather than low, so the "
+        "scores of the reactions they encode rest on the network alone.</li>"
         "</ul>"
     )
 
@@ -684,6 +947,16 @@ def _compose(
                 {"field": "run directory", "value": root.name},
                 {"field": "model fingerprint", "value": provenance.get("model_id")},
                 {"field": "solver", "value": provenance.get("solver")},
+                *(
+                    [
+                        {
+                            "field": "medium as applied",
+                            "value": _applied_medium_text(provenance["medium_applied"]),
+                        }
+                    ]
+                    if isinstance(provenance.get("medium_applied"), Mapping)
+                    else []
+                ),
                 {"field": "figure renderer", "value": renderer.get("engine")},
                 {"field": "R", "value": renderer.get("r")},
                 {"field": "renderer sha256", "value": renderer.get("script_sha256")},
@@ -738,6 +1011,19 @@ _OPTIONAL_ROLES: Mapping[str, tuple[str, ...]] = {
     "gene_differential_expression": ("gene_id",),
     "moma_baseline": ("target_id", "moma_score", "rank"),
     "epsilon_sensitivity": ("epsilon", "target_id", "rank"),
+    "score_decomposition": (
+        "target_id",
+        "bTS",
+        "mTS",
+        "wTS",
+        "rTS",
+        "amplified",
+        "rank_rTS",
+        "rank_mTS",
+    ),
+    "gene_expression_states": ("gene_id", "state"),
+    "imat_reference_pattern": ("reaction_id", "expression_state", "activity", "v_ref"),
+    "reaction_epsilons": ("reaction_id", "epsilon"),
 }
 
 
@@ -980,11 +1266,15 @@ def _check_ranking_invariants(
                 f"moma_baseline scores {len(extra)} candidate(s) absent from the ranking; "
                 "the two are meant to cover the same candidate universe"
             )
-    else:
-        warnings.append(
-            "no MOMA baseline was run, so this bundle does not demonstrate that its ordering "
-            "differs from the baseline the source paper reports as inferior"
-        )
+
+    decomposition = csv_rows.get("score_decomposition")
+    if decomposition:
+        ranked = {str(row["target_id"]) for row in ranking}
+        extra = {str(row["target_id"]) for row in decomposition} - ranked
+        if extra:
+            issues.append(
+                f"score_decomposition holds {len(extra)} candidate(s) absent from the ranking"
+            )
 
 
 def _check_report_outputs(
@@ -1021,6 +1311,15 @@ def _check_report_outputs(
         issues.append(str(exc))
         return {"publication_outputs": {"status": "failed"}}
 
+    # Iterate the expected ids, not the manifest: an id the renderer never recorded is
+    # otherwise invisible to every check below, because each of them walks the manifest.
+    recorded_ids = {str(figure["id"]) for figure in figure_manifest.figures}
+    for figure_id in _FIGURE_ORDER:
+        if figure_id not in recorded_ids:
+            issues.append(
+                f"figure manifest has no entry for {figure_id!r}; the renderer neither drew "
+                "it nor recorded why it was skipped"
+            )
     rendered = [
         figure
         for figure in figure_manifest.figures

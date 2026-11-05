@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from cobra import Model
@@ -24,6 +25,9 @@ from cobra import Model
 from cmm.core import solvers
 from cmm.core.flux_state import FluxState
 from cmm.core.provenance import run_provenance
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -36,12 +40,107 @@ class OmicsFluxResult:
     fluxes: dict[str, float] = field(default_factory=dict)
     detail: str = ""
     metadata: dict[str, object] = field(default_factory=dict)
+    #: The reaction bounds the method itself imposed, ``{reaction_id: (lb, ub)}``. E-Flux2
+    #: fills it with every expression-scaled bound so the constrained space it solved in can
+    #: be reconstructed (and sampled) afterwards; LAD changes no bounds and leaves it empty.
+    bounds: dict[str, tuple[float, float]] = field(default_factory=dict)
+
+    def bounds_frame(self) -> "pd.DataFrame":
+        """The imposed bounds as a table: ``reaction_id``, ``lower_bound``, ``upper_bound``."""
+
+        import pandas as pd
+
+        return pd.DataFrame(
+            [(rid, lb, ub) for rid, (lb, ub) in sorted(self.bounds.items())],
+            columns=["reaction_id", "lower_bound", "upper_bound"],
+        )
 
     def to_flux_state(self, name: str = "omics") -> FluxState:
         return FluxState(self.fluxes, name=name, provenance="imported")
 
 
 OR_RULES = ("sum", "max")
+
+#: How an expression table is scaled on disk. ``"log2"`` is the usual microarray/RNA-seq
+#: summary (e.g. RMA, log2 CPM); ``"linear"`` is raw non-negative intensity or counts.
+ExpressionScale = Literal["linear", "log2"]
+EXPRESSION_SCALES: tuple[ExpressionScale, ...] = ("linear", "log2")
+
+
+@dataclass(frozen=True)
+class ExpressionColumns:
+    """Which columns of an expression table were read as samples, and which were not.
+
+    A gene-by-sample table is read as "every numeric column is one sample". Two mistakes
+    pass that rule silently: a text column (a gene symbol beside the id) is dropped, and a
+    numeric annotation (an Entrez id beside the symbol) is counted as a sample and enters
+    the t-test and the mean. Both are reported here so a reader can see what was used.
+    """
+
+    samples: tuple[str, ...]
+    dropped: tuple[str, ...]
+    #: Sample columns whose values are all distinct integers — the signature of an
+    #: identifier rather than a measurement. A warning, not a rejection.
+    identifier_like: tuple[str, ...]
+
+    def warnings(self) -> list[str]:
+        notes = []
+        if self.dropped:
+            notes.append("non-numeric column(s) ignored: " + ", ".join(self.dropped))
+        if self.identifier_like:
+            notes.append(
+                "column(s) "
+                + ", ".join(self.identifier_like)
+                + " hold one distinct integer per gene and look like identifiers, not "
+                "measurements; remove them if so, since they are being used as samples"
+            )
+        return notes
+
+
+def describe_expression_columns(frame) -> ExpressionColumns:
+    """Classify a raw table's columns (gene ids already in the index) as above."""
+
+    numeric = frame.select_dtypes("number")
+    dropped = tuple(str(c) for c in frame.columns if c not in numeric.columns)
+    identifier_like = []
+    for column in numeric.columns:
+        values = numeric[column].to_numpy(dtype=float)
+        if (
+            len(values) > 1
+            and np.isfinite(values).all()
+            and np.all(values == np.round(values))
+            and len(np.unique(values)) == len(values)
+        ):
+            identifier_like.append(str(column))
+    return ExpressionColumns(
+        samples=tuple(str(c) for c in numeric.columns),
+        dropped=dropped,
+        identifier_like=tuple(identifier_like),
+    )
+
+
+def linear_expression(values, scale: ExpressionScale):
+    """Expression on the linear scale E-Flux2 and LAD expect: ``2**x`` undoes a log2 table."""
+
+    if scale == "log2":
+        return 2.0**values
+    if scale == "linear":
+        return values
+    raise ValueError(f"unknown expression scale {scale!r}; use 'linear' or 'log2'")
+
+
+def log2_expression(values, scale: ExpressionScale, pseudocount: float = 1.0):
+    """Expression on the log2 scale the two-state tests use; a log2 table passes through.
+
+    A linear table becomes ``log2(x + pseudocount)``. A log2 table is used as given, so a file
+    that is already log2 is never logged twice.
+    """
+
+    if scale == "log2":
+        return values
+    if scale == "linear":
+        return np.log2(values + pseudocount)
+    raise ValueError(f"unknown expression scale {scale!r}; use 'linear' or 'log2'")
 
 
 def _eval_gpr_value(
@@ -248,6 +347,7 @@ def eflux2(
     denom = float(np.percentile(list(above.values()), normalization_percentile)) or 1.0
     excluded = set(excluded_reactions or ())
 
+    scaled_bounds: dict[str, tuple[float, float]] = {}
     with model:
         for rid, weight in above.items():
             rxn = model.reactions.get_by_id(rid)
@@ -256,6 +356,7 @@ def eflux2(
             ratio = min(1.0, max(min_scale, weight / denom))
             lb, ub = rxn.lower_bound, rxn.upper_bound
             rxn.bounds = (lb * ratio if lb < 0 else lb, ub * ratio if ub > 0 else ub)
+            scaled_bounds[rid] = (rxn.lower_bound, rxn.upper_bound)
         # Reactions below threshold are squeezed to the noise floor (E-Flux semantics).
         for rid in valid.keys() - above.keys():
             rxn = model.reactions.get_by_id(rid)
@@ -266,6 +367,7 @@ def eflux2(
                 lb * min_scale if lb < 0 else lb,
                 ub * min_scale if ub > 0 else ub,
             )
+            scaled_bounds[rid] = (rxn.lower_bound, rxn.upper_bound)
 
         optimum = model.slim_optimize()
         if optimum is None or not np.isfinite(optimum):
@@ -358,6 +460,7 @@ def eflux2(
                 "objective_kind": "achieved_biological_objective",
                 "cmm_deviations": EFLUX2_DEVIATIONS,
             },
+            bounds=scaled_bounds,
         )
 
 

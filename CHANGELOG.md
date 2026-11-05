@@ -13,7 +13,8 @@ obsolete internal planning documents are removed from the public source tree.
   from two gene-expression profiles, using the published MTA (Yizhak et al. 2013) or rMTA
   (Valcárcel et al. 2019). It composes existing CMM services and adds no numerical method: the
   MIQP, transformation score and Equation 9 are `revert_targets`, the MOMA baseline is
-  `transformation_targets`, and the reference state is E-Flux2 or LAD. Six stages write the
+  `transformation_targets`, and the reference state is the papers' iMAT-plus-sampling state.
+  Six stages write the
   same schema-v2 run bundle SC-01 does, so one manifest format and one path-discovery surface
   serve both. Shipped with [`SC-02`](docs/scenarios/SC-02-transformation-target-discovery.md)
   and the `cmm-transformation-engineering` skill, whose interview confirms on every run which
@@ -33,10 +34,19 @@ obsolete internal planning documents are removed from the public source tree.
   looks like success in a browser. `cmm report render` and `cmm report validate` read the
   run's own manifest to tell the two workflows apart, so neither has to be told which it is.
   The page states in its own body what a reader would otherwise have to dig out of the
-  provenance: that the reference state is not the published iMAT one, that epsilon was chosen
-  rather than derived, that the candidate
+  provenance: how the reference state was built and what still differs from the papers, how
+  epsilon was set, that the candidate
   count is the denominator of any percentile claim, and that source and target are an input
   rather than a finding.
+- **MTA/rMTA's reference state is built as the papers build it.** `cmm.omics.discretize_expression`
+  classes genes by Valcárcel et al.'s rule (per-sample mean ± δ·SD, β agreement);
+  `cmm.omics.imat` solves Shlomi et al.'s iMAT MILP through the MIT-licensed `imatpy` (a new
+  dependency, pinned to 0.3.0); and `cmm.features.imat_reference_state` returns v_ref as the mean
+  of OptGP samples from one optimal iMAT activity pattern. Per-reaction epsilon comes from the
+  same samples. SC-02 and the Revert tab use it in place of the E-Flux2/LAD reference, which is
+  removed from both; SC-02 now requires `imat_delta` and rejects the old `reference_method`,
+  `reference_objective_fraction` and `epsilon_samples/_thinning/_seed` keys with the reason.
+  [ADR-0005](docs/adr/0005-imat-reference-and-per-reaction-epsilon.md) supersedes ADR-0002.
 - **`cmm.omics.gene_directions_from_replicates`** implements the Student's t-test Yizhak et al.
   specify for selecting changed genes. `gene_directions` cuts on fold change, which is all a
   single measurement per gene supports; the published route needs replicates and had no
@@ -53,8 +63,8 @@ obsolete internal planning documents are removed from the public source tree.
   out of that context — ε and α belong to different stages and answer different questions — so
   the controls are grouped by stage, each group opens with a sentence naming that stage's job,
   and every field carries a tooltip giving its published value and what happens if it is wrong.
-  The source flux state was hard-wired to E-Flux2; **LAD is now selectable**, and the tab states
-  that neither is the iMAT-plus-sampling state Yizhak et al. use. The fold-change threshold that
+  The source flux state was hard-wired to E-Flux2; it is now the papers' iMAT-plus-sampling
+  state, with the discretisation δ and β and iMAT's activity ε as controls. The fold-change threshold that
   decides which genes count as changed was likewise fixed at ±1 with no way to see or set it.
 - **MTA's two published preprocessing parameters are now reachable, including from the GUI.**
   The significant-flux-change threshold ε was fixed at its default on every graphical run —
@@ -118,8 +128,8 @@ obsolete internal planning documents are removed from the public source tree.
   through the same `reaction_directions` / `restrict_to_top_changed` path the SC-02 workflow
   uses. With fewer, the t-test entry is disabled and a note states that the published test was
   not applied. Values stay linear expression, as everywhere else in the app: they are
-  log2(x + 1) transformed per replicate for the comparison, and the E-Flux2/LAD source state
-  gets the replicate mean as measured. The summary line now records the test, the replicate
+  log2(x + 1) transformed per replicate for the comparison and for the iMAT discretisation of
+  the source state. The summary line now records the test, the replicate
   counts, how many genes were called changed and how many reactions were labelled. A
   one-column file scores exactly as before.
 - `cmm.omics.gene_directions_by_fold_change` — the fold-change counterpart of
@@ -296,7 +306,7 @@ yields, design rankings, expression-derived fluxes and one result field's meanin
 - **Ranked targets carry the model's own name for the thing they name.** `TargetScore` gains
   `target_name`, populated from the SBML the run already stores — `model.genes[…].name` for a
   gene-level target, `model.reactions[…].name` for a reaction-level one, never from an imported
-  expression table, which is untrusted data. Report tables and figure labels read `6510_AT1` or
+  expression table, which is untrusted data. Report tables and figure labels read an id such as
   `b1602` without it, which no reader can interpret. The name sits *beside* `target_id` and never
   replaces it: names are neither unique nor always present, whereas the id is what provenance and
   reproduction are written against. The export column appears only when something was actually

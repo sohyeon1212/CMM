@@ -339,8 +339,10 @@ Ranks gene/reaction knockouts that move a **source** (e.g. disease) state toward
    option is an explicitly labeled historical heuristic.
 2. **Load source CSV/TSV…** and **Load target CSV/TSV…** — each is a gene id column followed
    by **one column per replicate**. A single column is one measurement per gene; two or more
-   are replicates. Values are linear expression (counts, TPM, FPKM), as in §6 — a negative
-   value is refused at the dialog. Both must load before **Run Revert** enables.
+   are replicates. Set **Expression scale** to linear (counts, TPM, FPKM) or log2; on a linear
+   scale a negative value is refused. Both must load before **Run Revert** enables.
+   **Stage 1** sets the source state: the discretisation **δ** (in SDs; Valcárcel et al. used
+   0.3 and 0.7), the sample agreement **β** (100%), and iMAT's activity **ε** (1).
 3. Choose the **Significance test**. With at least two replicates on each side, `t-test`
    applies Yizhak et al.'s (2013) step 2 — a per-gene Student's t-test at the **P cutoff**,
    split three ways — which is the published route. With fewer, the option is disabled and
@@ -349,14 +351,15 @@ Ranks gene/reaction knockouts that move a **source** (e.g. disease) state toward
    P value for the t-test, largest |log2FC| for fold change.
 4. **Run Revert.** The table ranks targets by score (best row highlighted); the summary names
    the top normalization target and states the test, how many genes were called changed, and
-   how many reactions were labelled. The source reference is generated from the
-   **source** expression with E-Flux2 at full objective. Per-reaction desired directions come
-   from the source→target expression change and GPR logic.
+   how many reactions were labelled. The source reference is the papers' iMAT-plus-sampling
+   state: source genes are classed by δ and β, iMAT finds one activity pattern, and v_ref is
+   the mean of 2,000 samples from that pattern's space (the same samples give per-reaction ε).
+   Per-reaction desired directions come from the source→target expression change and GPR
+   logic. **Export results…** also writes the gene classes and the iMAT pattern.
 
 Published `rmta` and `mta` need MIQP; `rmta_continuous` needs QP. On an unsupported solver
-the tab reports the capability error cleanly. The original studies use contextualization and
-sampling for source-state preprocessing; the deterministic E-Flux2 GUI variant must be
-disclosed in a manuscript (see `docs/design-revert-metabolism.md`).
+the tab reports the capability error cleanly. What still differs from the papers' source-state
+protocol is listed in [ADR-0005](adr/0005-imat-reference-and-per-reaction-epsilon.md).
 
 ---
 

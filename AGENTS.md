@@ -81,6 +81,7 @@ narrow requests.
 | **Does forcing flux through a target buy product?** | `flux_response` | `cmm.features` |
 | **Is a predicted flux forced, or one of many optima?** | `random_flux_sampling` | `cmm.features` |
 | Expression table → flux state | `integrate_expression` (E-Flux2/LAD) | `cmm.omics` |
+| Expression → iMAT activity pattern / MTA v_ref | `imat`, `imat_reference_state` | `cmm.omics`, `cmm.features` |
 | Per-condition fluxes from one table | `predict_condition_fluxes` | `cmm.omics` |
 | Knockouts that revert disease→healthy | `revert_targets` (MTA/rMTA) | `cmm.features` |
 | Knockouts that move state A→B | `transformation_targets` | `cmm.features` |

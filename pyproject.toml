@@ -31,6 +31,7 @@ classifiers = [
 ]
 dependencies = [
     "cobra>=0.31,<0.32",
+    "imatpy==0.3.0",
     "numpy>=1.24,<3",
     "pandas>=2.0,<3",
     "scipy>=1.10,<2",

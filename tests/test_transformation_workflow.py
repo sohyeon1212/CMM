@@ -18,6 +18,7 @@ from cmm.workflows.transformation import (
     TransformationWorkflowConfig,
     TransformationWorkflowError,
     _build_candidates,
+    _check_expression_scale,
     _gene_directions,
     _read_expression,
     run_transformation_target_discovery,
@@ -29,6 +30,7 @@ def _config(**overrides) -> TransformationWorkflowConfig:
         model_path="model.xml",
         source_expression_path="source.csv",
         target_expression_path="target.csv",
+        imat_delta=0.5,
     )
     values.update(overrides)
     return TransformationWorkflowConfig(**values)
@@ -81,8 +83,11 @@ def test_source_and_target_must_differ():
         ({"parameter_k": 0.0}, "parameter_k"),
         ({"method": "rmta_continuous"}, "must be 'mta' or 'rmta'"),
         ({"perturbation": "enzyme"}, "must be 'gene' or 'reaction'"),
-        ({"reference_method": "imat"}, "must be 'eflux2' or 'lad'"),
-        ({"reference_objective_fraction": 0.0}, "reference_objective_fraction"),
+        ({"imat_delta": None}, "imat_delta is required"),
+        ({"imat_delta": -0.1}, "imat_delta must be non-negative"),
+        ({"imat_beta": 0.0}, "imat_beta"),
+        ({"imat_beta": 1.5}, "imat_beta"),
+        ({"imat_epsilon": 0.0}, "imat_epsilon"),
     ],
 )
 def test_invalid_values_are_rejected(overrides, message):
@@ -90,10 +95,28 @@ def test_invalid_values_are_rejected(overrides, message):
         _config(**overrides)
 
 
-def test_imat_is_rejected_by_name_rather_than_silently_accepted():
-    # CMM implements no iMAT. Naming it must fail loudly, not fall back to E-Flux2.
-    with pytest.raises(ValueError, match="eflux2"):
-        _config(reference_method="imat")
+@pytest.mark.parametrize(
+    "key, value, message",
+    [
+        ("reference_method", "eflux2", "always built from iMAT"),
+        ("reference_objective_fraction", 1.0, "no objective on growth"),
+        ("epsilon_samples", 2000, "renamed to reference_samples"),
+        ("epsilon_thinning", 500, "renamed to reference_thinning"),
+    ],
+)
+def test_a_config_from_the_removed_eflux2_path_is_rejected_with_the_reason(
+    key, value, message
+):
+    # An archived E-Flux2 config must not run as if it meant the iMAT reference.
+    payload = {
+        "model_path": "m.xml",
+        "source_expression_path": "s.csv",
+        "target_expression_path": "t.csv",
+        "imat_delta": 0.5,
+        key: value,
+    }
+    with pytest.raises(ValueError, match=message):
+        TransformationWorkflowConfig.from_mapping(payload)
 
 
 # --- direction section -------------------------------------------------------
@@ -153,11 +176,22 @@ def test_suggest_epsilon_ignores_zero_flux_and_uses_magnitude():
 # --- provenance --------------------------------------------------------------
 
 
-def test_provenance_states_the_reference_state_deviation_on_every_run():
-    # A reader must not have to know CMM's internals to learn that v_ref is not iMAT.
-    provenance = _config().to_provenance()
-    assert "iMAT" in str(provenance["reference_state_deviation"])
-    assert "eflux2" in str(provenance["reference_state_deviation"])
+def test_provenance_records_how_v_ref_was_built_and_what_still_differs():
+    provenance = _config(imat_delta=0.7).to_provenance()
+    assert provenance["reference_method"] == "imat"
+    assert provenance["imat_delta"] == 0.7
+    assert provenance["imat_beta"] == 1.0
+    assert provenance["imat_epsilon"] == 1.0
+    assert provenance["imat_gpr_rule"] == "AND=min, OR=max"
+    assert provenance["reference_samples"] == 2000
+    assert provenance["reference_thinning"] == 500
+    deviations = provenance["reference_state_deviations"]
+    assert len(deviations) == 3
+    joined = " ".join(deviations)
+    assert "AND=min, OR=max" in joined
+    assert "warm-up" in joined and "one seeded chain" in joined
+    # Using one of iMAT's optima is the papers' own procedure, so it is not listed.
+    assert "optim" not in joined
 
 
 def test_provenance_records_the_resolved_candidate_construction():
@@ -188,6 +222,7 @@ def test_from_json_resolves_relative_paths_against_the_config_file(tmp_path):
         "model_path": "sub/model.xml",
         "source_expression_path": "sub/source.csv",
         "target_expression_path": "sub/target.csv",
+        "imat_delta": 0.5,
         "output_dir": "runs/out",
         "method": "rmta",
         "epsilon": 0.01,
@@ -220,6 +255,7 @@ def test_from_mapping_builds_a_condition():
             "model_path": "m.xml",
             "source_expression_path": "s.csv",
             "target_expression_path": "t.csv",
+            "imat_delta": 0.5,
             "condition": {
                 "name": "anaerobic",
                 "bounds": [{"reaction_id": "EX_o2_e", "lower_bound": 0.0}],
@@ -264,6 +300,18 @@ def transformation_inputs(tmp_path, branched_model):
     _write_expression(tmp_path / "source.csv", genes, source)
     _write_expression(tmp_path / "target.csv", genes, target)
     return model_path, tmp_path / "source.csv", tmp_path / "target.csv"
+
+
+def test_a_non_sbml_model_is_refused_before_anything_runs(tmp_path, branched_model):
+    from cobra.io import save_json_model
+
+    json_model = tmp_path / "model.json"
+    save_json_model(branched_model, str(json_model))
+    config = _config(model_path=json_model)
+    with pytest.raises(ValueError, match=r"reads SBML models.*load_json_model"):
+        run_transformation_target_discovery(config)
+    with pytest.raises(FileNotFoundError, match="not a file"):
+        run_transformation_target_discovery(_config(model_path=tmp_path / "absent.xml"))
 
 
 def test_read_expression_rejects_a_table_with_no_numeric_columns(tmp_path):
@@ -337,12 +385,21 @@ def test_ttest_uses_log2_of_each_linear_replicate():
     )
 
 
-@pytest.mark.parametrize("value", [-1.0, float("inf"), float("-inf")])
-def test_expression_inputs_require_finite_linear_measurements(tmp_path, value):
+@pytest.mark.parametrize("value", [float("inf"), float("-inf")])
+def test_expression_inputs_require_finite_measurements(tmp_path, value):
     path = tmp_path / "expression.csv"
     pd.DataFrame({"measurement": [value]}, index=["g1"]).to_csv(path)
-    with pytest.raises(TransformationWorkflowError, match="non-negative linear"):
+    for scale in ("linear", "log2"):
+        with pytest.raises(TransformationWorkflowError, match="finite"):
+            _read_expression(path, scale)
+
+
+def test_negative_expression_is_rejected_as_linear_but_accepted_as_log2(tmp_path):
+    path = tmp_path / "expression.csv"
+    pd.DataFrame({"measurement": [-1.0]}, index=["g1"]).to_csv(path)
+    with pytest.raises(TransformationWorkflowError, match="expression_scale='log2'"):
         _read_expression(path)
+    assert _read_expression(path, "log2").loc["g1", "measurement"] == -1.0
 
 
 def test_candidate_filters_preserve_distinct_reaction_and_gene_effects(
@@ -395,6 +452,7 @@ def small_transformation_config(tmp_path, parallel_pathway_model):
         target_expression_path=paths[1],
         output_dir=tmp_path / "run",
         epsilon=0.01,
+        reference_thinning=10,  # sampling speed only; the default is 500
         candidates=CandidateConfig(explicit=("g2",)),
         direction=DirectionConfig(
             significance="fold_change", ranking="fold_change", top_n_changed=None
@@ -481,7 +539,7 @@ def test_workflow_baseline_preserves_failed_moma_status(small_transformation_con
     config = replace(
         small_transformation_config,
         candidates=CandidateConfig(explicit=("g1", "g2")),
-        validation=TransformationValidationConfig(),
+        validation=TransformationValidationConfig(run_moma_baseline=True),
     )
     result = run_transformation_target_discovery(config)
     baseline = pd.read_csv(
@@ -499,6 +557,8 @@ def test_run_writes_a_schema_v2_bundle_with_one_role_per_artifact(
     model_path, source, target = transformation_inputs
     output = tmp_path / "run"
     config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
         model_path=model_path,
         source_expression_path=source,
         target_expression_path=target,
@@ -543,6 +603,8 @@ def test_run_records_how_the_candidate_set_was_built(tmp_path, transformation_in
     # must be recoverable from the run rather than inferred from the method name.
     model_path, source, target = transformation_inputs
     config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
         model_path=model_path,
         source_expression_path=source,
         target_expression_path=target,
@@ -563,6 +625,8 @@ def test_run_records_how_the_candidate_set_was_built(tmp_path, transformation_in
 def test_explicit_candidates_skip_construction(tmp_path, transformation_inputs):
     model_path, source, target = transformation_inputs
     config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
         model_path=model_path,
         source_expression_path=source,
         target_expression_path=target,
@@ -584,6 +648,8 @@ def test_refusing_to_overwrite_a_non_empty_directory(tmp_path, transformation_in
     output.mkdir()
     (output / "someone_elses_file.txt").write_text("keep me", encoding="utf-8")
     config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
         model_path=model_path,
         source_expression_path=source,
         target_expression_path=target,
@@ -612,6 +678,8 @@ def test_report_renders_figures_and_states_what_it_must(
     model_path, source, target = transformation_inputs
     output = tmp_path / "run"
     config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
         model_path=model_path,
         source_expression_path=source,
         target_expression_path=target,
@@ -652,12 +720,107 @@ def test_report_renders_figures_and_states_what_it_must(
     page = report.report_html.read_text(encoding="utf-8")
     # A reader must not have to open the provenance file to learn any of these.
     assert "iMAT" in page
+    assert "How the reference state was built" in page
+    assert "OptGP samples, thinning 10" in page  # the run's own sampling settings
+    assert "warm-up" in page  # what still differs from the papers is stated
     assert "not a finding" in page  # the source/target direction is an input
     assert "denominator" in page  # the candidate count qualifies any percentile
     assert "chosen, not derived" in page  # epsilon
     assert "in silico" in page
     assert "Yizhak" in page and "Valc" in page  # both methods cited
     assert "R2" in page
+    # The decomposition replaces the default baseline: same question, no extra solve.
+    assert "Score decomposition" in page
+    assert "exchanges permit uptake" in page
+    assert "model genes with an expression value" in page
+    assert "not comparable across runs" in page
+
+
+@pytest.mark.requires_miqp
+def test_rmta_run_decomposes_its_score_without_a_baseline(
+    tmp_path, transformation_inputs
+):
+    model_path, source, target = transformation_inputs
+    config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
+        model_path=model_path,
+        source_expression_path=source,
+        target_expression_path=target,
+        output_dir=tmp_path / "run",
+        method="rmta",
+        perturbation="reaction",
+        epsilon=0.01,
+        direction=DirectionConfig(top_n_changed=20),
+        candidates=CandidateConfig(explicit=("R2", "R3", "R5")),
+    )
+    assert config.validation.run_moma_baseline is False
+    result = run_transformation_target_discovery(config)
+    assert result.moma_baseline == ()
+
+    by_id = {row["target_id"]: row for row in result.ranking}
+    decomposition = {row["target_id"]: row for row in result.score_decomposition}
+    assert set(decomposition) == set(by_id)
+    for target_id, row in decomposition.items():
+        ranked = by_id[target_id]
+        assert row["rTS"] == ranked["score"]
+        assert row["rank_rTS"] == ranked["rank"]
+        assert row["amplified"] == (
+            row["bTS"] > 0 and row["mTS"] > 0 and row["wTS"] < 0
+        )
+        assert row["rank_delta"] == row["rank_mTS"] - row["rank_rTS"]
+        # Equation 9: outside the amplification branch the score is the MOMA component.
+        if not row["amplified"]:
+            assert row["rTS"] == row["mTS"]
+    assert sorted(row["rank_mTS"] for row in decomposition.values()) == [1, 2, 3]
+
+    structure = result.summary()["ranking_structure"]
+    assert structure["n_amplified"] == sum(
+        1 for row in decomposition.values() if row["amplified"]
+    )
+    assert {"n_distinct_scores", "largest_tie_block", "spearman_rTS_vs_mTS"} <= set(
+        structure
+    )
+    coverage = result.summary()["data_coverage"]
+    assert coverage["genes_measured_in_model"] <= coverage["model_genes"]
+    assert 0 <= coverage["n_exchanges_open_for_uptake"] <= coverage["n_exchanges"]
+
+    manifest = json.loads((result.run_directory / "00_manifest.json").read_text())
+    assert manifest["artifacts"]["score_decomposition"]["status"] == "complete"
+    assert manifest["artifacts"]["moma_baseline"]["status"] == "skipped"
+
+
+@pytest.mark.requires_miqp
+def test_mta_run_skips_the_decomposition_with_a_reason(tmp_path, transformation_inputs):
+    from cmm.core.media import Medium
+
+    model_path, source, target = transformation_inputs
+    config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
+        model_path=model_path,
+        source_expression_path=source,
+        target_expression_path=target,
+        output_dir=tmp_path / "run",
+        method="mta",
+        perturbation="reaction",
+        epsilon=0.01,
+        direction=DirectionConfig(top_n_changed=20),
+        candidates=CandidateConfig(explicit=("R2", "R3")),
+        medium=Medium(name="custom", uptake={"SUP_A": 10.0}),
+    )
+    result = run_transformation_target_discovery(config)
+    assert result.score_decomposition == ()
+    assert "n_amplified" not in result.ranking_structure
+    entry = json.loads((result.run_directory / "00_manifest.json").read_text())[
+        "artifacts"
+    ]["score_decomposition"]
+    assert entry["status"] == "skipped" and "only for rMTA" in entry["reason"]
+    # A Medium object used to be recorded as None, which the report printed as "model as
+    # loaded" although the run was constrained.
+    provenance = json.loads((result.run_directory / "00_provenance.json").read_text())
+    assert provenance["medium"] == "custom"
+    assert provenance["medium_applied"]["applied"] == {"SUP_A": 10.0}
 
 
 @pytest.mark.requires_miqp
@@ -668,6 +831,8 @@ def test_mta_run_does_not_publish_three_copies_of_one_score(
     # would present one number as three independent measurements that happen to agree.
     model_path, source, target = transformation_inputs
     config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
         model_path=model_path,
         source_expression_path=source,
         target_expression_path=target,
@@ -692,6 +857,8 @@ def test_rmta_run_publishes_the_three_components(tmp_path, transformation_inputs
     # from the combined score alone.
     model_path, source, target = transformation_inputs
     config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
         model_path=model_path,
         source_expression_path=source,
         target_expression_path=target,
@@ -737,6 +904,8 @@ def test_completion_gate_catches_the_failures_a_browser_shows_as_success(
 
     model_path, source, target = transformation_inputs
     config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
         model_path=model_path,
         source_expression_path=source,
         target_expression_path=target,
@@ -812,3 +981,292 @@ def test_report_refuses_a_production_run_directory(tmp_path):
     report = validate_transformation_run(run)
     assert not report.valid
     assert any("not a transformation_target_discovery run" in i for i in report.issues)
+
+
+# --- per-reaction epsilon, expression scale, FDR ------------------------------
+
+
+def test_epsilon_defaults_to_the_published_per_reaction_rule():
+    config = _config()
+    assert config.epsilon == "per_reaction"
+    assert config.reference_samples == 2000
+    provenance = config.to_provenance()
+    assert provenance["epsilon"] == "per_reaction"
+    # v_ref needs the samples either way, so a scalar run records them too.
+    assert _config(epsilon=0.01).to_provenance()["reference_samples"] == 2000
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"epsilon": "auto"}, "a number or 'per_reaction'"),
+        ({"reference_samples": 1}, "reference_samples"),
+        ({"reference_thinning": 0}, "reference_thinning"),
+        ({"expression_scale": "ln"}, "expression_scale"),
+        (
+            {"direction": DirectionConfig(p_adjust="bonferroni")},  # type: ignore[arg-type]
+            "p_adjust must be",
+        ),
+        (
+            {
+                "direction": DirectionConfig(
+                    significance="fold_change", ranking="fold_change", p_adjust="fdr_bh"
+                )
+            },
+            "significance='ttest' only",
+        ),
+    ],
+)
+def test_epsilon_scale_and_adjustment_settings_are_validated(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        _config(**overrides)
+
+
+def test_mapping_round_trip_keeps_the_new_fields():
+    config = TransformationWorkflowConfig.from_mapping(
+        {
+            "model_path": "m.xml",
+            "source_expression_path": "s.csv",
+            "target_expression_path": "t.csv",
+            "imat_delta": 0.5,
+            "expression_scale": "log2",
+            "epsilon": "per_reaction",
+            "reference_thinning": 1000,
+            "direction": {"p_adjust": "fdr_bh"},
+        }
+    )
+    assert config.expression_scale == "log2"
+    assert config.reference_thinning == 1000
+    assert config.direction.p_adjust == "fdr_bh"
+    provenance = config.to_provenance()
+    assert provenance["p_adjust"] == "fdr_bh"
+    assert provenance["imat_discretisation_transform"] == "value"
+    assert provenance["direction_transform"] == "value"
+
+
+@pytest.mark.parametrize(
+    "scale, values, ok, phrase",
+    [
+        ("linear", [0.0, 50.0, 1200.0], True, "consistent with linear"),
+        ("linear", [2.0, 8.5, 15.9], False, "set expression_scale='log2'"),
+        ("log2", [-1.0, 8.5, 15.9], True, "consistent with log2"),
+        ("log2", [0.0, 50.0, 1200.0], False, "set expression_scale='linear'"),
+    ],
+)
+def test_preflight_flags_a_file_whose_values_contradict_its_declared_scale(
+    scale, values, ok, phrase
+):
+    records = []
+
+    def check(name, passed, value, message):
+        records.append((name, passed, value, message))
+
+    table = pd.DataFrame({"r1": values, "r2": values}, index=["a", "b", "c"])
+    _check_expression_scale(check, "source", table, scale)
+    ((name, passed, value, message),) = records
+    assert name == "source_expression_scale"
+    assert passed is ok
+    assert value == {"declared": scale, "min": min(values), "max": max(values)}
+    assert phrase in message
+
+
+def test_a_log2_file_gives_the_same_directions_as_its_linear_original():
+    rng = np.random.default_rng(3)
+    genes = [f"g{i}" for i in range(12)]
+    source = pd.DataFrame(rng.uniform(10, 100, (12, 3)), index=genes)
+    target = source * rng.uniform(0.2, 5.0, (12, 1))
+    from_linear = _gene_directions(source, target, DirectionConfig())
+    from_log2 = _gene_directions(
+        np.log2(source + 1.0), np.log2(target + 1.0), DirectionConfig(), "log2"
+    )
+    pd.testing.assert_frame_equal(from_linear, from_log2)
+
+
+@pytest.mark.requires_miqp
+def test_per_reaction_run_writes_thresholds_bounds_and_the_range_check(
+    tmp_path, transformation_inputs
+):
+    from cmm.reporting import validate_transformation_run
+
+    model_path, source, target = transformation_inputs
+    output = tmp_path / "run"
+    config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
+        model_path=model_path,
+        source_expression_path=source,
+        target_expression_path=target,
+        output_dir=output,
+        perturbation="reaction",
+        reference_samples=200,
+        direction=DirectionConfig(top_n_changed=20),
+        validation=TransformationValidationConfig(enabled=False),
+    )
+    result = run_transformation_target_discovery(config)
+
+    changed = {rid for rid, value in result.direction.items() if value != 0}
+    thresholds = pd.read_csv(output / "05_transformation/reaction_epsilons.csv")
+    assert set(thresholds["reaction_id"]) == changed
+    assert (thresholds["epsilon"] >= 1e-3).all()
+    assert len(result.reaction_epsilons) == len(changed)
+
+    # v_ref is the mean of the same 200 samples the thresholds came from.
+    assert result.provenance["reference_state"]["parameters"]["n_samples"] == 200
+    pattern = pd.read_csv(output / "02_reference/imat_reference_pattern.csv")
+    assert set(pattern["reaction_id"]) == set(result.reference_fluxes)
+    assert dict(zip(pattern["reaction_id"], pattern["v_ref"])) == pytest.approx(
+        dict(result.reference_fluxes)
+    )
+    states = pd.read_csv(output / "02_reference/gene_expression_states.csv")
+    assert set(states["state"]) <= {-1, 0, 1}
+
+    ranking_provenance = result.provenance["ranking_provenance"]
+    assert ranking_provenance["epsilon"] == "per_reaction"
+    assert result.summary()["direction_construction"]["epsilon_summary"][
+        "n_reactions"
+    ] == len(changed)
+
+    # Six reactions cannot reach the published 100-200, and the run says so.
+    size_check = next(r for r in result.preflight if r.check == "changed_set_size")
+    assert size_check.status == "warning"
+    assert size_check.value == len(changed)
+    assert (
+        result.summary()["direction_construction"]["changed_set_in_published_range"]
+        is False
+    )
+
+    manifest = json.loads((output / "00_manifest.json").read_text())
+    assert manifest["artifacts"]["reaction_epsilons"]["status"] == "complete"
+    assert validate_transformation_run(output).phase  # schema accepted
+
+
+@pytest.mark.requires_miqp
+def test_scalar_run_marks_the_threshold_table_skipped(tmp_path, transformation_inputs):
+    model_path, source, target = transformation_inputs
+    output = tmp_path / "run"
+    config = TransformationWorkflowConfig(
+        imat_delta=0.5,
+        reference_thinning=10,  # sampling speed only; the default is 500
+        model_path=model_path,
+        source_expression_path=source,
+        target_expression_path=target,
+        output_dir=output,
+        perturbation="reaction",
+        epsilon=0.01,
+        reference_samples=200,
+        direction=DirectionConfig(top_n_changed=20),
+        validation=TransformationValidationConfig(enabled=False),
+    )
+    result = run_transformation_target_discovery(config)
+    manifest = json.loads((output / "00_manifest.json").read_text())
+    assert manifest["artifacts"]["reaction_epsilons"]["status"] == "skipped"
+    # The reference is sampled whatever epsilon is, so its pattern is always written.
+    assert manifest["artifacts"]["imat_reference_pattern"]["status"] == "complete"
+    assert result.reaction_epsilons == ()
+
+
+def test_minimum_fold_change_is_validated_and_recorded():
+    config = _config(direction=DirectionConfig(min_abs_log2fc=0.263))
+    assert config.to_provenance()["min_abs_log2fc"] == 0.263
+    with pytest.raises(ValueError, match="non-negative"):
+        _config(direction=DirectionConfig(min_abs_log2fc=-0.1))
+    with pytest.raises(ValueError, match="up_threshold/down_threshold"):
+        _config(
+            direction=DirectionConfig(
+                significance="fold_change", ranking="fold_change", min_abs_log2fc=0.5
+            )
+        )
+
+
+def test_reader_reports_which_columns_became_samples(tmp_path):
+    path = tmp_path / "expression.csv"
+    pd.DataFrame(
+        {
+            "symbol": ["a", "b", "c"],
+            "entrez": [101, 202, 303],
+            "r1": [1.5, 2.5, 2.5],
+            "r2": [1.6, 2.4, 2.6],
+        },
+        index=["g1", "g2", "g3"],
+    ).to_csv(path)
+    frame = _read_expression(path)
+    assert list(frame.columns) == ["entrez", "r1", "r2"]
+    columns = frame.attrs["columns"]
+    assert columns.dropped == ("symbol",)
+    assert columns.identifier_like == ("entrez",)
+
+
+@pytest.mark.requires_miqp
+def test_preflight_lists_sample_columns_and_flags_identifier_columns(
+    tmp_path, transformation_inputs
+):
+    model_path, source, target = transformation_inputs
+    with_id = pd.read_csv(source, index_col=0)
+    with_id.insert(0, "entrez", range(1000, 1000 + len(with_id)))
+    flagged = tmp_path / "source_with_id.csv"
+    with_id.to_csv(flagged)
+    result = run_transformation_target_discovery(
+        TransformationWorkflowConfig(
+            imat_delta=0.5,
+            reference_thinning=10,  # sampling speed only; the default is 500
+            model_path=model_path,
+            source_expression_path=flagged,
+            target_expression_path=target,
+            perturbation="reaction",
+            epsilon=0.01,
+            direction=DirectionConfig(top_n_changed=20, min_abs_log2fc=0.5),
+            validation=TransformationValidationConfig(enabled=False),
+        )
+    )
+    records = {record.check: record for record in result.preflight}
+    assert records["target_sample_columns"].status == "pass"
+    assert records["target_sample_columns"].value["samples"] == ["r1", "r2", "r3"]
+    source_record = records["source_sample_columns"]
+    assert source_record.status == "warning"
+    assert source_record.value["identifier_like"] == ["entrez"]
+    assert "identifiers" in source_record.message
+    assert result.summary()["direction_construction"]["min_abs_log2fc"] == 0.5
+
+
+@pytest.mark.requires_miqp
+def test_a_log2_file_gives_the_reference_and_moma_baseline_of_its_linear_original(
+    tmp_path, transformation_inputs
+):
+    # Every place expression is used must put it on one scale. A linear file is discretised as
+    # log2(x + 1), so a file holding exactly those values must give the same iMAT pattern, the
+    # same seeded samples, and so the same v_ref and MOMA-baseline target.
+    model_path, source, target = transformation_inputs
+    log2_paths = {}
+    for name, path in (("source", source), ("target", target)):
+        frame = pd.read_csv(path, index_col=0)
+        log2_paths[name] = tmp_path / f"{name}_log2.csv"
+        np.log2(frame + 1.0).to_csv(log2_paths[name])
+
+    def run(src, tgt, scale):
+        return run_transformation_target_discovery(
+            TransformationWorkflowConfig(
+                imat_delta=0.5,
+                reference_thinning=10,  # sampling speed only; the default is 500
+                model_path=model_path,
+                source_expression_path=src,
+                target_expression_path=tgt,
+                expression_scale=scale,
+                perturbation="reaction",
+                epsilon=0.01,
+                direction=DirectionConfig(top_n_changed=20),
+                validation=TransformationValidationConfig(run_moma_baseline=True),
+            )
+        )
+
+    linear = run(source, target, "linear")
+    logged = run(log2_paths["source"], log2_paths["target"], "log2")
+    for result in (linear, logged):
+        scale_checks = [r for r in result.preflight if r.check.endswith("_scale")]
+        assert len(scale_checks) == 2
+        assert all(r.status == "pass" for r in scale_checks)
+    for rid, flux in linear.reference_fluxes.items():
+        assert logged.reference_fluxes[rid] == pytest.approx(flux, abs=1e-6)
+    assert logged.moma_baseline, "the MOMA baseline must run on log2 input"
+    by_id = {row["target_id"]: row["moma_score"] for row in linear.moma_baseline}
+    for row in logged.moma_baseline:
+        assert row["moma_score"] == pytest.approx(by_id[row["target_id"]], abs=1e-6)

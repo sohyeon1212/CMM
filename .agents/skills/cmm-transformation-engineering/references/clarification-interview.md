@@ -22,7 +22,9 @@ These are **facts — inspect, never ask**:
 |---|---|
 | Model fingerprint, objective, exchange inventory, current bounds | the model file |
 | Whether the solver supports MIQP | `cmm.core.solvers` |
-| How many replicates each expression file carries | the file's column count |
+| How many replicates each expression file carries | the file's column count; check the column names and drop any identifier column (e.g. Entrez) before the run |
+| Whether the files are linear or log2 (`expression_scale`) | the values: negatives or a ~0–20 range mean log2 |
+| How many reactions the direction stage labels changed | a dry run of the direction stage |
 | How many of the model's genes the expression covers | intersecting the two id sets |
 | Whether the model grows under an already-known condition | one LP |
 | Blocked, essential and coupled-set counts | the candidate stage |
@@ -30,13 +32,14 @@ These are **facts — inspect, never ask**:
 Model selection, the direction of the transformation, and the intended biological condition are
 user decisions. Model bounds are evidence about a file, not evidence of the intended
 experiment. Never interpret "use defaults" as permission to choose medium, substrate uptake,
-aeration, the reference-state estimator, or ε.
+aeration, or the discretisation threshold `imat_delta`. Per-reaction ε is a deterministic protocol
+setting, not a question.
 
 ## Resolve decisions in dependency order
 
 Ask only the earliest unresolved decision whose prerequisites are settled. The order is forced:
-ε cannot be recommended before v_ref exists, and v_ref cannot be computed before the condition
-and the estimator are settled.
+v_ref cannot be computed before the condition and `imat_delta` are settled, and the changed
+set cannot be counted before v_ref exists.
 
 ### 1. Exact model bytes
 
@@ -61,18 +64,20 @@ Prefer complete compatible condition choices over mixing unrelated bound questio
 `model-as-loaded` only as an explicit choice, after showing the inspected bounds and saying
 what they do and do not establish.
 
-### 4. Reference-state estimator
+### 4. Discretisation threshold `imat_delta`
 
-E-Flux2 or LAD. Present this as a choice with no correct answer, and state the shared caveat:
+v_ref comes from iMAT, which needs each source gene classed high, moderate or low. Valcárcel et
+al. class a gene high above mean + δ·SD and low below mean − δ·SD within each sample, keeping a
+class only when every sample agrees (`imat_beta` = 100%). They chose δ per data set, so it has
+no default:
 
-> Yizhak et al. compute the source flux state with iMAT. CMM implements no iMAT, so neither
-> option reproduces the published pipeline. iMAT places no objective on growth while E-Flux2 at
-> full objective fraction maximises it, so the ranking is conditioned on whichever you pick. If
-> you have a reference state computed elsewhere, it can be supplied through the Python API
-> instead.
+> δ sets how many genes iMAT treats as high or low. Valcárcel et al. used 0.3 for their
+> Alzheimer's data and 0.7 for prostate cancer, where fewer samples made them stricter; their
+> knockout experiments used 0.7–1. A smaller δ classes more genes and constrains the reference
+> state harder. Recommended: {0.3 with many replicates per state / 0.7 with few}.
 
-E-Flux2 scales bounds by expression and needs QP; LAD fits |flux| to expression targets and
-needs only LP. Neither relaxes the MIQP requirement of the search itself.
+Report the resulting high/low gene counts (`gene_states` in the run summary) back to the user.
+If iMAT matches no reaction at all, the δ is too wide for the data.
 
 ### 5. MTA or rMTA
 
@@ -83,29 +88,36 @@ Ask when the user has not said. Give the cost and the difference in what is clai
 > pushed. rMTA is the more conservative ranking and costs roughly three times as much; on a
 > genome-scale model that is hours rather than an hour.
 
-### 6. Epsilon
+### 6. Changed-set size — only when it falls outside 100–200
 
-**Never offer a bare default.** Compute `TransformationWorkflowConfig.suggest_epsilon(v_ref)`
-and present its percentiles, because ε is a flux magnitude and only the model at hand can say
-what a meaningful one is:
+Do not ask about the significance filter up front; the defaults (t-test, raw P < 0.05, top 200
+by P) are Yizhak et al.'s protocol. Once v_ref exists, count the changed reactions the
+direction stage produces. Running that stage alone is cheap next to the MIQP search. Ask only
+when the count is outside 100–200. Give the count and a recommendation:
 
-> ε is how far a reaction's flux must move before the move counts as a success. It is measured
-> in this model's flux units: among the reactions required to change, the median |v_ref| here
-> is {median} and the upper quartile is {p75}. Yizhak et al. derive ε per data set from a
-> sampled reference distribution, which CMM cannot reproduce, so this is a choice you are
-> making rather than a value being recovered.
+> With the current filter, {n} reactions are labelled changed. Both source papers aim for
+> 100–200: Yizhak et al. keep the top 100–200 after a P < 0.05 t-test, and Valcárcel et al.
+> loosened or tightened their filter per data set until they got there. Fewer than 100 leaves
+> the MIQP with little to transform; many more slows a genome-scale run. Recommended: {e.g.
+> relax the cutoff to P < 0.1 / keep the raw P instead of FDR / lower top_n_changed}.
 
-Recommend a value, say why, and offer the sweep (question 7) as the way to show the choice did
-not decide the answer.
+FDR adjustment never reorders genes. It matters only when fewer genes pass than the top-N cut
+would keep. With many replicates (roughly ten or more per state), recommend a fold-change floor
+as well, `direction.min_abs_log2fc=0.263` (Valcárcel et al.'s 20%), because a P-ranked set
+otherwise fills with changes too small to matter. Accept the count as-is if the user prefers, and state it in the report.
+
+**Numeric ε, only on request.** Never offer a bare default. Compute
+`TransformationWorkflowConfig.suggest_epsilon(v_ref)` and present its percentiles, because a
+single ε is a flux magnitude that only the model at hand can calibrate.
 
 ### 7. Epsilon sweep
 
 Off by default because it multiplies runtime by the number of values. Offer it whenever the
 ranking will be reported or published:
 
-> Both source papers report an ε sensitivity analysis. Since ε is chosen here rather than
-> derived, reporting how the ranking moves across a few values is the honest substitute. It
-> costs one full run per value.
+> Both source papers report an ε sensitivity analysis. Reporting how the ranking moves across a
+> few scalar values shows whether the threshold decided the answer. It costs one full run per
+> value.
 
 ### 8. Perturbation level, when it matters
 
@@ -133,9 +145,12 @@ Present the resolved definition and obtain explicit confirmation. Include, in wo
 
 - which file is source and which is target, and the question that ordering asks;
 - the condition;
-- the estimator, with the iMAT caveat restated;
+- `imat_delta` (and `imat_beta` if not 100%), with the three stated differences from the
+  papers' reference state;
 - the method and its cost;
-- ε, and that it was chosen rather than derived.
+- the expression scale that was inspected;
+- ε: per reaction from the 2,000 samples behind v_ref (default), or the chosen number;
+- the changed-set count, if question 6 was asked.
 
 A prompt that was complete from the start requires neither an interview nor a confirmation
 round — except for the source/target direction, which is confirmed on every run.

@@ -36,8 +36,6 @@ contracts:
    experimental interventions.
 4. Record wall time, peak memory, solver tolerances, and candidate counts for representative
    genome-scale LP, QP, MILP, and MIQP workflows.
-5. Add the original MTA/rMTA contextualization plus sampling preprocessing if a manuscript
-   claims the complete paper pipeline rather than CMM's documented E-Flux2 variant.
 
 ## Planned scientific services
 

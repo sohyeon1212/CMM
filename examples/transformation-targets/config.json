@@ -6,7 +6,7 @@
   "solver": "gurobi",
   "method": "mta",
   "perturbation": "gene",
-  "reference_method": "eflux2",
+  "imat_delta": 0.5,
   "epsilon": 0.01,
   "direction": {
     "significance": "fold_change",
@@ -26,6 +26,7 @@
     "notes": "Existing CMM synthetic fixture: SOURCE_EXPRESSION (disease) -> TARGET_EXPRESSION (healthy), one linear measurement per gene. Supply of A is capped at 10; this model has no oxygen exchange. All reaction bounds are explicit."
   },
   "validation": {
+    "run_moma_baseline": true,
     "epsilon_sweep": [0.001, 0.01]
   },
   "overwrite": false

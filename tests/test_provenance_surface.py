@@ -98,6 +98,8 @@ SERVICES = (
     "eflux2",
     "lad",
     "predict_condition_fluxes",
+    "imat",
+    "imat_reference_state",
     "random_flux_sampling",
     "reference_constrained_sampling",
     "reference_flux",
@@ -281,6 +283,20 @@ def _metadata(service: str, model) -> dict[str, object]:
         )
         return dict(predict_condition_fluxes(model, table, method="lad").metadata)
 
+    if service in {"imat", "imat_reference_state"}:
+        from cmm.features import imat_reference_state
+        from cmm.omics import imat
+
+        # Alternate high/low so the MILP has labels to match on a real network.
+        states = {gene.id: (1, -1)[i % 2] for i, gene in enumerate(model.genes)}
+        if service == "imat":
+            return dict(imat(model, states).metadata)
+        return dict(
+            imat_reference_state(
+                model, states, n_samples=50, thinning=10, seed=7
+            ).metadata
+        )
+
     if service in {"transformation_targets", "revert_targets"}:
         return _directional_metadata(service)
 
@@ -355,7 +371,11 @@ def test_every_public_service_carries_the_provenance_block(service, core):
     # ``seed`` is recorded, never invented: sampling reports the requested seed and the two
     # strain-design searches report their explicit reproducible backend default.  An unseeded
     # deterministic method reports null rather than a made-up value.
-    if service in ("random_flux_sampling", "reference_constrained_sampling"):
+    if service in (
+        "random_flux_sampling",
+        "reference_constrained_sampling",
+        "imat_reference_state",
+    ):
         assert metadata["seed"] == 7
     elif service in ("optknock", "robustknock"):
         assert metadata["seed"] == 0

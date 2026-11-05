@@ -76,12 +76,22 @@ individual functions directly only when the user narrows the request to one of t
 
 ### 1 — Preflight
 
+The model must be an SBML file (`.xml`, `.sbml`, optionally gzipped); it is archived byte for
+byte and replayed with the SBML reader. A COBRApy JSON or MATLAB model is refused before
+anything runs; convert it first with `cobra.io.write_sbml_model`.
+
 Checks the expression files parse, how many replicates each state has, what fraction of the
 model's genes the data covers, that the model grows under the requested condition, and that
 the solver can run MIQP.
 
-Both expression files must contain finite, non-negative linear measurements. Log-transformed
-values are not the workflow input format.
+Every numeric column after the gene id is one sample; preflight lists them per file and warns
+about ignored text columns and identifier-like integer columns. Both expression files are on one
+declared scale, `expression_scale="linear"` (default;
+finite, non-negative) or `"log2"`. Inspect the files and set it. Negative values or a range of
+about 0–20 mean log2. A linear-declared file with negative values is rejected. Preflight also
+warns (`source_expression_scale` / `target_expression_scale`) when a linear-declared file never
+exceeds 20, which looks like log2 and would be logged twice, or when a log2-declared file
+exceeds 32. The report lists every preflight warning in its Setup section.
 
 **The MIQP gate is a stop.** `rmta_continuous` is a QP heuristic and explicitly not published
 rMTA; it must never stand in for a method the solver cannot run. Report the method as
@@ -89,19 +99,38 @@ unavailable instead.
 
 ### 2 — Reference state (v_ref)
 
-The source expression's linear replicate means become a flux distribution through **E-Flux2**
-or **LAD**.
+As in the papers ([ADR-0005](../adr/0005-imat-reference-and-per-reaction-epsilon.md)):
+
+1. **Discretise.** Source expression on the log2 scale (`log2(x + 1)` for a linear file) is
+   restricted to the model's measured genes. In each sample a gene is high above
+   mean + `imat_delta`·SD and low below mean − `imat_delta`·SD; it keeps a class only when
+   `imat_beta` (default 100%) of the samples agree. This is Valcárcel et al.'s rule. They chose
+   δ per data set (0.3 Alzheimer's, 0.7 prostate cancer), so `imat_delta` has no default.
+   Classes are in `02_reference/gene_expression_states.csv`.
+2. **iMAT.** The genes map to reaction classes through the GPR (AND = min, OR = max). The iMAT
+   MILP (Shlomi et al. 2008, ε = 1, no growth objective, solved through `imatpy`) finds one
+   activity pattern that matches as many high and low reactions as possible.
+3. **Sample.** Each matched reaction is held to its pattern: an active one keeps its solved
+   direction with |v| ≥ ε, and an inactive one is fixed at 0. v_ref is the mean of
+   `reference_samples` (2,000) seeded OptGP samples, `reference_thinning` (500) steps apart.
+   The pattern, the bounds it imposed, and v_ref are in
+   `02_reference/imat_reference_pattern.csv`.
 
 Everything downstream is measured against v_ref: the sign flip that puts expression labels
 into flux-value space, the MIQP's success thresholds `v_ref ± ε`, and the denominator of the
-transformation score. Choosing the estimator is therefore a scientific decision, not a
-default.
+transformation score.
 
-> **Yizhak et al. use iMAT.** CMM implements no iMAT. The substitution is not cosmetic: iMAT
-> places no objective on growth, whereas E-Flux2 at `objective_fraction=1.0` forces a
-> growth-maximal state, so the ranking is conditioned on whichever estimator is used. State the
-> substitution in any report. An externally computed reference state can be supplied through
-> the Python API to restore the published pipeline.
+> **Three differences from the published runs remain**, and the report states them
+> (`reference_state_deviations`):
+> - The GPR pairing is the reverse of the iMAT paper's Methods wording.
+> - COBRApy builds its own warm-up points where optGpSampler used 5,000.
+> - Sampling runs on one seeded chain.
+>
+> Using one of iMAT's optima, whichever the solver returns, is the papers' own procedure; the
+> pattern used is written out so it can be inspected.
+>
+> Preflight warns (`imat_pattern`) when iMAT matches no reaction, which means δ classed every
+> gene moderate.
 
 ### 3 — Direction map
 
@@ -109,17 +138,34 @@ Compares the two states gene by gene, resolves the result through each reaction'
 requires all subunits, OR at least one, mixed evidence yields unchanged), and converts it to a
 desired direction of flux change using the sign of v_ref.
 
-Each replicate is transformed with `log2(value + 1)` before the comparison. Fold-change
-thresholds therefore apply in log2 space; the source reference still uses linear values.
-The transform and pseudocount are recorded in provenance.
+A linear file is transformed with `log2(value + 1)` per replicate before the comparison; a
+log2 file is compared as given. Fold-change thresholds therefore apply in log2 space either
+way. The transforms and pseudocount are recorded in provenance.
 
 **With replicates, use the t-test.** That is what the paper specifies, and CMM implements it
 as `gene_directions_from_replicates`. Fall back to a fold-change cut only when the data has
 one measurement per gene, and say so.
 
-The changed set is then cut to the most differentially expressed reactions — the paper keeps
-100–200. The cut is not cosmetic: every changed reaction adds one binary variable to the MIQP,
-so on a genome-scale model it decides whether the run finishes.
+The changed set is then cut to the most differentially expressed reactions. Yizhak et al. keep
+the top 100–200 after a raw P < 0.05 t-test. Valcárcel et al. instead tune the P, FDR or B
+filter per data set "to obtain around 100–200 altered reactions". The target is the count, not
+a particular filter. `p_adjust="fdr_bh"` gives their FDR filter. Because it is monotone in P,
+it changes a top-N set only when fewer genes pass than N. With many replicates, also set
+`min_abs_log2fc` (Valcárcel et al.'s 20% is 0.263), or the P-ranked set fills with changes too
+small to matter.
+
+The cut is not cosmetic: every changed reaction adds one binary variable to the MIQP, so on a
+genome-scale model it decides whether the run finishes. The run checks the **actual** changed
+count (`changed_set_size` in preflight, `changed_set_in_published_range` in the summary), and
+the report warns when it is outside 100–200.
+
+### ε — per reaction, sampled
+
+With `epsilon="per_reaction"` (default), each changed reaction's threshold is the change that a
+one-sided t-test over the 2,000 samples behind v_ref calls significant, with a minimum of
+0.001. This is Yizhak et al.'s per-reaction rule, applied to the same iMAT-pattern samples the
+papers use. The thresholds are in `05_transformation/reaction_epsilons.csv`. A numeric
+`epsilon` is still accepted.
 
 ### 4 — Candidate universe
 
@@ -157,18 +203,29 @@ taken inside a tie block is alphabetical rather than meaningful. The ranking's m
 
 ### 6 — Validation
 
-**The MOMA baseline.** Yizhak et al. compare MTA against MOMA and report it as *markedly
-inferior*; reproducing that contrast is what shows a ranking's signal comes from the method
-rather than from the inputs. A ranking whose MOMA baseline agrees with it has not demonstrated
-that, whatever its top candidate.
+**Score decomposition (rMTA, every run).** Equation 9 returns `rTS = mTS` unless the
+amplification branch fires (`bTS > 0`, `mTS > 0`, `wTS < 0`), where it returns
+`mTS·k·(bTS − wTS)`. `score_decomposition.csv` records each candidate's branch and its rank
+under `rTS` and under `mTS` alone, computed from the ranking with no extra solve, so it shows
+how much of the ordering is the MOMA component. `00_summary.json` carries `n_amplified`,
+`spearman_rTS_vs_mTS`, `n_distinct_scores` and `largest_tie_block` under `ranking_structure`.
+Because `k` makes `rTS` discontinuous at the branch, scores are not comparable across runs;
+compare ranks and branch membership.
+
+**The external MOMA baseline (optional, off by default).** Yizhak et al. compare MTA against
+MOMA and report it as *markedly inferior*. `validation.run_moma_baseline=True` reproduces that
+comparison at one QP per candidate: the target expression is put through the same
+discretisation, iMAT and sampling as v_ref (one more iMAT solve and sampling run), and each knockout is ranked by how close MOMA brings it to that flux state. It is a
+cross-check and negative control, not a superiority claim; run it when the comparison itself is
+being reported, and for MTA, which has no internal decomposition.
 
 Unsuccessful MOMA solves remain in the baseline CSV with their solver `status` and a `-inf`
 sentinel score, after all successful solves. They are listed in the report and excluded from
 the rank-comparison figure; an infeasible deletion is a recorded outcome, not a valid score.
 
-**Epsilon sensitivity, when configured.** ε is a flux magnitude with no derivable value here,
-so reporting how the ranking moves across ε is the honest substitute for the paper's
-derivation. Both source papers report such an analysis.
+**Epsilon sensitivity, when configured.** Both source papers report how the ranking moves
+across ε. The sweep re-ranks at each listed scalar ε, which is how to show that neither the
+derived per-reaction values nor a chosen number decided the answer.
 
 ## Report
 
@@ -176,10 +233,13 @@ derivation. Both source papers report such an analysis.
 page is available as `cmm.reporting.render_transformation_report(run_dir, highlight=…)`.
 
 Figures come from `render_transformation_figures.R`, the same checked-in R/ggplot2 path SC-01
-uses; the two workflows draw different panels, so each has its own script. Three panels are
-drawn — score against rank, transformation rank against the MOMA baseline, and rank against
-epsilon when a sweep was configured — each as PNG, SVG and PDF, with two copies of the page
-beside them:
+uses; the two workflows draw different panels, so each has its own script. Four panels are
+drawn — best- against worst-case score (rMTA), score against rank (split by Equation 9 branch
+when any candidate is amplified, with the largest tie block shaded), rank under `rTS` against
+rank under `mTS` (rMTA) or against the optional MOMA baseline (MTA), and rank against epsilon
+when a sweep was configured — each as PNG, SVG and PDF. A panel that cannot be drawn is recorded
+in the figure manifest with its reason and the page says so; a panel the renderer never records
+fails validation. Two copies of the page sit beside them:
 
 | file | figures | use |
 |---|---|---|
@@ -220,9 +280,12 @@ The renderer writes all of these into the page body rather than leaving them in 
 file. Beyond the standard contract in [`_reporting.md`](_reporting.md):
 
 1. **Which file was source and which was target**, in words, not just as paths.
-2. **How v_ref was computed**, and that it is not the published iMAT-plus-sampling state.
-3. **ε, and that it was chosen rather than derived.** `TransformationWorkflowConfig.suggest_epsilon`
-   reads percentiles off v_ref so the choice has a basis.
+2. **How v_ref was computed** — δ, β, the sample count and thinning — and the three remaining
+   differences from the published iMAT-plus-sampling state.
+3. **ε and how it was set.** Per reaction: it was derived by the published rule from the
+   samples behind v_ref, with the median and the number at the minimum. Scalar: it was chosen rather
+   than derived; `TransformationWorkflowConfig.suggest_epsilon` gives the choice a basis.
+   Also state whether the changed set reached the published 100–200.
 4. **The candidate construction and its count** — the denominator of any percentile claim.
 5. **The tie structure** of the ranking.
 6. That predictions are *in silico* hypotheses requiring experimental validation. rMTA is a

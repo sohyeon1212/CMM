@@ -150,7 +150,7 @@ def bundle(tmp_path: Path) -> Path:
         "n_candidates": 4,
         "top_target": "PGI",
         "top_score": 3.5934,
-        "reference_method": "eflux2",
+        "reference_method": "imat",
         "candidate_construction": {"n_open": 4, "n_blocked_removed": 0},
         "direction_construction": {"significance": "ttest", "n_reactions_changed": 20},
     }
@@ -160,15 +160,22 @@ def bundle(tmp_path: Path) -> Path:
         "solver": "gurobi",
         "method": "rmta",
         "perturbation": "reaction",
-        "reference_method": "eflux2",
+        "reference_method": "imat",
+        "imat_delta": 0.7,
+        "imat_beta": 1.0,
+        "imat_epsilon": 1.0,
+        "imat_gpr_rule": "AND=min, OR=max",
+        "reference_samples": 2000,
+        "reference_thinning": 500,
+        "reference_seed": 0,
         "source_expression": "source.csv",
         "target_expression": "target.csv",
         "alpha": 0.66,
         "epsilon": 0.01,
-        "reference_state_deviation": (
-            "v_ref is a deterministic eflux2 solve; Yizhak et al. (2013) use iMAT, "
-            "which CMM does not implement"
-        ),
+        "reference_state_deviations": [
+            "reaction classes use AND=min, OR=max over the GPR",
+            "sampling is one seeded chain",
+        ],
     }
     add("summary", "00_summary.json", json.dumps(summary, indent=2))
     add("provenance", "00_provenance.json", json.dumps(provenance, indent=2))
@@ -181,6 +188,7 @@ def bundle(tmp_path: Path) -> Path:
                 "model_path": "model/model.xml",
                 "source_expression_path": "inputs/source.csv",
                 "target_expression_path": "inputs/target.csv",
+                "imat_delta": 0.5,
             },
             indent=2,
         ),
@@ -193,6 +201,7 @@ def bundle(tmp_path: Path) -> Path:
                 "model_path": "../model/model.xml",
                 "source_expression_path": "../inputs/source.csv",
                 "target_expression_path": "../inputs/target.csv",
+                "imat_delta": 0.5,
             }
         ),
     )
@@ -426,3 +435,187 @@ def test_render_refuses_a_directory_that_is_not_a_transformation_run(
 ) -> None:
     with pytest.raises(TransformationReportError, match="no 00_manifest.json"):
         render_transformation_report(tmp_path)
+
+
+@pytest.mark.skipif(
+    not _r_is_ready(), reason="Rscript renderer packages are not installed"
+)
+def test_report_states_a_derived_epsilon_and_an_out_of_range_changed_set(
+    bundle: Path,
+) -> None:
+    provenance = json.loads((bundle / "00_provenance.json").read_text())
+    provenance.update({"epsilon": "per_reaction", "expression_scale": "log2"})
+    _rewrite_artifact(bundle, "00_provenance.json", json.dumps(provenance))
+    summary = json.loads((bundle / "00_summary.json").read_text())
+    summary["direction_construction"].update(
+        {
+            "p_adjust": "fdr_bh",
+            "changed_set_in_published_range": False,
+            "epsilon_summary": {"n_reactions": 20, "n_floored": 3, "median": 0.04},
+        }
+    )
+    _rewrite_artifact(bundle, "00_summary.json", json.dumps(summary))
+
+    page = render_transformation_report(bundle).report_html.read_text(encoding="utf-8")
+    assert "derived per reaction" in page
+    assert "chosen, not derived" not in page
+    assert "samples behind v_ref" in page
+    assert "outside the published range" in page
+    assert "fdr_bh" in page and "log2" in page
+
+
+@pytest.mark.skipif(
+    not _r_is_ready(), reason="Rscript renderer packages are not installed"
+)
+def test_report_shows_preflight_warnings_and_only_them(bundle: Path) -> None:
+    page = render_transformation_report(bundle).report_html.read_text(encoding="utf-8")
+    assert "Preflight warnings" not in page  # the fixture's only check passed
+
+    _rewrite_artifact(
+        bundle,
+        "01_preflight/preflight.csv",
+        "check,status,value,message\n"
+        "gene_coverage,pass,{},every gene measured\n"
+        "source_expression_scale,warning,{},looks like log2 expression\n",
+    )
+    page = render_transformation_report(bundle).report_html.read_text(encoding="utf-8")
+    assert "Preflight warnings" in page
+    assert "source_expression_scale" in page and "looks like log2 expression" in page
+    assert "every gene measured" not in page  # a passing check is not listed
+
+
+# Two amplified candidates over a non-amplified tail whose last three scores tie: the case
+# Figure 2 used to flatten and the page used to leave unquantified.
+SPLIT_RANKING = """target_id,score,rank,bTS,mTS,wTS
+PGI,35.93,1,0.1369,0.1312,-0.1369
+PFK,20.97,2,0.1041,0.1007,-0.1040
+TPI,0.3,3,0.40,0.3,0.10
+ENO,0.1,4,0.20,0.1,0.05
+FBA,0.1,5,0.20,0.1,0.05
+GND,0.1,6,0.20,0.1,0.05
+"""
+SPLIT_DECOMPOSITION = """target_id,bTS,mTS,wTS,rTS,amplified,rank_rTS,rank_mTS,rank_delta
+PGI,0.1369,0.1312,-0.1369,35.93,True,1,2,1
+PFK,0.1041,0.1007,-0.104,20.97,True,2,3,1
+TPI,0.4,0.3,0.1,0.3,False,3,1,-2
+ENO,0.2,0.1,0.05,0.1,False,4,4,0
+FBA,0.2,0.1,0.05,0.1,False,5,5,0
+GND,0.2,0.1,0.05,0.1,False,6,6,0
+"""
+
+
+def _add_artifact(root: Path, role: str, relative: str, content: str) -> None:
+    entry = _write(root, relative, content)
+    entry["role"] = role
+    manifest_path = root / "00_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"][role] = entry
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+
+@pytest.mark.skipif(
+    not _r_is_ready(), reason="Rscript renderer packages are not installed"
+)
+def test_report_decomposes_the_rmta_score_and_exposes_ties(bundle: Path) -> None:
+    _rewrite_artifact(
+        bundle, "05_transformation/transformation_ranking.csv", SPLIT_RANKING
+    )
+    _rewrite_artifact(
+        bundle,
+        "04_candidates/candidates.csv",
+        "target_id\nPGI\nPFK\nTPI\nENO\nFBA\nGND\n",
+    )
+    _add_artifact(
+        bundle,
+        "score_decomposition",
+        "06_validation/score_decomposition.csv",
+        SPLIT_DECOMPOSITION,
+    )
+    manifest_path = bundle / "00_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = manifest["artifacts"]["moma_baseline"]
+    (bundle / entry["path"]).write_text("", encoding="utf-8")
+    entry.update(
+        {
+            "status": "skipped",
+            "reason": "run_moma_baseline was disabled",
+            "sha256": None,
+        }
+    )
+    entry["size_bytes"] = 0
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    summary = json.loads((bundle / "00_summary.json").read_text())
+    summary["ranking_structure"] = {
+        "n_distinct_scores": 4,
+        "largest_tie_block": 3,
+        "n_amplified": 2,
+        "spearman_rTS_vs_mTS": 0.6,
+        "n_impossible_masked": 1,
+        "n_impossible_masked_reversed": 2,
+    }
+    summary["data_coverage"] = {
+        "model_genes": 10,
+        "genes_measured_in_model": 7,
+        "n_exchanges": 20,
+        "n_exchanges_open_for_uptake": 15,
+    }
+    _rewrite_artifact(bundle, "00_summary.json", json.dumps(summary))
+
+    report = render_transformation_report(bundle)
+    figures = {
+        figure["id"]: figure
+        for figure in json.loads(report.figure_manifest.read_text())["figures"]
+    }
+    ranking_panel = figures["fig02_transformation_ranking"]
+    assert ranking_panel["status"] == "rendered"
+    # The amplified tier gets its own panel and the tie block is named on the figure.
+    assert ranking_panel["height_mm"] == 80
+    assert "amplification branch" in ranking_panel["caption"]
+    assert "largest tie block (3 candidates, ranks 4-6)" in ranking_panel["caption"]
+    comparison = figures["fig03_ranking_vs_moma"]
+    assert comparison["status"] == "rendered"
+    assert comparison["sources"] == ["06_validation/score_decomposition.csv"]
+    assert "MOMA component alone" in comparison["caption"]
+
+    page = report.report_html.read_text(encoding="utf-8")
+    assert "<b>2</b> of 6 scored candidates satisfy" in page
+    assert "amplification branch</b>" in page  # the top candidate's branch is named
+    assert "Amplified candidates" in page
+    assert "Score decomposition" in page and "0.6" in page
+    assert "largest tie block" in page
+    assert "model as loaded — 15 of 20 exchanges permit uptake" in page
+    assert "7 of 10 (70.0%)" in page
+    assert "1 (worst-case map: 2)" in page
+    assert "not comparable across runs" in page
+    # The default no-baseline run is not scolded for it.
+    assert "does not demonstrate" not in page
+    validation = validate_transformation_run(bundle)
+    assert validation.valid, validation.issues
+    assert not any("MOMA baseline" in warning for warning in validation.warnings)
+
+
+@pytest.mark.skipif(
+    not _r_is_ready(), reason="Rscript renderer packages are not installed"
+)
+def test_a_figure_the_renderer_never_records_is_reported_not_dropped(
+    bundle: Path, tmp_path: Path
+) -> None:
+    """The one silent path: an id absent from the manifest left no figure and no note."""
+
+    source = renderer_script_path().read_text(encoding="utf-8")
+    start = source.index("# --- Figure 4")
+    end = source.index("renderer_versions <-")
+    broken = tmp_path / "renderer_without_fig04.R"
+    broken.write_text(source[:start] + source[end:], encoding="utf-8")
+
+    report = render_transformation_report(bundle, renderer=broken)
+    page = report.report_html.read_text(encoding="utf-8")
+    assert "fig04_epsilon_sensitivity was not recorded by the renderer" in page
+    validation = validate_transformation_run(bundle)
+    assert not validation.valid
+    assert any(
+        "no entry for 'fig04_epsilon_sensitivity'" in issue
+        for issue in validation.issues
+    )
