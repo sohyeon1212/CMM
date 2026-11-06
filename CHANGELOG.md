@@ -8,6 +8,10 @@ obsolete internal planning documents are removed from the public source tree.
 
 ### Added
 
+- **SC-01 can knock out a gene's transcripts together.** `transcript_separator="."` makes the
+  gene-level single-knockout screen treat every `<entrez>.<n>` transcript of a Recon-style
+  model as one knockout, and groups `gene_knockout_mapping.csv` the same way. Without it, a gene
+  whose isoforms are joined by OR is inert transcript by transcript and never screened.
 - **A second canonical workflow: transformation-target discovery.** `cmm transformation-targets
   --config CONFIG` ranks the knockouts that move a source metabolic state toward a target one,
   from two gene-expression profiles, using the published MTA (Yizhak et al. 2013) or rMTA

@@ -564,6 +564,48 @@ def test_gene_knockout_mapping_preserves_all_genes_names_and_gprs(
     assert "R2: g2 or g2_iso" in str(isozyme["gpr"])
 
 
+def test_gene_knockout_mapping_groups_transcripts_into_one_knockout_unit(
+    branched_model,
+) -> None:
+    # Recon-style isoforms joined by OR: neither transcript alone blocks R2.
+    branched_model.reactions.R2.gene_reaction_rule = "g2.1 or g2.2"
+    branched_model.genes.get_by_id("g2.1").name = "SHORT1"
+    branched_model.genes.get_by_id("g2.2").name = "SHORT1"
+    from cobra.manipulation import remove_genes
+
+    remove_genes(branched_model, ["g2"])
+
+    per_transcript = production._gene_knockout_mapping(branched_model).to_frame()
+    assert per_transcript.set_index("gene_id").loc["g2.1", "inert"]
+
+    grouped = production._gene_knockout_mapping(
+        branched_model, transcript_separator="."
+    ).to_frame()
+    unit = grouped[grouped["gene_id"] == "g2"].iloc[0]
+    assert not bool(unit["inert"])
+    assert unit["blocked_reaction"] == "R2"
+    assert unit["gene_name"] == "SHORT1"
+    assert "g2.1" not in set(grouped["gene_id"])
+
+
+def test_transcript_separator_requires_a_gene_level_screen() -> None:
+    config = ProductionWorkflowConfig(
+        model_path="model.xml", product="PRODUCT", transcript_separator="."
+    )
+    assert config.transcript_separator == "."
+    with pytest.raises(ValueError, match="non-empty"):
+        ProductionWorkflowConfig(
+            model_path="model.xml", product="PRODUCT", transcript_separator=""
+        )
+    with pytest.raises(ValueError, match="knockout_level='gene'"):
+        ProductionWorkflowConfig(
+            model_path="model.xml",
+            product="PRODUCT",
+            knockout_level="reaction",
+            transcript_separator=".",
+        )
+
+
 def test_amplification_loop_diagnostic_flags_declared_capacity_ratio(
     toy_model, monkeypatch
 ) -> None:

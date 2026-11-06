@@ -65,6 +65,7 @@ from cmm.features import (
     fseof,
     fvseof,
     gene_perturbations,
+    grouped_gene_perturbations,
     reaction_perturbations,
     optknock,
     production_envelope,
@@ -201,6 +202,11 @@ class ProductionWorkflowConfig:
     knockout_level: Literal["gene", "reaction"] = "gene"
     single_knockout_genes: tuple[str, ...] | None = None
     single_knockout_reactions: tuple[str, ...] | None = None
+    #: Gene level only. Recon-style models list each transcript as its own gene
+    #: (``<entrez>.<n>``) with isoforms joined by OR, so knocking out one transcript usually
+    #: blocks nothing. ``"."`` knocks out every transcript of a gene together; target ids
+    #: (and ``single_knockout_genes``) are then the gene ids before the separator.
+    transcript_separator: str | None = None
     top_single_knockouts_per_method: int = 5
     viability_fraction: float = 0.1
     product_improvement_tolerance: float = 1e-6
@@ -270,6 +276,13 @@ class ProductionWorkflowConfig:
             )
         if self.knockout_level == "reaction" and self.single_knockout_genes is not None:
             raise ValueError("single_knockout_genes requires knockout_level='gene'")
+        if self.transcript_separator is not None:
+            if not self.transcript_separator:
+                raise ValueError(
+                    "transcript_separator must be a non-empty string or null"
+                )
+            if self.knockout_level != "gene":
+                raise ValueError("transcript_separator requires knockout_level='gene'")
         if self.reference_method not in {"fba", "pfba"}:
             raise ValueError("reference_method must be 'fba' or 'pfba'")
         if self.envelope_points < 2:
@@ -866,7 +879,9 @@ def _run_production_target_discovery(
         working.solver = config.solver
     medium_application = _condition_model(working, config)
     biomass = _preflight_model(working, config)
-    gene_mapping = _gene_knockout_mapping(working)
+    gene_mapping = _gene_knockout_mapping(
+        working, transcript_separator=config.transcript_separator
+    )
     oxygen_uptake = _oxygen_exchange_uptake(working)
 
     _stage("preflight: done")
@@ -914,9 +929,17 @@ def _run_production_target_discovery(
                 reactions=config.single_knockout_reactions,
             )
         else:
-            enumerated = gene_perturbations(
-                working,
-                genes=config.single_knockout_genes,
+            enumerated = (
+                grouped_gene_perturbations(
+                    working,
+                    config.transcript_separator,
+                    config.single_knockout_genes,
+                )
+                if config.transcript_separator
+                else gene_perturbations(
+                    working,
+                    genes=config.single_knockout_genes,
+                )
             )
         if not enumerated:
             raise ProductionWorkflowError(
@@ -1503,18 +1526,52 @@ def _rank_single_knockout_screen(
     )
 
 
-def _gene_knockout_mapping(model: Model) -> GeneKnockoutMappingResult:
+def _knockout_units(
+    model: Model, transcript_separator: str | None
+) -> list[tuple[str, str, tuple[str, ...], list]]:
+    """(unit id, name, member gene ids, associated reactions) per knockout unit.
+
+    Without a separator every gene is its own unit. With one, transcripts sharing the part
+    before the separator are one unit, as the single-knockout screen enumerates them.
+    """
+
+    groups: dict[str, list] = {}
+    for gene in model.genes:
+        key = (
+            gene.id.split(transcript_separator, 1)[0]
+            if transcript_separator
+            else gene.id
+        )
+        groups.setdefault(key, []).append(gene)
+    units = []
+    for key in sorted(groups):
+        members = sorted(groups[key], key=lambda item: item.id)
+        names = sorted({str(gene.name or "").strip() for gene in members} - {""})
+        reactions = sorted(
+            {reaction for gene in members for reaction in gene.reactions},
+            key=lambda item: item.id,
+        )
+        units.append(
+            (key, ";".join(names), tuple(gene.id for gene in members), reactions)
+        )
+    return units
+
+
+def _gene_knockout_mapping(
+    model: Model, *, transcript_separator: str | None = None
+) -> GeneKnockoutMappingResult:
     records: list[GeneKnockoutMappingRecord] = []
     inert_genes = 0
-    for gene in sorted(model.genes, key=lambda item: item.id):
-        blocked = blocked_reactions_for_genes(model, (gene.id,))
+    for unit_id, unit_name, members, associated in _knockout_units(
+        model, transcript_separator
+    ):
+        blocked = blocked_reactions_for_genes(model, members)
         if not blocked:
             inert_genes += 1
-            associated = sorted(gene.reactions, key=lambda item: item.id)
             records.append(
                 GeneKnockoutMappingRecord(
-                    gene_id=gene.id,
-                    gene_name=str(gene.name or ""),
+                    gene_id=unit_id,
+                    gene_name=unit_name,
                     inert=True,
                     blocked_reaction=None,
                     reaction_name=(
@@ -1546,8 +1603,8 @@ def _gene_knockout_mapping(model: Model) -> GeneKnockoutMappingResult:
             reaction = model.reactions.get_by_id(reaction_id)
             records.append(
                 GeneKnockoutMappingRecord(
-                    gene_id=gene.id,
-                    gene_name=str(gene.name or ""),
+                    gene_id=unit_id,
+                    gene_name=unit_name,
                     inert=False,
                     blocked_reaction=reaction_id,
                     reaction_name=str(reaction.name or ""),
@@ -1561,6 +1618,8 @@ def _gene_knockout_mapping(model: Model) -> GeneKnockoutMappingResult:
         model,
         method="gene_knockout_mapping",
         n_genes=len(model.genes),
+        transcript_separator=transcript_separator,
+        n_knockout_units=len({record.gene_id for record in records}),
         n_inert_genes=inert_genes,
         n_mapping_rows=len(records),
         inert_definition="single_gene_deletion_blocks_no_reaction_under_model_gpr",
@@ -2468,6 +2527,19 @@ def _export_result(
         annotation_path = Path(result.config.gene_annotation_path)
         annotation = _read_gene_annotation(annotation_path)
         annotation_bytes = annotation_path.read_bytes()
+    if result.config.transcript_separator:
+        # A grouped target id is not a model gene, so the model's own names reach the export
+        # through its member transcripts. A user annotation still takes precedence.
+        annotation = {
+            **{
+                unit_id: name
+                for unit_id, name, _, _ in _knockout_units(
+                    conditioned_model, result.config.transcript_separator
+                )
+                if name
+            },
+            **annotation,
+        }
 
     writer = _ArtifactWriter(root)
 

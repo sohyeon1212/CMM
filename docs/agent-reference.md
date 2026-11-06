@@ -168,7 +168,8 @@ check: ValidationReport = validate_production_run(result.run_directory)
 
 `ProductionWorkflowConfig(model_path, product, output_dir=None, solver=None, substrate=None,
 biomass=None, medium=None, condition=None, reference_method="pfba", envelope_points=20,
-run_single_knockout=True, single_knockout_genes=None,
+run_single_knockout=True, knockout_level="gene", single_knockout_genes=None,
+single_knockout_reactions=None, transcript_separator=None,
 top_single_knockouts_per_method=5, viability_fraction=0.1,
 product_improvement_tolerance=1e-6, run_strain_design=True, max_knockouts=3,
 optknock_max_solutions=5, robustknock_max_solutions=8, design_min_growth=0.05,
@@ -180,7 +181,16 @@ scan_fraction_min=0.1, scan_fraction_max=0.9, fvseof_biomass_fraction=0.95,
 run_amplification_loop_diagnostic=True, amplification_loop_diagnostic_top_n=20,
 loopless_capacity_ratio_threshold=0.1, loopless_algorithm="fastSNP",
 validation=ValidationConfig(), overwrite=False,
-batch_processes=0, batch_threads_per_worker=6, room_work_limit=1000.0)`.
+batch_processes=0, batch_threads_per_worker=6, room_work_limit=1000.0,
+gene_annotation_path=None)`.
+
+`transcript_separator` (gene level only; default `None`) makes the single-knockout screen knock
+out every transcript of a gene together. Recon-style models list each transcript as its own
+gene (`<entrez>.<n>`) and join isoforms with OR, so one transcript's knockout usually blocks
+nothing and the gene is never screened; with `"."` the target ids, `single_knockout_genes` and
+`gene_knockout_mapping.csv` use the gene id before the separator. Leave it unset for models
+whose gene ids carry no transcript suffix (iML1515 and other microbial reconstructions).
+`gene_annotation_path` names an optional id → symbol CSV used for display names only.
 
 `ValidationConfig(enabled=True, max_flux_response_targets=30, flux_response_steps=20,
 flux_response_biomass_fraction=0.3, sampling_growth_fraction=0.1,
