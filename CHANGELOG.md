@@ -8,6 +8,16 @@ obsolete internal planning documents are removed from the public source tree.
 
 ### Added
 
+- **SC-02 explains its leading knockouts and labels genes by symbol.** A new stage,
+  `07_mechanism`, re-solves the MOMA QP behind each of the top `explain_top_n` candidates'
+  `mTS` (`cmm.features.knockout_mechanism`; the optimum is unique, so it is the scored state)
+  and records which changed reactions each knockout moves the desired way, which the wrong way,
+  and which reactions and subsystems it blocks. An optional `gene_annotation_path` labels
+  targets by symbol, falling back from Recon-style `<entrez>.<n>` ids to the Entrez prefix, and
+  is archived with the run. The report adds a labelled zoom of the leading candidates on the
+  best/worst plane, the iMAT pattern's agreement with the source classes, and each top gene's
+  own source class and differential expression. The validator warns when a recomputed `mTS`
+  disagrees with the ranking.
 - **A second canonical workflow: transformation-target discovery.** `cmm transformation-targets
   --config CONFIG` ranks the knockouts that move a source metabolic state toward a target one,
   from two gene-expression profiles, using the published MTA (Yizhak et al. 2013) or rMTA

@@ -458,6 +458,18 @@ MOMA-baseline target as its linear original, and both directions of the scale wa
 Regression tests distinguish a small relative change (`100 → 102`) from a two-unit log2 change
 and check the replicate-level t-test transform.
 
+**Knockout mechanism.** `cmm.features.knockout_mechanism` explains a ranked knockout by the
+MOMA QP solution its `mTS` was scored on: the objective is a strictly convex sum of squares over
+every reaction, so the optimum is unique and re-solving returns the scored state. The best- and
+worst-case MIQP optima need not be unique and are not explained. Each changed reaction is
+classed `desired`, `opposite` or `unchanged` by the transformation score's own sign rule, and
+`clears_epsilon` records MTA's threshold separately. The changed set is masked against the
+unperturbed model exactly as `revert_targets` masks it. `test_revert_mechanism.py` checks the
+reaction moves on a knockout with a known answer, that the recomputed `mTS` equals the ranked
+one, and that lethal and unknown targets keep their status. SC-02 runs it on the top
+`explain_top_n` candidates (default 20) and its validator warns when a recomputed `mTS`
+disagrees with the ranking.
+
 References: Shlomi T, Cabili MN, Herrgård MJ, Palsson BØ, Ruppin E (2008), *Nat Biotechnol*
 26(9):1003–1010, <https://doi.org/10.1038/nbt.1487> (iMAT); Griebel B, iMATpy 0.3.0 (MIT),
 <https://github.com/correctjellyfish/imatpy>; Yizhak K, Gabay O, Cohen H, Ruppin E (2013),

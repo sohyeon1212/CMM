@@ -227,17 +227,38 @@ the rank-comparison figure; an infeasible deletion is a recorded outcome, not a 
 across ε. The sweep re-ranks at each listed scalar ε, which is how to show that neither the
 derived per-reaction values nor a chosen number decided the answer.
 
+### 7 — Mechanism of the leading knockouts
+
+A ranking says which knockout moves the source furthest toward the target, not how. For the top
+`explain_top_n` candidates (default 20; `0` turns it off), `knockout_mechanism` re-solves the
+MOMA QP behind each `mTS` — its optimum is unique, so this is the state that was scored — and
+writes `07_mechanism/knockout_mechanism.csv` (per knockout: desired / opposite / unchanged moves
+over the changed set, the recomputed `mTS`, blocked reactions and their subsystems) and
+`07_mechanism/knockout_reaction_changes.csv` (per knockout and changed reaction: v_ref, the
+knockout flux, the move, whether it clears ε). Use it to judge whether a prediction is
+biologically plausible and what to measure; it is an explanation of the model's answer, not
+independent evidence for it.
+
+**Gene symbols.** Reconstructions such as Recon3D carry no gene names, so every label would be
+a bare id. `gene_annotation_path` names an optional CSV — id column first, then a `symbol`
+column (or the second column) — whose symbols label the ranking, the mechanism table and the
+figures. A `<entrez>.<transcript>` model id falls back to its Entrez prefix. The file is
+archived under `inputs/`; it changes labels only, never a score.
+
 ## Report
 
 `cmm transformation-targets` renders the report unless `--analysis-only` is given; the same
 page is available as `cmm.reporting.render_transformation_report(run_dir, highlight=…)`.
 
 Figures come from `render_transformation_figures.R`, the same checked-in R/ggplot2 path SC-01
-uses; the two workflows draw different panels, so each has its own script. Four panels are
+uses; the two workflows draw different panels, so each has its own script. Five panels are
 drawn — best- against worst-case score (rMTA), score against rank (split by Equation 9 branch
 when any candidate is amplified, with the largest tie block shaded), rank under `rTS` against
-rank under `mTS` (rMTA) or against the optional MOMA baseline (MTA), and rank against epsilon
-when a sweep was configured — each as PNG, SVG and PDF. A panel that cannot be drawn is recorded
+rank under `mTS` (rMTA) or against the optional MOMA baseline (MTA), rank against epsilon
+when a sweep was configured, and the leading 20 candidates on the best/worst plane, labelled
+(rMTA) — each as PNG, SVG and PDF. The page also states how well the iMAT pattern behind v_ref
+honours the source expression classes, the knocked-out gene's own source class and
+differential expression beside each top candidate, and the mechanism table of step 7. A panel that cannot be drawn is recorded
 in the figure manifest with its reason and the page says so; a panel the renderer never records
 fails validation. Two copies of the page sit beside them:
 

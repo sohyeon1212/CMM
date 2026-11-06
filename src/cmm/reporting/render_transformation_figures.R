@@ -716,6 +716,89 @@ render_panel(
   }
 )
 
+# --- Figure 5 — the leading candidates on the best/worst plane, labelled ------------------
+# Figure 1 shows the whole universe, where the leading candidates are a few points inside a
+# dense cloud. A reader choosing what to test needs those candidates by name and where each
+# sits relative to wTS = 0 (toward the target even in the worst case, or not).
+top_zoom_n <- 20L
+render_panel(
+  id = "fig05_top_candidates",
+  label = "Figure 5",
+  caption = paste(
+    "Best-case against worst-case score for the leading candidates, labelled. Below the",
+    "dashed line a knockout moves flux toward the target even in its worst case."
+  ),
+  alt = "Labelled scatter of best-case against worst-case score for the leading candidates",
+  roles = c("transformation_ranking"),
+  width_mm = 180,
+  height_mm = 110,
+  required = FALSE,
+  build = function() {
+    frame <- read_artifact_csv("transformation_ranking")
+    needed <- c("bTS", "mTS", "wTS")
+    if (!all(needed %in% names(frame))) {
+      stop("the ranking carries no bTS/mTS/wTS columns, which only rMTA reports")
+    }
+    for (col in c(needed, "score")) frame[[col]] <- as.numeric(frame[[col]])
+    frame$rank <- as.integer(frame$rank)
+    frame <- frame[stats::complete.cases(frame[, needed, drop = FALSE]) & is.finite(frame$score), , drop = FALSE]
+    if (nrow(frame) == 0L) stop("the ranking contains no scored candidate")
+    if (isTRUE(all.equal(frame$bTS, frame$wTS))) {
+      stop(paste(
+        "best-case and worst-case scores are identical, as they are under MTA;",
+        "the contrast is defined only for rMTA"
+      ))
+    }
+    top <- frame[frame$rank <= top_zoom_n, , drop = FALSE]
+    if (!is.null(highlight) && highlight %in% frame$target_id && !(highlight %in% top$target_id)) {
+      top <- rbind(top, frame[frame$target_id == highlight, , drop = FALSE])
+    }
+    top$amplified <- top$bTS > 0 & top$mTS > 0 & top$wTS < 0
+    top$label <- sprintf("%d %s", top$rank, display_label(top))
+    legend_labels <- c(`FALSE` = "Robust score = MOMA component", `TRUE` = "Amplified by the robust score")
+
+    plot <- ggplot2::ggplot(top, ggplot2::aes(x = .data$bTS, y = .data$wTS)) +
+      ggplot2::geom_hline(yintercept = 0, linewidth = 0.3, colour = grey, linetype = "dashed") +
+      ggplot2::geom_vline(xintercept = 0, linewidth = 0.3, colour = grey, linetype = "dashed") +
+      ggplot2::geom_point(
+        ggplot2::aes(colour = .data$amplified, shape = .data$amplified), size = 1.6
+      ) +
+      ggrepel::geom_text_repel(
+        mapping = ggplot2::aes(label = .data$label),
+        size = 2.2,
+        colour = "black",
+        family = font_family,
+        min.segment.length = 0,
+        segment.size = 0.25,
+        max.overlaps = Inf,
+        seed = 0L
+      ) +
+      ggplot2::scale_colour_manual(
+        values = c(`FALSE` = blue, `TRUE` = orange), labels = legend_labels,
+        breaks = c(FALSE, TRUE), drop = FALSE, name = NULL
+      ) +
+      ggplot2::scale_shape_manual(
+        values = c(`FALSE` = 16, `TRUE` = 17), labels = legend_labels,
+        breaks = c(FALSE, TRUE), drop = FALSE, name = NULL
+      ) +
+      ggplot2::labs(x = "Best-case score (bTS)", y = "Worst-case score (wTS)") +
+      theme_nature() +
+      ggplot2::theme(legend.position = "bottom")
+    caption <- sprintf(
+      paste(
+        "Best-case (bTS) against worst-case (wTS) score for the %d highest-ranked candidates,",
+        "each labelled with its rank. %d of them lie below the dashed line, where the knockout",
+        "moves flux toward the target state even in its worst case."
+      ),
+      nrow(top),
+      sum(top$wTS < 0)
+    )
+    attr(plot, "cmm_caption") <- caption
+    attr(plot, "cmm_alt") <- caption
+    plot
+  }
+)
+
 renderer_versions <- lapply(required_packages, function(package) {
   as.character(utils::packageVersion(package))
 })

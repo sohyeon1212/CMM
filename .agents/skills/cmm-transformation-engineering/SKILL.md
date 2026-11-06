@@ -161,6 +161,10 @@ report and are excluded from the rank comparison figure.
 - For rMTA, report `bTS`, `mTS` and `wTS` per candidate, not only `rTS`. Equation 9 branches on
   their signs and a reader cannot reconstruct which branch fired from the combined score.
 - Preserve infeasible and lethal knockouts as results with their status, not as omissions.
+- `07_mechanism/` explains the top `explain_top_n` knockouts (default 20) by the MOMA state
+  behind their `mTS`: which changed reactions move the desired way, which the wrong way, and
+  what each blocks. When the user supplies a gene id → symbol table, pass it as
+  `gene_annotation_path` so tables and figures carry symbols rather than bare ids.
 
 Describe predictions as *in silico* hypotheses requiring experimental validation. rMTA is a
 prioritisation robustified by its worst-case term, not a proof. Reactions ranked near the true

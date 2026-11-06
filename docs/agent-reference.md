@@ -772,6 +772,10 @@ revert_candidates(model, *, perturbation="gene", exclude_blocked=True,
 transformation_targets(model, source_state, target_state, *, method="moma",
                        perturbation="gene", targets=None, order=2, alpha=0.66)
 direction_from_states(source, target, *, reactions=None, tol=1e-6)
+knockout_mechanism(model, reference_state, direction, targets, *, perturbation="gene",
+                   epsilon=DEFAULT_EPSILON)  # -> KnockoutMechanism (QP)
+# .summary_frame(): per knockout — n_desired/n_opposite/n_unchanged, recomputed mTS,
+#   blocked_reactions, blocked_subsystems; .to_frame(): per knockout x changed reaction
 ```
 
 Both return a `TargetRanking`: `.sorted(descending=True)`, `.top(n)`, `.best()`,

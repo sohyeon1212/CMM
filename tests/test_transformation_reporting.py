@@ -282,6 +282,7 @@ def test_r_renderer_writes_vector_and_raster_for_every_panel(bundle: Path) -> No
         "fig02_transformation_ranking",
         "fig03_ranking_vs_moma",
         "fig04_epsilon_sensitivity",
+        "fig05_top_candidates",
     }
     assert manifest["renderer"]["engine"] == "R/ggplot2"
     # The renderer records what produced the artwork, so a figure can be traced to a script.
@@ -301,7 +302,7 @@ def test_r_renderer_writes_vector_and_raster_for_every_panel(bundle: Path) -> No
     # The two variants exist precisely because one of them survives being moved.
     assert "src='figures/fig01_component_scores.png'" in linked
     assert "src='figures/" not in standalone
-    assert standalone.count("data:image/png;base64,") == 4
+    assert standalone.count("data:image/png;base64,") == 5
 
 
 @pytest.mark.skipif(
@@ -365,6 +366,9 @@ def test_component_score_panel_is_skipped_with_a_reason_under_mta(bundle: Path) 
     panels = {figure["id"]: figure for figure in manifest["figures"]}
     assert panels["fig01_component_scores"]["status"] == "skipped"
     assert "rMTA" in panels["fig01_component_scores"]["reason"]
+    # The labelled zoom is the same contrast for the leading candidates, so it goes too.
+    assert panels["fig05_top_candidates"]["status"] == "skipped"
+    assert "rMTA" in panels["fig05_top_candidates"]["reason"]
     # The run is still complete: the required panel is the one every method can draw.
     assert panels["fig02_transformation_ranking"]["status"] == "rendered"
     assert validate_transformation_run(bundle).valid
@@ -685,3 +689,105 @@ def test_applied_medium_text_lists_uncontrolled_uptake():
     assert "outside the medium" not in _applied_medium_text(
         {**applied, "uncontrolled_uptake": []}
     )
+
+
+MECHANISM = """rank,target_id,target_name,status,mTS,n_changed_reactions,n_desired,n_opposite,n_unchanged,n_desired_clearing_epsilon,desired_l1,opposite_l1,steady_l1,n_blocked_reactions,blocked_reactions,blocked_subsystems
+1,PGI,Glucose-6-phosphate isomerase,optimal,0.1312,3,2,1,0,2,4.0,1.0,2.0,1,PGI,Glycolysis
+2,PFK,,infeasible,,,,,,,,,,1,PFK,Glycolysis
+"""
+CHANGES = """target_id,reaction_id,reaction_name,subsystem,desired_direction,v_ref,v_knockout,delta,epsilon,outcome,clears_epsilon
+PGI,PGI,,Glycolysis,-1,4.86,0.0,-4.86,0.01,desired,True
+PGI,GND,,Pentose phosphate pathway,1,0.0,1.0,1.0,0.01,desired,True
+PGI,PFK,,Glycolysis,1,7.48,6.48,-1.0,0.01,opposite,False
+"""
+
+
+@pytest.mark.skipif(
+    not _r_is_ready(), reason="Rscript renderer packages are not installed"
+)
+def test_report_explains_what_the_leading_knockouts_change(bundle: Path) -> None:
+    _add_artifact(
+        bundle, "knockout_mechanism", "07_mechanism/knockout_mechanism.csv", MECHANISM
+    )
+    _add_artifact(
+        bundle,
+        "knockout_reaction_changes",
+        "07_mechanism/knockout_reaction_changes.csv",
+        CHANGES,
+    )
+    report = render_transformation_report(bundle)
+    page = report.report_html.read_text(encoding="utf-8")
+    assert "What the leading knockouts change" in page
+    assert "2 / 1 / 0" in page  # desired / opposite / unchanged for PGI
+    assert "Glycolysis (1); Pentose phosphate pathway (1)" in page
+    assert "Knockouts whose MOMA solve was not optimal" in page
+    assert "fig05_top_candidates.png" in page
+    validation = validate_transformation_run(bundle)
+    assert validation.valid, validation.issues
+    assert not any("recomputes mTS" in warning for warning in validation.warnings)
+
+
+def test_validator_flags_a_mechanism_that_disagrees_with_the_ranked_mts(
+    bundle: Path,
+) -> None:
+    _add_artifact(
+        bundle,
+        "knockout_mechanism",
+        "07_mechanism/knockout_mechanism.csv",
+        MECHANISM.replace("optimal,0.1312", "optimal,0.9"),
+    )
+    validation = validate_transformation_run(bundle)
+    assert any("recomputes mTS 0.9 for PGI" in w for w in validation.warnings)
+
+
+def test_validator_rejects_a_mechanism_for_an_unranked_candidate(bundle: Path) -> None:
+    _add_artifact(
+        bundle,
+        "knockout_mechanism",
+        "07_mechanism/knockout_mechanism.csv",
+        MECHANISM.replace("2,PFK", "2,XYZ"),
+    )
+    validation = validate_transformation_run(bundle)
+    assert any("absent from the ranking" in issue for issue in validation.issues)
+
+
+@pytest.mark.skipif(
+    not _r_is_ready(), reason="Rscript renderer packages are not installed"
+)
+def test_report_states_reference_quality_and_the_target_genes_own_expression(
+    bundle: Path,
+) -> None:
+    provenance = json.loads((bundle / "00_provenance.json").read_text())
+    provenance["perturbation"] = "gene"
+    _rewrite_artifact(bundle, "00_provenance.json", json.dumps(provenance))
+    ranking = RANKING.replace("PGI,", "b4025,", 1)
+    _rewrite_artifact(bundle, "05_transformation/transformation_ranking.csv", ranking)
+    _add_artifact(
+        bundle,
+        "gene_expression_states",
+        "02_reference/gene_expression_states.csv",
+        "gene_id,state,high_fraction,low_fraction\nb4025,1,1.0,0.0\n",
+    )
+    summary = json.loads((bundle / "00_summary.json").read_text())
+    summary["direction_construction"].update(
+        {
+            "gene_states": {"n_genes": 5, "n_high": 2, "n_moderate": 2, "n_low": 1},
+            "imat": {
+                "status": "optimal",
+                "n_high_reactions": 8,
+                "n_low_reactions": 4,
+                "n_active_forward": 5,
+                "n_active_reverse": 1,
+                "n_inactive": 3,
+            },
+        }
+    )
+    _rewrite_artifact(bundle, "00_summary.json", json.dumps(summary))
+
+    page = render_transformation_report(bundle).report_html.read_text(encoding="utf-8")
+    assert "Reference state (v_ref)" in page
+    assert "2 / 2 / 1 of 5" in page
+    assert "<td>6 of 8</td>" in page and "<td>3 of 4</td>" in page
+    # The top table now says how the knocked-out gene itself is expressed.
+    assert "<th>source class</th>" in page
+    assert "<td>high</td>" in page and "<td>not measured</td>" in page

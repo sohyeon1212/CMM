@@ -242,6 +242,15 @@ class TransformationWorkflowConfig:
     validation: TransformationValidationConfig = field(
         default_factory=TransformationValidationConfig
     )
+    #: Optional CSV mapping gene ids to display symbols: first column the id, and a column
+    #: named ``symbol`` (or else the second column). Reconstructions such as Recon3D carry no
+    #: gene names, so without it every table and figure label is a bare id. A model gene id
+    #: with a transcript suffix (``<entrez>.<n>``) falls back to the part before the first dot.
+    #: Display only: it never changes a score.
+    gene_annotation_path: str | Path | None = None
+    #: How many top-ranked knockouts get a mechanism record (the MOMA flux state behind their
+    #: mTS: which changed reactions move the desired way, what each blocks). 0 turns it off.
+    explain_top_n: int = 20
     overwrite: bool = False
 
     def __post_init__(self) -> None:
@@ -249,6 +258,10 @@ class TransformationWorkflowConfig:
             object.__setattr__(self, name, Path(getattr(self, name)))
         if self.output_dir is not None:
             object.__setattr__(self, "output_dir", Path(self.output_dir))
+        if self.gene_annotation_path is not None:
+            object.__setattr__(
+                self, "gene_annotation_path", Path(self.gene_annotation_path)
+            )
         self.validate()
 
     def validate(self) -> None:
@@ -290,6 +303,8 @@ class TransformationWorkflowConfig:
             raise ValueError("reference_thinning must be at least 1")
         if self.parameter_k <= 0:
             raise ValueError("parameter_k must be positive")
+        if self.explain_top_n < 0:
+            raise ValueError("explain_top_n must be non-negative")
         self.direction.validate()
         self.candidates.validate(self.perturbation)
         self.validation.validate()
@@ -387,6 +402,10 @@ class TransformationWorkflowConfig:
             if isinstance(self.medium, Medium)
             else self.medium,
             "condition": self.condition.name if self.condition else None,
+            "gene_annotation": str(self.gene_annotation_path)
+            if self.gene_annotation_path is not None
+            else None,
+            "explain_top_n": self.explain_top_n,
             # Stated on every run so a reader never has to infer them.
             "reference_state_deviations": list(REFERENCE_STATE_DEVIATIONS),
         }
@@ -405,6 +424,7 @@ class TransformationWorkflowConfig:
             "source_expression_path",
             "target_expression_path",
             "output_dir",
+            "gene_annotation_path",
         ):
             raw = values.get(name)
             if raw is None:
@@ -460,6 +480,7 @@ _STAGE_DIRECTORIES = (
     "04_candidates",
     "05_transformation",
     "06_validation",
+    "07_mechanism",
     "model",
     "inputs",
     "scripts",
@@ -506,6 +527,10 @@ class TransformationWorkflowResult:
     ranking_structure: Mapping[str, object] = field(default_factory=dict)
     #: How much of the model the expression covers, and how open the uptake side is.
     data_coverage: Mapping[str, object] = field(default_factory=dict)
+    #: One row per explained top knockout: move counts, recomputed mTS, what it blocks.
+    mechanism_summary: tuple[Mapping[str, object], ...] = ()
+    #: One row per explained knockout and changed reaction: the flux move behind each count.
+    mechanism_changes: tuple[Mapping[str, object], ...] = ()
     run_directory: Path | None = None
 
     def summary(self) -> dict[str, object]:
@@ -526,7 +551,55 @@ class TransformationWorkflowResult:
             "direction_construction": dict(self.direction_summary),
             "ranking_structure": dict(self.ranking_structure),
             "data_coverage": dict(self.data_coverage),
+            "n_explained": len(self.mechanism_summary),
         }
+
+
+def _read_gene_annotation(path: Path) -> dict[str, str]:
+    """Read a gene id → display symbol table.
+
+    The id column stays text (``6487.10`` must not become ``6487.1``). The symbol column is the
+    one named ``symbol`` or, failing that, the second column. Blank symbols are dropped. The
+    values are display strings only and are escaped wherever they are rendered.
+    """
+
+    from cmm.omics.expression import read_gene_table
+
+    frame = read_gene_table(path)
+    if frame.shape[1] < 2:
+        raise TransformationWorkflowError(
+            f"{path.name} needs a gene id column and a symbol column"
+        )
+    lowered = {str(column).strip().lower(): column for column in frame.columns}
+    symbol_column = lowered.get("symbol", frame.columns[1])
+    id_column = frame.columns[0]
+    if symbol_column == id_column:
+        raise TransformationWorkflowError(
+            f"{path.name}: the symbol column must not be the id column"
+        )
+    names: dict[str, str] = {}
+    for gene_id, symbol in zip(frame[id_column], frame[symbol_column], strict=True):
+        key = str(gene_id).strip()
+        value = "" if symbol != symbol else str(symbol).strip()  # NaN-safe
+        if key and value and key not in names:
+            names[key] = value
+    return names
+
+
+def _annotated_name(target_id: str, names: Mapping[str, str]) -> str:
+    """The symbol for a (possibly ``;``-joined) gene target, or ``""`` when none is known.
+
+    An exact id wins; otherwise the part before the first ``.`` is tried, which is how
+    Recon-style ``<entrez>.<transcript>`` ids meet an Entrez-keyed table.
+    """
+
+    parts = []
+    for piece in target_id.split(";"):
+        piece = piece.strip()
+        name = names.get(piece) or names.get(piece.split(".", 1)[0], "")
+        if name:
+            parts.append(name)
+    return ";".join(parts)
 
 
 def _read_expression(path: Path, scale: str = "linear") -> "pd.DataFrame":
@@ -773,7 +846,23 @@ def run_transformation_target_discovery(
             else "every column after the gene id was read as one sample",
         )
 
+    annotation: dict[str, str] = {}
+    if config.gene_annotation_path is not None:
+        annotation = _read_gene_annotation(Path(config.gene_annotation_path))
     model_genes = {gene.id for gene in model.genes}
+    if config.gene_annotation_path is not None:
+        named_genes = sum(
+            1 for gene in model_genes if _annotated_name(gene, annotation)
+        )
+        check(
+            "gene_annotation_coverage",
+            named_genes > 0,
+            {"model_genes": len(model_genes), "named": named_genes},
+            f"{named_genes} of {len(model_genes)} model genes have a display symbol; the "
+            "rest are labelled by id"
+            if named_genes
+            else "the gene annotation names no model gene; check its identifier system",
+        )
     measured = set(source_expression.index) & set(target_expression.index)
     covered = model_genes & measured
     check(
@@ -935,13 +1024,21 @@ def run_transformation_target_discovery(
         # is returned in all four slots, so emitting them as columns would present one number
         # as three independent measurements that happen to agree.
         components = ("bTS", "mTS", "wTS") if config.method == "rmta" else ()
-        # The name column appears only when the model named something, so a reconstruction
-        # that names nothing writes exactly the table it wrote before.
-        named = any(target.target_name for target in ranking.targets)
+
+        # The name column appears only when something named a target, so a reconstruction
+        # that names nothing and a run without an annotation write the table they always did.
+        def display_name(target) -> str:
+            if annotation:
+                annotated = _annotated_name(target.target_id, annotation)
+                if annotated:
+                    return annotated
+            return target.target_name or ""
+
+        named = any(display_name(target) for target in ranking.targets)
         rows = tuple(
             {
                 "target_id": target.target_id,
-                **({"target_name": target.target_name} if named else {}),
+                **({"target_name": display_name(target)} if named else {}),
                 "score": float(target.score),
                 "rank": index + 1,
                 **{
@@ -952,6 +1049,43 @@ def run_transformation_target_discovery(
             }
             for index, target in enumerate(ranking.sorted().targets)
         )
+
+        # --- 07_mechanism (solved here, while the model still carries the condition) ------
+        mechanism_summary: tuple[Mapping[str, object], ...] = ()
+        mechanism_changes: tuple[Mapping[str, object], ...] = ()
+        explained = [
+            row
+            for row in rows
+            if math.isfinite(float(row["score"]))  # type: ignore[arg-type]
+        ][: config.explain_top_n]
+        if explained:
+            from cmm.features.revert_mechanism import knockout_mechanism
+
+            mechanism = knockout_mechanism(
+                model,
+                reference,
+                direction,
+                [str(row["target_id"]) for row in explained],
+                perturbation=config.perturbation,
+                epsilon=epsilon,
+            )
+            labels = {
+                str(row["target_id"]): (row["rank"], row.get("target_name", ""))
+                for row in explained
+            }
+            mechanism_summary = tuple(
+                {
+                    "rank": labels[str(item["target_id"])][0],
+                    **(
+                        {"target_name": labels[str(item["target_id"])][1]}
+                        if named
+                        else {}
+                    ),
+                    **item,
+                }
+                for item in mechanism.summary_frame().to_dict("records")
+            )
+            mechanism_changes = tuple(mechanism.to_frame().to_dict("records"))
 
         # --- 06_validation --------------------------------------------------------------
         baseline: tuple[Mapping[str, object], ...] = ()
@@ -999,6 +1133,8 @@ def run_transformation_target_discovery(
         score_decomposition=decomposition,
         ranking_structure=structure,
         data_coverage=data_coverage,
+        mechanism_summary=mechanism_summary,
+        mechanism_changes=mechanism_changes,
         run_directory=None,
     )
     if config.output_dir is None:
@@ -1323,6 +1459,11 @@ def _export(
             ("target_expression_path", config.target_expression_path),
         )
     }
+    annotation_bytes = (
+        Path(config.gene_annotation_path).read_bytes()
+        if config.gene_annotation_path is not None
+        else None
+    )
     if config.overwrite:
         # Remove only workflow-owned paths, so permission to rerun is never permission to
         # delete a user's unrelated files that happen to share the directory.
@@ -1366,6 +1507,18 @@ def _export(
             relative,
             stage="inputs",
             role=role,
+            media_type="text/tab-separated-values" if suffix == ".tsv" else "text/csv",
+        )
+    # Archived beside the expression so a relocated bundle still labels its own figures.
+    if annotation_bytes is not None:
+        suffix = Path(str(config.gene_annotation_path)).suffix or ".csv"
+        relative = f"inputs/gene_annotation{suffix}"
+        (root / relative).write_bytes(annotation_bytes)
+        expression_relatives["gene_annotation_path"] = relative
+        writer.existing(
+            relative,
+            stage="inputs",
+            role="gene_annotation",
             media_type="text/tab-separated-values" if suffix == ".tsv" else "text/csv",
         )
 
@@ -1515,6 +1668,36 @@ def _export(
         reason=None
         if result.epsilon_sweep
         else "no epsilon_sweep values were configured",
+    )
+
+    mechanism_reason = (
+        "explain_top_n is 0"
+        if config.explain_top_n == 0
+        else "no candidate has a finite score to explain"
+    )
+    writer.csv(
+        "07_mechanism/knockout_mechanism.csv",
+        pd.DataFrame(list(result.mechanism_summary)),
+        stage="07_mechanism",
+        role="knockout_mechanism",
+        method="moma_qp",
+        status="complete" if result.mechanism_summary else "skipped",
+        reason=None if result.mechanism_summary else mechanism_reason,
+    )
+    writer.csv(
+        "07_mechanism/knockout_reaction_changes.csv",
+        pd.DataFrame(list(result.mechanism_changes)),
+        stage="07_mechanism",
+        role="knockout_reaction_changes",
+        method="moma_qp",
+        status="complete" if result.mechanism_changes else "skipped",
+        reason=None
+        if result.mechanism_changes
+        else (
+            mechanism_reason
+            if not result.mechanism_summary
+            else "no explained knockout had an optimal MOMA solve"
+        ),
     )
 
     exported_config = cast(dict[str, object], _jsonable(asdict(config)))

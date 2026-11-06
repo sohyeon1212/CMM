@@ -45,6 +45,11 @@ from cmm.features.response import (
 )
 from cmm.features.revert import revert_candidates, revert_targets, tie_structure
 from cmm.features.revert_epsilon import ReactionEpsilons, epsilons_from_samples
+from cmm.features.revert_mechanism import (
+    KnockoutExplanation,
+    KnockoutMechanism,
+    knockout_mechanism,
+)
 from cmm.features.revert_reference import (
     IMATReferenceError,
     IMATReferenceState,
@@ -128,6 +133,8 @@ __all__ = [
     "PerturbationList",
     "ProductionEnvelope",
     "ProductionYield",
+    "KnockoutExplanation",
+    "KnockoutMechanism",
     "ReactionEpsilons",
     "IMATReferenceError",
     "IMATReferenceState",
@@ -141,6 +148,7 @@ __all__ = [
     "blocked_reactions_for_genes",
     "direction_from_states",
     "epsilons_from_samples",
+    "knockout_mechanism",
     "imat_reference_state",
     "flux_response",
     "fseof",

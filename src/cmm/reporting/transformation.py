@@ -120,6 +120,7 @@ _FIGURE_ORDER = (
     "fig02_transformation_ranking",
     "fig03_ranking_vs_moma",
     "fig04_epsilon_sensitivity",
+    "fig05_top_candidates",
 )
 #: Only the ranking is unconditional. The component-score panel needs the best/worst contrast
 #: that only rMTA computes; the rank comparison needs rMTA's score decomposition or the optional
@@ -268,6 +269,25 @@ def _load_bundle(root: Path) -> dict[str, Any]:
         _read_csv(preflight_path) if preflight_path and preflight_path.is_file() else []
     )
 
+    def complete_rows(role: str) -> list[dict[str, Any]]:
+        """A stage's table, or nothing when the stage was switched off or never written."""
+
+        entry = artifacts.get(role) or {}
+        path = path_for(role)
+        if entry.get("status") != "complete" or path is None or not path.is_file():
+            return []
+        return _read_csv(path)
+
+    mechanism = complete_rows("knockout_mechanism")
+    changes = complete_rows("knockout_reaction_changes")
+    gene_de = {
+        str(row["gene_id"]): row
+        for row in complete_rows("gene_differential_expression")
+    }
+    gene_states = {
+        str(row["gene_id"]): row for row in complete_rows("gene_expression_states")
+    }
+
     return {
         "manifest": manifest,
         "artifacts": artifacts,
@@ -278,6 +298,10 @@ def _load_bundle(root: Path) -> dict[str, Any]:
         "sweep": sweep,
         "decomposition": decomposition,
         "preflight": preflight,
+        "mechanism": mechanism,
+        "changes": changes,
+        "gene_de": gene_de,
+        "gene_states": gene_states,
     }
 
 
@@ -311,6 +335,10 @@ def render_transformation_report(
         sweep=bundle["sweep"],
         decomposition=bundle["decomposition"],
         preflight=bundle["preflight"],
+        mechanism=bundle["mechanism"],
+        changes=bundle["changes"],
+        gene_de=bundle["gene_de"],
+        gene_states=bundle["gene_states"],
         figure_manifest=figure_manifest,
         highlight=highlight,
         top_n=top_n,
@@ -329,6 +357,10 @@ def render_transformation_report(
         sweep=bundle["sweep"],
         decomposition=bundle["decomposition"],
         preflight=bundle["preflight"],
+        mechanism=bundle["mechanism"],
+        changes=bundle["changes"],
+        gene_de=bundle["gene_de"],
+        gene_states=bundle["gene_states"],
         figure_manifest=figure_manifest,
         highlight=highlight,
         top_n=top_n,
@@ -470,6 +502,85 @@ def _applied_medium_text(applied: Mapping[str, Any]) -> str:
     return text
 
 
+_STATE_LABELS = {"1": "high", "0": "moderate", "-1": "low"}
+
+
+def _expression_columns(
+    row: Mapping[str, Any],
+    gene_de: Mapping[str, Mapping[str, Any]],
+    gene_states: Mapping[str, Mapping[str, Any]],
+) -> dict[str, object]:
+    """What the expression data say about the knocked-out gene itself.
+
+    Whether the gene is expressed in the source decides whether a knockout is a meaningful
+    experiment, and a top target need not be differentially expressed itself; both are read
+    straight from the run's own tables.
+    """
+
+    gene = str(row.get("target_id"))
+    state = gene_states.get(gene)
+    de = gene_de.get(gene)
+    return {
+        "source_class": _STATE_LABELS.get(str(state.get("state")).strip(), "?")
+        if state is not None
+        else "not measured",
+        "log2FC": de.get("log2_fold_change") if de is not None else "—",
+        "P": de.get("p_value") if de is not None else "—",
+    }
+
+
+def _subsystem_text(rows: Sequence[Mapping[str, Any]], limit: int = 3) -> str:
+    """The subsystems with the most rows, as ``name (count)``, most frequent first."""
+
+    from collections import Counter
+
+    counts = Counter(str(row.get("subsystem") or "unassigned") for row in rows)
+    if not counts:
+        return "—"
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    shown = [f"{name} ({count})" for name, count in ordered[:limit]]
+    if len(ordered) > limit:
+        shown.append(f"+{len(ordered) - limit} more")
+    return "; ".join(shown)
+
+
+def _reference_quality_rows(direction: Mapping[str, Any]) -> list[dict[str, object]]:
+    """How well the iMAT pattern behind v_ref honours the source expression classes."""
+
+    states = direction.get("gene_states") or {}
+    imat = direction.get("imat") or {}
+    rows: list[dict[str, object]] = []
+    if states:
+        rows.append(
+            {
+                "quantity": "source genes classed high / moderate / low",
+                "value": f"{states.get('n_high')} / {states.get('n_moderate')} / "
+                f"{states.get('n_low')} of {states.get('n_genes')}",
+            }
+        )
+    if imat:
+        high = imat.get("n_high_reactions")
+        low = imat.get("n_low_reactions")
+        active = (imat.get("n_active_forward") or 0) + (
+            imat.get("n_active_reverse") or 0
+        )
+        inactive = imat.get("n_inactive")
+        rows.extend(
+            [
+                {
+                    "quantity": "high-expression reactions iMAT made active",
+                    "value": f"{active} of {high}",
+                },
+                {
+                    "quantity": "low-expression reactions iMAT kept inactive",
+                    "value": f"{inactive} of {low}",
+                },
+                {"quantity": "iMAT solve status", "value": imat.get("status")},
+            ]
+        )
+    return rows
+
+
 def _compose(
     *,
     root: Path,
@@ -483,6 +594,10 @@ def _compose(
     highlight: str | None,
     decomposition: Sequence[Mapping[str, Any]] = (),
     preflight: Sequence[Mapping[str, Any]] = (),
+    mechanism: Sequence[Mapping[str, Any]] = (),
+    changes: Sequence[Mapping[str, Any]] = (),
+    gene_de: Mapping[str, Mapping[str, Any]] | None = None,
+    gene_states: Mapping[str, Mapping[str, Any]] | None = None,
     top_n: int,
     standalone: bool,
 ) -> str:
@@ -768,6 +883,17 @@ def _compose(
             "reaction_epsilons",
         )
     )
+    quality = _reference_quality_rows(direction)
+    if quality:
+        parts.append("<h3>Reference state (v_ref)</h3>")
+        parts.append(
+            "<p>Every score is a move away from v_ref, so the ranking is only as good as the "
+            "reference. These counts show how much of the source expression the iMAT pattern "
+            "behind it honours; a pattern that matches few of the classed reactions leaves "
+            "v_ref resting on the network rather than on the data.</p>"
+        )
+        parts.append(_table(quality, ["quantity", "value"]))
+        parts.append(sources("gene_expression_states", "imat_reference_pattern"))
     parts.append("<h3>Candidate universe</h3>")
     parts.append(
         _table(
@@ -803,7 +929,25 @@ def _compose(
     for optional in ("bTS", "mTS", "wTS"):
         if optional in ranking[0]:
             columns.append(optional)
-    parts.append(_table(list(ranking)[:top_n], columns, mark=highlight))
+    top_rows: list[Mapping[str, Any]] = list(ranking)[:top_n]
+    gene_level = provenance.get("perturbation") == "gene" and bool(
+        gene_de or gene_states
+    )
+    if gene_level:
+        top_rows = [
+            {**row, **_expression_columns(row, gene_de or {}, gene_states or {})}
+            for row in top_rows
+        ]
+        columns += ["source_class", "log2FC", "P"]
+    parts.append(_table(top_rows, columns, mark=highlight))
+    if gene_level:
+        parts.append(
+            "<p class='meta'>source class is the knocked-out gene's own iMAT class in the "
+            "source; log2FC (target − source) and P are its own differential expression. A "
+            "knockout of a gene the source barely expresses is a weak experiment whatever its "
+            "score, and a high-ranking gene need not be differentially expressed itself: the "
+            "ranking rests on what its loss does to the network.</p>"
+        )
     if "bTS" in ranking[0]:
         parts.append(
             "<p class='meta'>rMTA's Equation 9 branches on the signs of bTS, mTS and wTS, so "
@@ -832,6 +976,9 @@ def _compose(
             "tie block is alphabetical past the block&rsquo;s first member.</p>"
         )
     parts.append(sources("transformation_ranking"))
+    if "bTS" in ranking[0]:
+        parts.append("<h3>Leading candidates</h3>")
+        parts.append(panel("fig05_top_candidates"))
     if decomposition:
         parts.append("<h3>Amplified candidates</h3>")
         if amplified_rows:
@@ -852,6 +999,58 @@ def _compose(
                 "candidate&rsquo;s MOMA component and the ranking equals the mTS ranking.</p>"
             )
         parts.append(sources("score_decomposition"))
+
+    if mechanism:
+        by_target: dict[str, list[Mapping[str, Any]]] = {}
+        for change in changes:
+            by_target.setdefault(str(change.get("target_id")), []).append(change)
+        named = any(str(row.get("target_name") or "").strip() for row in mechanism)
+        mechanism_rows = []
+        for row in mechanism:
+            moved = by_target.get(str(row.get("target_id")), [])
+            mechanism_rows.append(
+                {
+                    **row,
+                    "desired / opposite / unchanged": f"{row.get('n_desired')} / "
+                    f"{row.get('n_opposite')} / {row.get('n_unchanged')}",
+                    "subsystems moved the desired way": _subsystem_text(
+                        [c for c in moved if c.get("outcome") == "desired"]
+                    ),
+                    "subsystems moved the wrong way": _subsystem_text(
+                        [c for c in moved if c.get("outcome") == "opposite"]
+                    ),
+                    "blocked subsystems": row.get("blocked_subsystems") or "—",
+                }
+            )
+        parts.append("<h3>What the leading knockouts change</h3>")
+        parts.append(
+            f"<p>For the {len(mechanism)} highest-ranked candidates, the MOMA flux state "
+            "behind each one&rsquo;s mTS was solved again and compared with v_ref over the "
+            f"{e(str(direction.get('n_reactions_changed')))} changed reactions. MOMA&rsquo;s "
+            "optimum is unique, so this is the state the score was computed on. A reaction "
+            "counts as moved the desired way when its flux shifts in the direction the "
+            "expression asked for — the transformation score&rsquo;s own rule; how many of "
+            "those shifts also clear epsilon is in the CSV. Blocked subsystems are where the "
+            "knockout itself acts.</p>"
+        )
+        mechanism_columns = ["rank", "target_id"]
+        if named:
+            mechanism_columns.append("target_name")
+        mechanism_columns += [
+            "desired / opposite / unchanged",
+            "subsystems moved the desired way",
+            "subsystems moved the wrong way",
+            "blocked subsystems",
+        ]
+        parts.append(_table(mechanism_rows, mechanism_columns, mark=highlight))
+        unsolved = [row for row in mechanism if row.get("status") != "optimal"]
+        if unsolved:
+            parts.append(
+                "<p class='meta'>Knockouts whose MOMA solve was not optimal keep their status "
+                "and have no reaction rows.</p>"
+            )
+            parts.append(_table(unsolved, ["target_id", "status"]))
+        parts.append(sources("knockout_mechanism", "knockout_reaction_changes"))
 
     parts.append("<h3>Score decomposition</h3>")
     parts.append(panel("fig03_ranking_vs_moma"))
@@ -1041,6 +1240,17 @@ _OPTIONAL_ROLES: Mapping[str, tuple[str, ...]] = {
     "gene_expression_states": ("gene_id", "state"),
     "imat_reference_pattern": ("reaction_id", "expression_state", "activity", "v_ref"),
     "reaction_epsilons": ("reaction_id", "epsilon"),
+    "gene_annotation": (),
+    "knockout_mechanism": (
+        "rank",
+        "target_id",
+        "status",
+        "mTS",
+        "n_desired",
+        "n_opposite",
+        "blocked_reactions",
+    ),
+    "knockout_reaction_changes": ("target_id", "reaction_id", "outcome", "delta"),
 }
 
 
@@ -1189,11 +1399,15 @@ def _check_reproduction_inputs(
         if not isinstance(config, Mapping):
             issues.append(f"{role} must contain a JSON object")
             continue
-        for field, input_role in (
+        inputs = [
             ("model_path", "model"),
             ("source_expression_path", "source_expression"),
             ("target_expression_path", "target_expression"),
-        ):
+        ]
+        # Optional, but once a run names one it is an input like any other.
+        if config.get("gene_annotation_path") is not None:
+            inputs.append(("gene_annotation_path", "gene_annotation"))
+        for field, input_role in inputs:
             value = config.get(field)
             if (
                 not isinstance(value, str)
@@ -1292,6 +1506,34 @@ def _check_ranking_invariants(
             issues.append(
                 f"score_decomposition holds {len(extra)} candidate(s) absent from the ranking"
             )
+
+    mechanism = csv_rows.get("knockout_mechanism")
+    if mechanism:
+        by_id = {str(row["target_id"]): row for row in ranking}
+        extra = {str(row["target_id"]) for row in mechanism} - set(by_id)
+        if extra:
+            issues.append(
+                f"knockout_mechanism explains {len(extra)} candidate(s) absent from the ranking"
+            )
+        # The mechanism re-solves the MOMA QP behind mTS. Its optimum is unique, so a
+        # recomputed mTS that disagrees means the explanation describes another state.
+        for row in mechanism:
+            ranked_row = by_id.get(str(row["target_id"]))
+            if ranked_row is None or "mTS" not in ranked_row:
+                continue
+            try:
+                ranked_mts = float(ranked_row["mTS"])
+                explained_mts = float(row["mTS"])
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(ranked_mts) and math.isfinite(explained_mts)):
+                continue
+            if abs(ranked_mts - explained_mts) > 1e-6 * max(1.0, abs(ranked_mts)):
+                warnings.append(
+                    f"knockout_mechanism recomputes mTS {explained_mts:.6g} for "
+                    f"{row['target_id']}, the ranking holds {ranked_mts:.6g}; its reaction "
+                    "moves may describe a different MOMA state"
+                )
 
 
 def _check_report_outputs(

@@ -1286,3 +1286,74 @@ def test_a_log2_file_gives_the_reference_and_moma_baseline_of_its_linear_origina
     by_id = {row["target_id"]: row["moma_score"] for row in linear.moma_baseline}
     for row in logged.moma_baseline:
         assert row["moma_score"] == pytest.approx(by_id[row["target_id"]], abs=1e-6)
+
+
+@pytest.mark.requires_miqp
+def test_bundle_names_targets_from_the_annotation_and_explains_the_top(
+    small_transformation_config, tmp_path
+):
+    from cmm.reporting import validate_transformation_run
+
+    annotation = tmp_path / "symbols.csv"
+    # Text ids: the table keys g2 exactly; a Recon-style id would fall back to its prefix.
+    annotation.write_text("gene_id,symbol\ng2,GENE2\n", encoding="utf-8")
+    config = replace(
+        small_transformation_config, gene_annotation_path=annotation, method="rmta"
+    )
+    result = run_transformation_target_discovery(config)
+    root = result.run_directory
+
+    ranking = pd.read_csv(root / "05_transformation/transformation_ranking.csv")
+    assert list(ranking["target_name"]) == ["GENE2"]
+    manifest = json.loads((root / "00_manifest.json").read_text())
+    assert (
+        manifest["artifacts"]["gene_annotation"]["path"] == "inputs/gene_annotation.csv"
+    )
+    assert manifest["artifacts"]["knockout_mechanism"]["status"] == "complete"
+    exported = json.loads((root / "00_config.json").read_text())
+    assert exported["gene_annotation_path"] == "inputs/gene_annotation.csv"
+
+    mechanism = pd.read_csv(root / "07_mechanism/knockout_mechanism.csv")
+    assert list(mechanism["target_id"]) == ["g2"]
+    assert list(mechanism["target_name"]) == ["GENE2"]
+    # The explanation re-solves the very MOMA state the ranking scored.
+    assert mechanism.loc[0, "mTS"] == pytest.approx(ranking.loc[0, "mTS"], abs=1e-6)
+    preflight = pd.read_csv(root / "01_preflight/preflight.csv")
+    assert "gene_annotation_coverage" in set(preflight["check"])
+    assert validate_transformation_run(root).valid
+
+
+@pytest.mark.requires_miqp
+def test_explain_top_n_zero_skips_the_mechanism_with_a_reason(
+    small_transformation_config,
+):
+    from cmm.reporting import validate_transformation_run
+
+    config = replace(small_transformation_config, explain_top_n=0)
+    root = run_transformation_target_discovery(config).run_directory
+    entry = json.loads((root / "00_manifest.json").read_text())["artifacts"][
+        "knockout_mechanism"
+    ]
+    assert entry["status"] == "skipped"
+    assert entry["reason"] == "explain_top_n is 0"
+    assert validate_transformation_run(root).valid
+
+
+def test_explain_top_n_must_be_non_negative():
+    with pytest.raises(ValueError, match="explain_top_n"):
+        _config(explain_top_n=-1)
+
+
+def test_gene_annotation_path_resolves_against_the_config_file(tmp_path):
+    payload = {
+        "model_path": "model.xml",
+        "source_expression_path": "s.csv",
+        "target_expression_path": "t.csv",
+        "imat_delta": 0.7,
+        "gene_annotation_path": "symbols.csv",
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    config = TransformationWorkflowConfig.from_json(path)
+    assert config.gene_annotation_path == (tmp_path / "symbols.csv").resolve()
+    assert config.to_provenance()["gene_annotation"] == str(tmp_path / "symbols.csv")
