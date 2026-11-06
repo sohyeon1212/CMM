@@ -437,8 +437,12 @@ def _room(
 
     if work_limit is not None and not linear:
         return _room_with_work_limit(
-            model, reference_solution, delta=delta, epsilon=epsilon,
-            work_limit=work_limit, metadata=metadata,
+            model,
+            reference_solution,
+            delta=delta,
+            epsilon=epsilon,
+            work_limit=work_limit,
+            metadata=metadata,
         )
 
     try:
@@ -470,7 +474,11 @@ def _room_with_work_limit(
     """ROOM via ``add_room`` + direct Gurobi ``optimize`` so WorkLimit is honoured."""
 
     _cobra_add_room(
-        model, solution=reference_solution, linear=False, delta=delta, epsilon=epsilon,
+        model,
+        solution=reference_solution,
+        linear=False,
+        delta=delta,
+        epsilon=epsilon,
     )
     grb = model.solver.problem
     grb.Params.WorkLimit = work_limit
@@ -491,9 +499,11 @@ def _room_with_work_limit(
             try:
                 fluxes[rxn.id] = float(rxn.flux)
             except Exception:
-                fluxes[rxn.id] = float(
-                    model.solver.problem.getVarByName(rxn.id).X
-                ) if model.solver.problem.getVarByName(rxn.id) is not None else 0.0
+                fluxes[rxn.id] = (
+                    float(model.solver.problem.getVarByName(rxn.id).X)
+                    if model.solver.problem.getVarByName(rxn.id) is not None
+                    else 0.0
+                )
         return ComparisonResult(
             method="room",
             status="work_limit",
@@ -502,7 +512,11 @@ def _room_with_work_limit(
             distance_kind=kind,
             n_changed_reactions=changed,
             fluxes=fluxes,
-            metadata={**metadata, "room_work_limit": work_limit, "room_mip_gap": mip_gap},
+            metadata={
+                **metadata,
+                "room_work_limit": work_limit,
+                "room_mip_gap": mip_gap,
+            },
             mip_gap=mip_gap,
         )
 
@@ -1008,8 +1022,10 @@ def batch_comparison(
         import tempfile
         import cobra
 
-        solver_name = str(model.solver.interface.__name__).split(".")[-1].replace(
-            "_interface", ""
+        solver_name = (
+            str(model.solver.interface.__name__)
+            .split(".")[-1]
+            .replace("_interface", "")
         )
         tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False)
         try:
