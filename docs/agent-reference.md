@@ -766,14 +766,18 @@ imat_reference_state(model, gene_states, *, epsilon=1.0, n_samples=2000, thinnin
 epsilons_from_samples(samples, reactions, *, p_value=0.05, minimum=1e-3)  # -> ReactionEpsilons
 revert_candidates(model, *, perturbation="gene", exclude_blocked=True,
                   exclude_essential=True, essential_growth_fraction=0.20,
-                  collapse_coupled_sets=None, explicit=None)  # -> (ids, construction record)
+                  collapse_coupled_sets=None, explicit=None,
+                  transcript_separator=None)  # -> (ids, construction record)
+# transcript_separator="." knocks out every <entrez>.<n> transcript of a gene together; pass the
+# same value to revert_targets / transformation_targets / knockout_mechanism
 # record["represented_genes"] (gene level) / ["represented_reactions"] (reaction level):
 # representative -> every id with the same knockout effect, itself included
 transformation_targets(model, source_state, target_state, *, method="moma",
-                       perturbation="gene", targets=None, order=2, alpha=0.66)
+                       perturbation="gene", targets=None, order=2, alpha=0.66,
+                       transcript_separator=None)
 direction_from_states(source, target, *, reactions=None, tol=1e-6)
 knockout_mechanism(model, reference_state, direction, targets, *, perturbation="gene",
-                   epsilon=DEFAULT_EPSILON)  # -> KnockoutMechanism (QP)
+                   epsilon=DEFAULT_EPSILON, transcript_separator=None)  # -> KnockoutMechanism (QP)
 # .summary_frame(): per knockout — n_desired/n_opposite/n_unchanged, recomputed mTS,
 #   blocked_reactions, blocked_subsystems; .to_frame(): per knockout x changed reaction
 ```

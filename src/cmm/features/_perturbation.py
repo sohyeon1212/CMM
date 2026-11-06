@@ -209,6 +209,45 @@ def grouped_gene_perturbations(
     return PerturbationList(perturbations, inert_dropped=dropped)
 
 
+def knockout_perturbations(
+    model: Model,
+    perturbation: PerturbationKind,
+    targets: Iterable[str] | None = None,
+    *,
+    transcript_separator: str | None = None,
+) -> PerturbationList:
+    """The knockout unit a screen enumerates: reactions, genes, or genes grouped by transcript.
+
+    Reconstructions such as Recon1 and Recon3D model each transcript as its own gene
+    (``<entrez>.<n>``) and join isoforms with OR, so knocking out one transcript usually blocks
+    nothing. ``transcript_separator`` groups them into one joint knockout per gene, which is how
+    the published gene-level MTA/rMTA screens count genes. Target ids are then the group ids.
+    """
+
+    if perturbation == "reaction":
+        if transcript_separator:
+            raise ValueError("transcript_separator applies to gene knockouts only")
+        return reaction_perturbations(model, targets)
+    if transcript_separator:
+        return grouped_gene_perturbations(model, transcript_separator, targets)
+    return gene_perturbations(model, targets)
+
+
+def knockout_ids(
+    model: Model,
+    perturbation: PerturbationKind,
+    *,
+    transcript_separator: str | None = None,
+) -> set[str]:
+    """Every id :func:`knockout_perturbations` accepts as a target under these settings."""
+
+    if perturbation == "reaction":
+        return {reaction.id for reaction in model.reactions}
+    if transcript_separator:
+        return {gene.id.split(transcript_separator, 1)[0] for gene in model.genes}
+    return {gene.id for gene in model.genes}
+
+
 def reaction_perturbations(
     model: Model,
     reactions: Iterable[str] | None = None,

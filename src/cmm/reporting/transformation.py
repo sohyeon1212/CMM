@@ -505,27 +505,51 @@ def _applied_medium_text(applied: Mapping[str, Any]) -> str:
 _STATE_LABELS = {"1": "high", "0": "moderate", "-1": "low"}
 
 
+def _members(
+    target: str, table: Mapping[str, Mapping[str, Any]], separator: str | None
+) -> list[Mapping[str, Any]]:
+    """The rows behind one knockout: the gene itself, or every transcript of a grouped gene."""
+
+    if target in table:
+        return [table[target]]
+    if not separator:
+        return []
+    return [row for key, row in table.items() if key.split(separator, 1)[0] == target]
+
+
+def _agreed(values: Sequence[object], disagree: str) -> object:
+    """One value when every member carries it, otherwise a word saying they differ."""
+
+    distinct = {str(value).strip() for value in values}
+    if not distinct:
+        return None
+    return values[0] if len(distinct) == 1 else disagree
+
+
 def _expression_columns(
     row: Mapping[str, Any],
     gene_de: Mapping[str, Mapping[str, Any]],
     gene_states: Mapping[str, Mapping[str, Any]],
+    separator: str | None = None,
 ) -> dict[str, object]:
     """What the expression data say about the knocked-out gene itself.
 
     Whether the gene is expressed in the source decides whether a knockout is a meaningful
     experiment, and a top target need not be differentially expressed itself; both are read
-    straight from the run's own tables.
+    straight from the run's own tables. A gene knocked out as a group of transcripts reads its
+    transcripts' rows, which agree whenever they were measured as one gene.
     """
 
     gene = str(row.get("target_id"))
-    state = gene_states.get(gene)
-    de = gene_de.get(gene)
+    states = _members(gene, gene_states, separator)
+    de = _members(gene, gene_de, separator)
+    state = _agreed([member.get("state") for member in states], "mixed")
     return {
-        "source_class": _STATE_LABELS.get(str(state.get("state")).strip(), "?")
-        if state is not None
-        else "not measured",
-        "log2FC": de.get("log2_fold_change") if de is not None else "—",
-        "P": de.get("p_value") if de is not None else "—",
+        "source_class": "not measured"
+        if state is None
+        else _STATE_LABELS.get(str(state).strip(), str(state)),
+        "log2FC": _agreed([m.get("log2_fold_change") for m in de], "varies") or "—",
+        "P": _agreed([m.get("p_value") for m in de], "varies") or "—",
     }
 
 
@@ -783,7 +807,16 @@ def _compose(
                 {"field": "medium", "value": _medium_text(provenance, coverage)},
                 {"field": "condition", "value": provenance.get("condition") or "none"},
                 {"field": "method", "value": provenance.get("method")},
-                {"field": "knockout level", "value": provenance.get("perturbation")},
+                {
+                    "field": "knockout level",
+                    "value": (
+                        f"{provenance.get('perturbation')}, every transcript of a gene "
+                        f"knocked out together (ids split at "
+                        f"'{provenance.get('transcript_separator')}')"
+                    )
+                    if provenance.get("transcript_separator")
+                    else provenance.get("perturbation"),
+                },
                 {
                     "field": "reference state (v_ref)",
                     "value": _reference_text(provenance),
@@ -935,7 +968,15 @@ def _compose(
     )
     if gene_level:
         top_rows = [
-            {**row, **_expression_columns(row, gene_de or {}, gene_states or {})}
+            {
+                **row,
+                **_expression_columns(
+                    row,
+                    gene_de or {},
+                    gene_states or {},
+                    provenance.get("transcript_separator"),
+                ),
+            }
             for row in top_rows
         ]
         columns += ["source_class", "log2FC", "P"]

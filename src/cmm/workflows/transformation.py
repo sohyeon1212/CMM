@@ -235,6 +235,11 @@ class TransformationWorkflowConfig:
 
     method: TransformationMethod = "mta"
     perturbation: PerturbationLevel = "gene"
+    #: Gene level only. Recon-style models list each transcript as its own gene
+    #: (``<entrez>.<n>``) with isoforms joined by OR, so knocking out one transcript usually
+    #: blocks nothing. ``"."`` knocks out every transcript of a gene together, as the published
+    #: rMTA does (COBRA ``SeparateTranscript``); candidate ids are then the gene ids.
+    transcript_separator: str | None = None
     alpha: float = 0.66  # paper's main-text value, robust over 0.1-0.9
     epsilon: float | EpsilonMode = "per_reaction"
     parameter_k: float = 100.0  # rMTA Equation 9
@@ -288,6 +293,13 @@ class TransformationWorkflowConfig:
             raise ValueError("method must be 'mta' or 'rmta'")
         if self.perturbation not in ("gene", "reaction"):
             raise ValueError("perturbation must be 'gene' or 'reaction'")
+        if self.transcript_separator is not None:
+            if not self.transcript_separator:
+                raise ValueError(
+                    "transcript_separator must be a non-empty string or null"
+                )
+            if self.perturbation != "gene":
+                raise ValueError("transcript_separator applies to gene knockouts only")
         if not 0.0 <= self.alpha <= 1.0:
             raise ValueError("alpha must be between 0 and 1")
         if self.expression_scale not in ("linear", "log2"):
@@ -382,6 +394,7 @@ class TransformationWorkflowConfig:
             "changed_ranking": self.direction.ranking,
             "method": self.method,
             "perturbation": self.perturbation,
+            "transcript_separator": self.transcript_separator,
             "alpha": self.alpha,
             "epsilon": self.epsilon,
             "parameter_k": self.parameter_k,
@@ -757,6 +770,7 @@ def _build_candidates(
         essential_growth_fraction=config.candidates.essential_growth_fraction,
         collapse_coupled_sets=config.candidates.collapse_for(config.perturbation),
         explicit=config.candidates.explicit,
+        transcript_separator=config.transcript_separator,
     )
 
 
@@ -1019,6 +1033,7 @@ def run_transformation_target_discovery(
             epsilon=epsilon,
             parameter_k=config.parameter_k,
             perturbation=config.perturbation,
+            transcript_separator=config.transcript_separator,
         )
         # Only rMTA computes bTS, mTS and wTS as separate quantities. For MTA the same score
         # is returned in all four slots, so emitting them as columns would present one number
@@ -1068,6 +1083,7 @@ def run_transformation_target_discovery(
                 [str(row["target_id"]) for row in explained],
                 perturbation=config.perturbation,
                 epsilon=epsilon,
+                transcript_separator=config.transcript_separator,
             )
             labels = {
                 str(row["target_id"]): (row["rank"], row.get("target_name", ""))
@@ -1275,6 +1291,7 @@ def _moma_baseline(model, reference, target_expression, candidates, config):
         perturbation=config.perturbation,
         targets=list(candidates),
         order=2,
+        transcript_separator=config.transcript_separator,
     )
     named = any(t.target_name for t in ranking.targets)
     return tuple(
@@ -1407,6 +1424,7 @@ def _epsilon_sweep(model, reference, direction, candidates, config, base_rows):
             epsilon=epsilon,
             parameter_k=config.parameter_k,
             perturbation=config.perturbation,
+            transcript_separator=config.transcript_separator,
         )
         for index, target in enumerate(ranking.sorted().targets):
             out.append(

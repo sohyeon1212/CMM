@@ -36,8 +36,8 @@ from cmm.core.flux_state import FluxState
 from cmm.core.provenance import run_provenance
 from cmm.features._perturbation import (
     apply_perturbation,
-    gene_perturbations,
-    reaction_perturbations,
+    knockout_ids,
+    knockout_perturbations,
 )
 from cmm.features.revert import (
     DEFAULT_EPSILON,
@@ -175,13 +175,15 @@ def knockout_mechanism(
     *,
     perturbation: Literal["gene", "reaction"] = "gene",
     epsilon: Epsilon = DEFAULT_EPSILON,
+    transcript_separator: str | None = None,
 ) -> KnockoutMechanism:
     """Explain each knockout by the MOMA flux state its ``mTS`` was scored on.
 
     ``reference_state``, ``direction`` and ``epsilon`` must be the ones the ranking used, and
     ``model`` must carry the same medium and condition: the changed set is masked against the
     unperturbed model exactly as :func:`cmm.features.revert.revert_targets` masks it, so the
-    recomputed ``mTS`` matches the ranked one. Needs a QP-capable solver. A knockout whose
+    recomputed ``mTS`` matches the ranked one, and ``transcript_separator`` must match too, so a
+    grouped gene is knocked out as one unit. Needs a QP-capable solver. A knockout whose
     solve is not optimal is kept with its status and no reaction rows.
     """
 
@@ -194,6 +196,7 @@ def knockout_mechanism(
         model,
         method="knockout_mechanism_moma",
         perturbation=perturbation,
+        transcript_separator=transcript_separator,
         n_targets=len(requested),
     )
 
@@ -203,12 +206,15 @@ def knockout_mechanism(
         prepared = _prepared_direction(model, reference_state, direction, target_rxns)
         changed = [rid for rid in target_rxns if prepared.get(rid, 0) != 0]
         floor = _steady_floor(epsilon)
-        lookup = model.genes if perturbation == "gene" else model.reactions
-        known = [target_id for target_id in requested if target_id in lookup]
-        perts = (
-            gene_perturbations(model, known)
-            if perturbation == "gene"
-            else reaction_perturbations(model, known)
+        valid = knockout_ids(
+            model, perturbation, transcript_separator=transcript_separator
+        )
+        known = [target_id for target_id in requested if target_id in valid]
+        perts = knockout_perturbations(
+            model,
+            perturbation,
+            known,
+            transcript_separator=transcript_separator,
         )
         by_id = {pert.target_id: pert for pert in perts}
         for target_id in requested:

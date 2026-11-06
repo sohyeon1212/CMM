@@ -129,6 +129,9 @@ coupled-set reduction is the comparable construction. Do not raise reproduction 
 user has not stated. State the consequence either way — the candidate count is the denominator
 of any percentile claim.
 
+Transcript grouping is not a question: when gene ids carry a transcript suffix, set
+`transcript_separator="."` (see the skill) and say so.
+
 ## Stop conditions
 
 These are not questions. Explain what is missing and stop.

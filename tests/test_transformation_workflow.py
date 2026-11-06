@@ -1357,3 +1357,33 @@ def test_gene_annotation_path_resolves_against_the_config_file(tmp_path):
     config = TransformationWorkflowConfig.from_json(path)
     assert config.gene_annotation_path == (tmp_path / "symbols.csv").resolve()
     assert config.to_provenance()["gene_annotation"] == str(tmp_path / "symbols.csv")
+
+
+def test_transcript_separator_is_validated():
+    with pytest.raises(ValueError, match="non-empty"):
+        _config(transcript_separator="")
+    with pytest.raises(ValueError, match="gene knockouts only"):
+        _config(transcript_separator=".", perturbation="reaction")
+    assert (
+        _config(transcript_separator=".").to_provenance()["transcript_separator"] == "."
+    )
+
+
+@pytest.mark.requires_miqp
+def test_workflow_threads_the_transcript_separator_through_every_stage(
+    small_transformation_config,
+):
+    from cmm.reporting import validate_transformation_run
+
+    # The fixture's gene ids carry no suffix, so grouping is the identity: the run must
+    # still score and explain the same candidate.
+    config = replace(
+        small_transformation_config, transcript_separator=".", method="rmta"
+    )
+    root = run_transformation_target_discovery(config).run_directory
+    ranking = pd.read_csv(root / "05_transformation/transformation_ranking.csv")
+    mechanism = pd.read_csv(root / "07_mechanism/knockout_mechanism.csv")
+    assert list(ranking["target_id"]) == ["g2"] == list(mechanism["target_id"])
+    provenance = json.loads((root / "00_provenance.json").read_text())
+    assert provenance["transcript_separator"] == "."
+    assert validate_transformation_run(root).valid

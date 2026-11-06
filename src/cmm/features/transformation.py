@@ -40,9 +40,8 @@ from cmm.core.provenance import run_provenance
 from cmm.core.results import TargetRanking, TargetScore
 from cmm.features._perturbation import (
     apply_perturbation,
-    gene_perturbations,
+    knockout_perturbations,
     perturbation_provenance,
-    reaction_perturbations,
     target_display_name,
 )
 from cmm.features.comparison import moma
@@ -109,6 +108,7 @@ def transformation_targets(
     targets: Iterable[str] | None = None,
     order: Literal[1, 2] = 2,
     alpha: float = 0.66,
+    transcript_separator: str | None = None,
 ) -> TargetRanking:
     """Rank knockouts that move the source flux state toward the target flux state.
 
@@ -135,6 +135,7 @@ def transformation_targets(
             method="mta",
             alpha=alpha,
             perturbation=perturbation,
+            transcript_separator=transcript_separator,
         )
         return TargetRanking(
             method="transform_mta",
@@ -160,12 +161,12 @@ def transformation_targets(
         perturbation=perturbation,
         order=order,
         alpha=alpha,
+        transcript_separator=transcript_separator,
     )
 
-    if perturbation == "gene":
-        perts = gene_perturbations(model, targets)
-    else:
-        perts = reaction_perturbations(model, targets)
+    perts = knockout_perturbations(
+        model, perturbation, targets, transcript_separator=transcript_separator
+    )
 
     scored: list[TargetScore] = []
     nonoptimal = 0

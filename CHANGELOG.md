@@ -8,6 +8,11 @@ obsolete internal planning documents are removed from the public source tree.
 
 ### Added
 
+- **SC-02 can knock out a gene's transcripts together.** `transcript_separator="."` makes the
+  candidate construction, the ranking, the MOMA baseline and the mechanism stage treat every
+  `<entrez>.<n>` transcript of a gene as one knockout, as the published gene-level rMTA does.
+  On Recon3D, per-transcript screening otherwise drops 76 genes whose isoforms are joined by OR
+  and understates 117 more.
 - **SC-02 explains its leading knockouts and labels genes by symbol.** A new stage,
   `07_mechanism`, re-solves the MOMA QP behind each of the top `explain_top_n` candidates'
   `mTS` (`cmm.features.knockout_mechanism`; the optimum is unique, so it is the scored state)

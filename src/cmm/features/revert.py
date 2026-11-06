@@ -59,6 +59,7 @@ from cmm.features._perturbation import (
     apply_perturbation,
     gene_perturbations,
     grouped_gene_perturbations,
+    knockout_perturbations,
     perturbation_provenance,
     reaction_perturbations,
     target_display_name,
@@ -519,6 +520,7 @@ def revert_candidates(
     essential_growth_fraction: float = 0.20,
     collapse_coupled_sets: bool | None = None,
     explicit: Sequence[str] | None = None,
+    transcript_separator: str | None = None,
 ) -> tuple[tuple[str, ...], dict[str, object]]:
     """The MTA/rMTA knockout universe, and a record of how many each filter removed.
 
@@ -535,12 +537,16 @@ def revert_candidates(
     ``collapse_coupled_sets`` (reaction level only) keeps one representative per fully coupled
     set; ``None`` turns it on for reaction knockouts and off for gene knockouts, which are
     deduplicated on their blocked-reaction signature instead. ``explicit`` skips construction.
+    ``transcript_separator`` (gene level) knocks out every transcript of a gene together; pass
+    the same value to :func:`revert_targets` so the candidates are ids it can score.
     """
 
     if not 0.0 <= essential_growth_fraction < 1.0:
         raise ValueError("essential_growth_fraction must be in [0, 1)")
     if perturbation not in ("gene", "reaction"):
         raise ValueError("perturbation must be 'gene' or 'reaction'")
+    if transcript_separator and perturbation != "gene":
+        raise ValueError("transcript_separator applies to gene knockouts only")
     collapse = (
         perturbation == "reaction"
         if collapse_coupled_sets is None
@@ -557,11 +563,13 @@ def revert_candidates(
             "source": "explicit",
             "n_candidates": len(chosen),
             "perturbation": perturbation,
+            "transcript_separator": transcript_separator,
         }
 
     record: dict[str, object] = {
         "source": "constructed",
         "perturbation": perturbation,
+        "transcript_separator": transcript_separator,
         "n_reactions": len(model.reactions),
     }
     wild_type = model.slim_optimize()
@@ -610,7 +618,9 @@ def revert_candidates(
     # nonessential reactions can also be lethal.
     signatures: dict[tuple[str, ...], list[str]] = {}
     inert = 0
-    for gene_knockout in gene_perturbations(model):
+    for gene_knockout in knockout_perturbations(
+        model, "gene", transcript_separator=transcript_separator
+    ):
         signature = tuple(sorted(gene_knockout.reaction_ids))
         if not active_reactions.intersection(signature):
             inert += 1

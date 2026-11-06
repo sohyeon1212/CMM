@@ -191,6 +191,16 @@ metadata preserves all equivalent gene ids under `represented_genes`.
 The null space always uses the full model. Filtering knockout candidates does not remove
 those reactions from the network used to determine coupling.
 
+**Transcript-level models.** Recon1 and Recon3D list each transcript as its own gene
+(`<entrez>.<n>`) and join isoforms with OR, so knocking out one transcript usually blocks
+nothing and the gene is never tested. On Recon3D 3.01, per-transcript enumeration leaves 983
+effective knockouts and drops 76 Entrez genes that block reactions only when all their
+transcripts go, while another 117 block more as a whole than through any transcript.
+`transcript_separator="."` knocks out every transcript of a gene together — the published
+rMTA's gene count (COBRA `SeparateTranscript`) — in candidate construction, the ranking, the
+MOMA baseline and the mechanism stage alike; candidate ids are then gene ids. Set it whenever
+the model's gene ids carry a transcript suffix.
+
 ### 5 — Transformation search
 
 One optimisation per candidate, ranked by the published transformation score. rMTA also

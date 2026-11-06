@@ -791,3 +791,36 @@ def test_report_states_reference_quality_and_the_target_genes_own_expression(
     # The top table now says how the knocked-out gene itself is expressed.
     assert "<th>source class</th>" in page
     assert "<td>high</td>" in page and "<td>not measured</td>" in page
+
+
+@pytest.mark.skipif(
+    not _r_is_ready(), reason="Rscript renderer packages are not installed"
+)
+def test_a_grouped_gene_reads_its_transcripts_expression(bundle: Path) -> None:
+    provenance = json.loads((bundle / "00_provenance.json").read_text())
+    provenance.update({"perturbation": "gene", "transcript_separator": "."})
+    _rewrite_artifact(bundle, "00_provenance.json", json.dumps(provenance))
+    _rewrite_artifact(
+        bundle,
+        "05_transformation/transformation_ranking.csv",
+        RANKING.replace("PGI,", "6487,", 1).replace("PFK,", "8639,", 1),
+    )
+    _rewrite_artifact(
+        bundle,
+        "03_direction/gene_differential_expression.csv",
+        "gene_id,log2_fold_change,t_statistic,p_value,significant,direction\n"
+        "6487.1,-1.5,-9.0,0.002,True,-1\n6487.10,-1.5,-9.0,0.002,True,-1\n"
+        "8639.1,0.5,2.0,0.1,False,0\n8639.2,0.7,2.5,0.08,False,0\n",
+    )
+    _add_artifact(
+        bundle,
+        "gene_expression_states",
+        "02_reference/gene_expression_states.csv",
+        "gene_id,state,high_fraction,low_fraction\n"
+        "6487.1,-1,0.0,1.0\n6487.10,-1,0.0,1.0\n8639.1,1,1.0,0.0\n8639.2,0,0.0,0.0\n",
+    )
+    page = render_transformation_report(bundle).report_html.read_text(encoding="utf-8")
+    assert "every transcript of a gene knocked out together" in page
+    # Transcripts that agree give one answer; transcripts that differ say so.
+    assert "<td>low</td><td>-1.5</td><td>0.002</td>" in page
+    assert "<td>mixed</td><td>varies</td><td>varies</td>" in page

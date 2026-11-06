@@ -458,6 +458,12 @@ MOMA-baseline target as its linear original, and both directions of the scale wa
 Regression tests distinguish a small relative change (`100 → 102`) from a two-unit log2 change
 and check the replicate-level t-test transform.
 
+**Transcript grouping.** `transcript_separator` makes the candidate construction, ranking,
+MOMA baseline and mechanism enumerate one joint knockout per gene (COBRA `SeparateTranscript`).
+`test_transcript_grouping.py` checks, on isoforms joined by OR, that one isoform's knockout is
+inert while the grouped gene is a candidate, that essentiality is judged on the joint deletion,
+and that the mechanism and MOMA baseline knock out the group.
+
 **Knockout mechanism.** `cmm.features.knockout_mechanism` explains a ranked knockout by the
 MOMA QP solution its `mTS` was scored on: the objective is a strictly convex sum of squares over
 every reaction, so the optimum is unique and re-solving returns the scored state. The best- and

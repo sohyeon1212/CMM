@@ -100,6 +100,37 @@ def parallel_pathway_model() -> Model:
 
 
 @pytest.fixture
+def transcript_model() -> Model:
+    """Recon-style transcript ids: isoforms ``t1.1`` and ``t1.2`` are joined by OR.
+
+        SUP:     -> A          (<= 10)
+        R1:  A -> B            t1.1 or t1.2   [two isoforms of one gene]
+        R3:  A -> B            t3.1           [parallel route]
+        R2:  B -> P            t2.1           [essential]
+        BIOMASS: P ->          (objective)
+
+    Knocking out one isoform blocks nothing; knocking out gene t1 blocks R1.
+    """
+
+    model = Model("transcripts")
+    a, b, p = (Metabolite(f"{name}_c", compartment="c") for name in "abp")
+    for rid, stoich, rule in (
+        ("SUP", {a: 1}, ""),
+        ("R1", {a: -1, b: 1}, "t1.1 or t1.2"),
+        ("R3", {a: -1, b: 1}, "t3.1"),
+        ("R2", {b: -1, p: 1}, "t2.1"),
+        ("BIOMASS", {p: -1}, ""),
+    ):
+        reaction = Reaction(rid)
+        reaction.add_metabolites(stoich)
+        reaction.bounds = (0, 10)
+        reaction.gene_reaction_rule = rule
+        model.add_reactions([reaction])
+    model.objective = "BIOMASS"
+    return model
+
+
+@pytest.fixture
 def published_mta_model() -> Model:
     """Independent Python construction of the official COBRA Toolbox MTA test network."""
 
