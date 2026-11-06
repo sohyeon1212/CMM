@@ -62,7 +62,9 @@ Frame it as the scientific question, not as file assignment:
 Medium, substrate exchange and uptake, oxygen exchange and uptake, and other changed bounds.
 Prefer complete compatible condition choices over mixing unrelated bound questions. Offer
 `model-as-loaded` only as an explicit choice, after showing the inspected bounds and saying
-what they do and do not establish.
+what they do and do not establish. A medium closes exchanges only: when sinks are open for
+uptake (`cmm.core.media.uncontrolled_uptake`), say how many and ask whether the condition keeps,
+caps or closes them — the answer goes into the condition's bounds, not the medium.
 
 ### 4. Discretisation threshold `imat_delta`
 

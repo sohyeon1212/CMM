@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence, cast
 
 from cmm.core.condition import Condition
-from cmm.core.media import Medium
+from cmm.core.media import Medium, permits_uptake, uncontrolled_uptake
 
 if TYPE_CHECKING:  # heavy imports stay out of module import time
     import pandas as pd
@@ -799,15 +799,29 @@ def run_transformation_target_discovery(
         # A bound read, not a solve: on a genome-scale model "model as loaded" can leave most
         # exchanges open for uptake, which is a scientific statement rather than a default.
         exchanges = list(model.exchanges)
+        # A medium reaches model.exchanges only; sinks open for uptake still feed the network
+        # (Recon3D ships 95 at -1000), so they are counted beside the exchanges, not hidden.
+        sinks_open = uncontrolled_uptake(model)
         data_coverage: dict[str, object] = {
             "model_genes": len(model_genes),
             "genes_measured_in_model": len(covered),
             "gene_coverage": len(covered) / len(model_genes) if model_genes else 0.0,
             "n_exchanges": len(exchanges),
             "n_exchanges_open_for_uptake": sum(
-                1 for reaction in exchanges if _permits_uptake(reaction)
+                1 for reaction in exchanges if permits_uptake(reaction)
             ),
+            "n_sinks_open_for_uptake": len(sinks_open),
         }
+        check(
+            "uptake_outside_exchanges",
+            not sinks_open,
+            {"n": len(sinks_open), "reactions": list(sinks_open)},
+            f"{len(sinks_open)} sink/demand reaction(s) outside model.exchanges permit "
+            "uptake; a medium does not constrain them, so set their bounds in the condition "
+            "if it should exclude them"
+            if sinks_open
+            else "every boundary reaction that permits uptake is an exchange",
+        )
 
         growth = model.slim_optimize()
         check(
@@ -1136,19 +1150,6 @@ def _moma_baseline(model, reference, target_expression, candidates, config):
             "rank": i + 1,
         }
         for i, t in enumerate(ranking.sorted().targets)
-    )
-
-
-def _permits_uptake(reaction: Any) -> bool:
-    """Whether a boundary reaction can bring its metabolite into the model.
-
-    The usual exchange is written ``A <=>`` and takes up with negative flux; a supply written
-    ``-> A`` takes up with positive flux. Reading the orientation keeps both counted.
-    """
-
-    net = sum(reaction.metabolites.values())
-    return (net < 0 and reaction.lower_bound < 0) or (
-        net > 0 and reaction.upper_bound > 0
     )
 
 

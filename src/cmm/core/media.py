@@ -1,10 +1,19 @@
 """Growth-media compositions and presets.
 
 A :class:`Medium` is a set of substrate uptake limits keyed by exchange reaction. Applying a
-medium closes every other uptake and opens the listed ones (via cobra's ``model.medium`` API),
-so swapping media is a single call. Exchange ids are resolved tolerantly across naming
-conventions (BiGG ``EX_glc__D_e`` vs ``EX_glc_e`` vs ``EX_glc(e)``) so a preset works on many
-models.
+medium closes the uptake of every other *exchange* and opens the listed ones (via cobra's
+``model.medium`` API), so swapping media is a single call. Exchange ids are resolved tolerantly
+across naming conventions (BiGG ``EX_glc__D_e`` vs ``EX_glc_e`` vs ``EX_glc(e)``) so a preset
+works on many models.
+
+**A medium controls ``model.exchanges`` only.** cobra classifies boundary reactions into
+exchanges (extracellular), sinks and demands (intracellular), and ``model.medium`` reads and
+writes the exchanges alone. A sink left open for uptake still feeds its metabolite into the
+network whatever the medium says: Recon3D ships 95 sinks open at -1000, and with every
+exchange uptake closed it still grows at a rate of several hundred. Applying a medium leaves
+such reactions untouched - closing them is a scientific choice, made with explicit bounds - but
+:meth:`Medium.apply_to` names them in a warning and in :class:`MediumApplication`
+(``uncontrolled``), so a run never records a medium as the whole supply when it is not.
 
 **Where the preset compositions come from.** The shared mineral/trace-element set is the
 default medium distributed with the *iJO1366* reconstruction (Orth et al. 2011,
@@ -40,7 +49,7 @@ from dataclasses import dataclass, field
 import math
 import warnings
 
-from cobra import Model
+from cobra import Model, Reaction
 import pandas as pd
 
 #: Uptake cap for a component that is present but not intended to limit growth.
@@ -112,6 +121,36 @@ def _resolve_id(model: Model, exchange_id: str) -> str | None:
     return None
 
 
+def permits_uptake(reaction: Reaction) -> bool:
+    """Whether a boundary reaction can bring its metabolite into the model.
+
+    The usual boundary is written ``A <=>`` and takes up with negative flux; a supply written
+    ``-> A`` takes up with positive flux. Reading the orientation keeps both counted.
+    """
+
+    net = sum(reaction.metabolites.values())
+    return (net < 0 and reaction.lower_bound < 0) or (
+        net > 0 and reaction.upper_bound > 0
+    )
+
+
+def uncontrolled_uptake(model: Model) -> tuple[str, ...]:
+    """Boundary reactions outside ``model.exchanges`` that currently permit uptake.
+
+    These are the sinks (and any demand opened in reverse) that a :class:`Medium` cannot
+    reach, because ``model.medium`` covers exchanges only. Sorted for a stable record.
+    """
+
+    exchanges = {reaction.id for reaction in model.exchanges}
+    return tuple(
+        sorted(
+            reaction.id
+            for reaction in model.boundary
+            if reaction.id not in exchanges and permits_uptake(reaction)
+        )
+    )
+
+
 def _mineral_base(*, co2_uptake: bool) -> dict[str, float]:
     """The shared mineral/trace-element base, with CO2 uptake opened only on request."""
 
@@ -130,15 +169,19 @@ class MediumApplication(Mapping[str, float]):
     only want the applied bounds keep working, while ``dropped`` and :meth:`to_provenance`
     record the components the model could not express. Recording both is the point: a run
     directory that stores only the preset key does not state the condition it ran under.
+    ``uncontrolled`` lists the boundary reactions outside ``model.exchanges`` that still
+    permit uptake after the medium was applied - supply the medium does not govern.
     """
 
     medium: str
     applied: Mapping[str, float] = field(default_factory=dict)
     dropped: tuple[str, ...] = ()
+    uncontrolled: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "applied", dict(self.applied))
         object.__setattr__(self, "dropped", tuple(self.dropped))
+        object.__setattr__(self, "uncontrolled", tuple(self.uncontrolled))
 
     def __getitem__(self, exchange_id: str) -> float:
         return self.applied[exchange_id]
@@ -156,6 +199,7 @@ class MediumApplication(Mapping[str, float]):
             "medium": self.medium,
             "applied": dict(self.applied),
             "dropped": list(self.dropped),
+            "uncontrolled_uptake": list(self.uncontrolled),
         }
 
     def to_frame(self) -> pd.DataFrame:
@@ -260,7 +304,25 @@ class Medium:
                 stacklevel=2,
             )
         model.medium = applied
-        return MediumApplication(medium=self.name, applied=applied, dropped=dropped)
+        uncontrolled = uncontrolled_uptake(model)
+        if uncontrolled:
+            shown = ", ".join(uncontrolled[:5]) + (
+                ", ..." if len(uncontrolled) > 5 else ""
+            )
+            warnings.warn(
+                f"medium {self.name!r}: {len(uncontrolled)} sink/demand reaction(s) outside "
+                f"model.exchanges still permit uptake and are not controlled by the medium "
+                f"({shown}). Set their bounds explicitly if the condition should exclude "
+                "them. They are recorded in the run provenance.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return MediumApplication(
+            medium=self.name,
+            applied=applied,
+            dropped=dropped,
+            uncontrolled=uncontrolled,
+        )
 
 
 def _infer_required(uptake: Mapping[str, float]) -> frozenset[str]:

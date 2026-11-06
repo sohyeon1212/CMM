@@ -139,6 +139,16 @@ obsolete internal planning documents are removed from the public source tree.
 
 ### Fixed
 
+- **A medium no longer reads as the whole supply when sinks stay open.** `model.medium` governs
+  `model.exchanges` only, yet the media module said applying a medium "closes every other
+  uptake". On Recon3D, whose 95 sinks ship open at -1000, a model with every exchange uptake
+  closed still grows at a rate of several hundred, and SC-02's report then stated only how many
+  exchanges permit uptake. `Medium.apply_to` now warns and records the open sink/demand
+  reactions (`MediumApplication.uncontrolled`, provenance `uncontrolled_uptake`); SC-02 counts
+  them as `data_coverage.n_sinks_open_for_uptake`, adds the preflight warning
+  `uptake_outside_exchanges`, and names them beside the medium in the report. Nothing is closed
+  automatically: whether a sink belongs to the condition is a scientific choice made with
+  explicit bounds.
 - **Numeric-looking gene ids are no longer read as numbers.** Recon3D names genes
   `<entrez>.<transcript>`, so every id in an expression table can parse as a number, and pandas
   then read `6487.10` as the float `6487.1`. With the real `6487.1` also present, SC-02 stopped

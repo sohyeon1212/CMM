@@ -7,7 +7,9 @@ from cmm.core.media import (
     apply_medium,
     carbon_minimal,
     glucose_minimal,
+    permits_uptake,
     preset_medium,
+    uncontrolled_uptake,
 )
 
 
@@ -137,3 +139,48 @@ def test_preset_names_do_not_claim_m9_or_a_standard_medium():
 def test_medium_rejects_negative_uptake(ecoli_core):
     with pytest.raises(ValueError, match="non-negative"):
         Medium("bad", {"EX_glc__D_e": -1.0}).apply_to(ecoli_core)
+
+
+def test_textbook_model_has_no_uptake_outside_exchanges(ecoli_core):
+    with pytest.warns(UserWarning, match="were not applied") as caught:
+        applied = apply_medium(ecoli_core, "glucose_aerobic")
+    assert applied.uncontrolled == ()
+    assert applied.to_provenance()["uncontrolled_uptake"] == []
+    assert not any("not controlled by the medium" in str(w.message) for w in caught)
+
+
+def test_open_sink_is_named_because_a_medium_cannot_close_it(ecoli_core):
+    """model.medium covers exchanges only; an open sink keeps supplying its metabolite."""
+
+    sink = ecoli_core.add_boundary(
+        ecoli_core.metabolites.get_by_id("akg_c"), type="sink", lb=-1000.0
+    )
+    assert sink not in ecoli_core.exchanges
+    medium = Medium("glucose only", {"EX_glc__D_e": 10.0})
+    with pytest.warns(UserWarning, match="not controlled by the medium"):
+        applied = medium.apply_to(ecoli_core)
+    assert applied.uncontrolled == (sink.id,)
+    assert applied.to_provenance()["uncontrolled_uptake"] == [sink.id]
+    assert (
+        sink.lower_bound == -1000.0
+    )  # left as it was: closing it is the user's choice
+
+
+def test_closed_sink_is_not_reported(ecoli_core):
+    sink = ecoli_core.add_boundary(
+        ecoli_core.metabolites.get_by_id("akg_c"), type="sink", lb=0.0
+    )
+    assert not permits_uptake(sink)
+    assert uncontrolled_uptake(ecoli_core) == ()
+
+
+def test_permits_uptake_reads_reaction_orientation(ecoli_core):
+    supply = ecoli_core.add_boundary(
+        ecoli_core.metabolites.get_by_id("akg_c"), type="sink", lb=0.0
+    )
+    # Rewrite as "-> akg_c": uptake now means positive flux.
+    supply.add_metabolites({ecoli_core.metabolites.get_by_id("akg_c"): 2.0})
+    assert sum(supply.metabolites.values()) > 0
+    assert permits_uptake(supply)
+    supply.upper_bound = 0.0
+    assert not permits_uptake(supply)

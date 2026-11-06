@@ -22,6 +22,8 @@ from cmm.reporting import (
 )
 from cmm.reporting.transformation import (
     TransformationReportError,
+    _applied_medium_text,
+    _medium_text,
     renderer_script_path,
 )
 
@@ -649,4 +651,37 @@ def test_a_figure_the_renderer_never_records_is_reported_not_dropped(
     assert any(
         "no entry for 'fig04_epsilon_sensitivity'" in issue
         for issue in validation.issues
+    )
+
+
+def test_medium_text_names_open_sinks_the_medium_does_not_control():
+    coverage = {
+        "n_exchanges": 1637,
+        "n_exchanges_open_for_uptake": 40,
+        "n_sinks_open_for_uptake": 95,
+    }
+    text = _medium_text({"medium": "RPMI-1640"}, coverage)
+    assert text.startswith(
+        "RPMI-1640 (40 of 1637 exchanges permit uptake; 95 sink/demand"
+    )
+    assert "not controlled by the medium" in text
+    # No sinks open: the wording is unchanged from before the count existed.
+    plain = _medium_text({}, {**coverage, "n_sinks_open_for_uptake": 0})
+    assert plain == "model as loaded — 40 of 1637 exchanges permit uptake"
+
+
+def test_applied_medium_text_lists_uncontrolled_uptake():
+    applied = {
+        "medium": "RPMI-1640",
+        "applied": {"EX_glc_D[e]": 5.0},
+        "dropped": [],
+        "uncontrolled_uptake": ["sink_a[c]", "sink_b[c]"],
+    }
+    text = _applied_medium_text(applied)
+    assert (
+        "open for uptake outside the medium (2 sink/demand): sink_a[c], sink_b[c]"
+        in text
+    )
+    assert "outside the medium" not in _applied_medium_text(
+        {**applied, "uncontrolled_uptake": []}
     )

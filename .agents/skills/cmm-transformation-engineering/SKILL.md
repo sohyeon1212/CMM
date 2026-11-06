@@ -19,7 +19,10 @@ The run needs all four:
 2. The **source** expression file — the state to move *away* from.
 3. The **target** expression file — the state to move *toward*.
 4. One explicit condition: medium, substrate exchange and uptake bound, oxygen exchange and
-   aeration bound, plus any other changed bounds.
+   aeration bound, plus any other changed bounds. A medium controls `model.exchanges` only;
+   sink reactions open for uptake (Recon models ship many) still supply metabolites. The
+   condition's bounds decide them, and the preflight warning `uptake_outside_exchanges`
+   names any left open.
 
 **Confirm which file is source and which is target. Never infer it from file names.** Nothing
 in the model can detect a swap, and the same pair answers two different questions: wild

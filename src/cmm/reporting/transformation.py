@@ -422,6 +422,14 @@ def _medium_text(provenance: Mapping[str, Any], coverage: Mapping[str, Any]) -> 
         if open_count is not None and total is not None
         else None
     )
+    # A medium governs exchanges only; open sinks are supply it does not control, so a
+    # reader must see them beside the medium rather than assume the medium is the whole input.
+    sinks = coverage.get("n_sinks_open_for_uptake")
+    if openness and sinks:
+        openness += (
+            f"; {sinks} sink/demand reactions also permit uptake and are not controlled "
+            "by the medium"
+        )
     name = provenance.get("medium")
     if name:
         return f"{name} ({openness})" if openness else str(name)
@@ -453,6 +461,12 @@ def _applied_medium_text(applied: Mapping[str, Any]) -> str:
     text = f"{applied.get('medium')}: {listed or 'no exchanges'}"
     if dropped:
         text += f"; not in the model: {', '.join(map(str, dropped))}"
+    uncontrolled = applied.get("uncontrolled_uptake") or []
+    if uncontrolled:
+        text += (
+            f"; open for uptake outside the medium ({len(uncontrolled)} sink/demand): "
+            f"{', '.join(map(str, uncontrolled))}"
+        )
     return text
 
 

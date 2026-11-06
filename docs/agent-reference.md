@@ -34,6 +34,13 @@ producing a quietly different experiment; anything else warns and is listed in `
 Record `.to_provenance()`, not just the preset key: on `e_coli_core` a preset legitimately
 drops 18 of its 24 declared components.
 
+A medium reaches `model.exchanges` only. Sinks (and any demand opened in reverse) that still
+permit uptake are left untouched, named in a warning, and listed in `.uncontrolled`
+(`"uncontrolled_uptake"` in the provenance); `uncontrolled_uptake(model)` and
+`permits_uptake(reaction)` in `cmm.core.media` give the same reading. Recon3D ships 95 sinks
+open at -1000 and grows with every exchange uptake closed, so close or cap them through explicit
+condition bounds when the condition should exclude them.
+
 Capability checks: `supports("QP", model.solver.interface)` returns a bool;
 `require("QP", model.solver.interface, feature="L2 MOMA")` raises `SolverCapabilityError`
 with an actionable message.

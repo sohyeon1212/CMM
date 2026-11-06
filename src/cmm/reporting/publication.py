@@ -743,6 +743,13 @@ def _setup_table(validated: ValidatedRun) -> str:
                 rows.append(
                     (f"Medium: {_human_label(key)}", _display_value(medium[key]))
                 )
+        # Shown only when present: sinks open for uptake are supply the medium does not
+        # govern, and a model without them (every E. coli preset target) has nothing to say.
+        for key in ("uncontrolled_uptake",):
+            if medium.get(key):
+                rows.append(
+                    (f"Medium: {_human_label(key)}", _display_value(medium[key]))
+                )
     return _table(("Run definition", "Resolved value"), rows)
 
 
