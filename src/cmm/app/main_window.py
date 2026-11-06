@@ -2236,6 +2236,14 @@ class CmmMainWindow(QMainWindow):
             "lethality δ=0.1 ε=1e-2. Ignored by MOMA."
         )
         row.addWidget(self.room_use_case_combo)
+        self.room_linear_check = QCheckBox("LP relaxation")
+        self.room_linear_check.setToolTip(
+            "Use the LP relaxation of ROOM instead of the full MILP. Much faster for "
+            "genome-scale batch screens; the objective is a continuous lower bound on "
+            "the switch count."
+        )
+        self.room_linear_check.setEnabled(False)
+        row.addWidget(self.room_linear_check)
         row.addWidget(QLabel("Reference template:"))
         self.template_combo = QComboBox()
         # pFBA first, and therefore the default: `reference_flux` defaults to "pfba" too, so
@@ -2558,11 +2566,16 @@ class CmmMainWindow(QMainWindow):
         return "moma_l1" if label == "MOMA (L1)" else "moma_l2"
 
     def _on_comparison_method_changed(self, _label: str) -> None:
-        """The ROOM tolerance pair only means anything when ROOM is the method."""
-
+        """ROOM-specific controls only apply when ROOM is the method."""
+        is_room = self._comparison_method_key() == "room"
         combo = getattr(self, "room_use_case_combo", None)
         if combo is not None:
-            combo.setEnabled(self._comparison_method_key() == "room")
+            combo.setEnabled(is_room)
+        check = getattr(self, "room_linear_check", None)
+        if check is not None:
+            check.setEnabled(is_room)
+            if not is_room:
+                check.setChecked(False)
 
     def _comparison_expression(self):
         """Expression for a LAD/E-Flux2 template: real if loaded, else synthetic (flagged)."""
@@ -2597,6 +2610,7 @@ class CmmMainWindow(QMainWindow):
             return
         method_key = self._comparison_method_key()
         room_use_case = self.room_use_case_combo.currentText()
+        room_linear = self.room_linear_check.isChecked()
         expression, synthetic_expression = self._comparison_expression()
         ko_label = self._ko_label(targets)
 
@@ -2620,6 +2634,7 @@ class CmmMainWindow(QMainWindow):
                 reaction_ids,
                 method=method_key,
                 room_use_case=room_use_case,
+                room_linear=room_linear,
             )
             return reference, result, reaction_ids
 
@@ -2771,6 +2786,7 @@ class CmmMainWindow(QMainWindow):
         # A screen asks which deletions are lethal, so the library defaults this path to the
         # lethality pair; the GUI honours whatever the selector says and reports it.
         room_use_case = self.room_use_case_combo.currentText()
+        room_linear = self.room_linear_check.isChecked()
         expression, synthetic_expression = self._comparison_expression()
         product = self.batch_product_combo.currentText()
         product = None if product in ("", "(none)") else product
@@ -2793,6 +2809,7 @@ class CmmMainWindow(QMainWindow):
                 method=method_key,
                 room_use_case=room_use_case,
                 product_reaction=product,
+                room_linear=room_linear,
             )
             return reference, rows
 

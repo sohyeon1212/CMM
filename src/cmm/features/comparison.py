@@ -39,9 +39,13 @@ and returns a plain, serializable result.
 
 from __future__ import annotations
 
+import logging
 import math
+import multiprocessing
+import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, fields
+from functools import partial
 from typing import Any, Literal
 
 import pandas as pd
@@ -50,6 +54,7 @@ from cobra.core import Solution
 from cobra.exceptions import OptimizationError
 from cobra.flux_analysis import moma as _cobra_moma
 from cobra.flux_analysis import room as _cobra_room
+from cobra.flux_analysis.room import add_room as _cobra_add_room
 
 from cmm.core import solvers
 from cmm.core.flux_state import FluxState, Provenance
@@ -57,6 +62,8 @@ from cmm.core.provenance import run_provenance
 from cmm.core.simulation import fba as _fba
 from cmm.core.simulation import pfba as _pfba
 from cmm.features._perturbation import Perturbation, perturbation_provenance
+
+logger = logging.getLogger(__name__)
 
 ComparisonMethod = Literal["moma_l1", "moma_l2", "room"]
 ReferenceMethod = Literal["fba", "pfba", "lad", "eflux2"]
@@ -170,6 +177,7 @@ class ComparisonResult:
     n_changed_reactions: float | None = None
     fluxes: dict[str, float] = field(default_factory=dict)
     metadata: dict[str, object] = field(default_factory=dict)
+    mip_gap: float | None = None
 
     def to_flux_state(self, name: str = "perturbed") -> FluxState:
         return FluxState(self.fluxes, name=name, provenance="imported")
@@ -406,18 +414,33 @@ def _room(
     delta: float,
     epsilon: float,
     metadata: dict[str, object],
+    work_limit: float | None = None,
 ) -> ComparisonResult:
-    """ROOM's solve, on resolved tolerances and a metadata block the caller has built."""
+    """ROOM's solve, on resolved tolerances and a metadata block the caller has built.
+
+    When ``work_limit`` is set (Gurobi deterministic work units), the MILP is stopped
+    after that much work.  If a feasible solution exists at that point, the result is
+    returned with ``status="work_limit"`` and the MIP gap recorded on
+    :attr:`ComparisonResult.mip_gap`; otherwise the row is infeasible.  The limit is
+    applied only to the exact (non-linear) MILP formulation via direct Gurobi
+    ``optimize()``, bypassing cobra's ``room()`` wrapper whose ``model.optimize()``
+    path does not propagate Gurobi ``Params``.
+    """
 
     if not linear:
         solvers.require("MILP", model.solver.interface, feature="ROOM")
-    # NaN error_value so a lethal knockout returns non-optimal instead of raising Infeasible
-    # (which would abort a batch run over many knockouts).
     model.slim_optimize(error_value=float("nan"))
     if model.solver.status != "optimal":
         return _infeasible("room", metadata)
 
     reference_solution = _reference_solution(model, reference)
+
+    if work_limit is not None and not linear:
+        return _room_with_work_limit(
+            model, reference_solution, delta=delta, epsilon=epsilon,
+            work_limit=work_limit, metadata=metadata,
+        )
+
     try:
         solution = _cobra_room(
             model,
@@ -426,9 +449,64 @@ def _room(
             delta=delta,
             epsilon=epsilon,
         )
-    except OptimizationError:  # infeasible perturbed model
+    except OptimizationError:
         return _infeasible("room", metadata)
     return _result("room", solution, metadata)
+
+
+# Gurobi status code for WorkLimit termination.
+_GRB_WORK_LIMIT = 16
+
+
+def _room_with_work_limit(
+    model: Model,
+    reference_solution: Solution,
+    *,
+    delta: float,
+    epsilon: float,
+    work_limit: float,
+    metadata: dict[str, object],
+) -> ComparisonResult:
+    """ROOM via ``add_room`` + direct Gurobi ``optimize`` so WorkLimit is honoured."""
+
+    _cobra_add_room(
+        model, solution=reference_solution, linear=False, delta=delta, epsilon=epsilon,
+    )
+    grb = model.solver.problem
+    grb.Params.WorkLimit = work_limit
+    grb.Params.OutputFlag = 0
+    grb.optimize()
+
+    grb_status = grb.Status
+    if grb_status == 2:  # OPTIMAL
+        solution = model.optimize()
+        return _result("room", solution, metadata)
+
+    if grb_status == _GRB_WORK_LIMIT and grb.SolCount > 0:
+        objective_value = float(grb.ObjVal)
+        mip_gap = float(grb.MIPGap)
+        distance, kind, changed = _quantities("room", objective_value)
+        fluxes = {}
+        for rxn in model.reactions:
+            try:
+                fluxes[rxn.id] = float(rxn.flux)
+            except Exception:
+                fluxes[rxn.id] = float(
+                    model.solver.problem.getVarByName(rxn.id).X
+                ) if model.solver.problem.getVarByName(rxn.id) is not None else 0.0
+        return ComparisonResult(
+            method="room",
+            status="work_limit",
+            objective_value=objective_value,
+            distance=distance,
+            distance_kind=kind,
+            n_changed_reactions=changed,
+            fluxes=fluxes,
+            metadata={**metadata, "room_work_limit": work_limit, "room_mip_gap": mip_gap},
+            mip_gap=mip_gap,
+        )
+
+    return _infeasible("room", metadata)
 
 
 def _quantities(
@@ -504,12 +582,14 @@ def knockout_comparison(
     room_use_case: RoomUseCase = "flux_prediction",
     delta: float | None = None,
     epsilon: float | None = None,
+    room_linear: bool = False,
 ) -> ComparisonResult:
     """Run MOMA/ROOM against ``reference`` with ``reaction_ids`` forced to zero.
 
     Accepts one or many reactions, so it covers a single-reaction knockout, a multi-reaction
     knockout, and a gene knockout (pass the reactions the gene disables via its GPR). The model
-    is restored on return. Method keys: ``moma_l2`` (QP), ``moma_l1`` (LP), ``room`` (MILP).
+    is restored on return. Method keys: ``moma_l2`` (QP), ``moma_l1`` (LP), ``room`` (MILP,
+    or LP relaxation when ``room_linear=True``).
 
     ``room_use_case`` defaults to ``"flux_prediction"`` because this entry point predicts the
     flux state of one named perturbation; the batch screen in :func:`batch_comparison`
@@ -535,6 +615,7 @@ def knockout_comparison(
         delta=resolved_delta,
         epsilon=resolved_epsilon,
         with_provenance=True,
+        room_linear=room_linear,
     )
 
 
@@ -548,6 +629,8 @@ def _knockout_solve(
     delta: float,
     epsilon: float,
     with_provenance: bool,
+    work_limit: float | None = None,
+    room_linear: bool = False,
 ) -> ComparisonResult:
     """Solve one knockout against ``reference``, restoring the model on return.
 
@@ -568,7 +651,7 @@ def _knockout_solve(
                 _room_metadata(
                     model,
                     reference,
-                    linear=False,
+                    linear=room_linear,
                     use_case=room_use_case,
                     delta=delta,
                     epsilon=epsilon,
@@ -580,15 +663,17 @@ def _knockout_solve(
                     "room_use_case": room_use_case,
                     "delta": delta,
                     "epsilon": epsilon,
+                    "room_linear": room_linear,
                 }
             )
             return _room(
                 model,
                 reference,
-                linear=False,
+                linear=room_linear,
                 delta=delta,
                 epsilon=epsilon,
                 metadata=metadata,
+                work_limit=work_limit if not room_linear else None,
             )
         linear = method == "moma_l1"
         metadata = (
@@ -621,6 +706,7 @@ class BatchComparisonRow:
     product_flux: float = float(
         "nan"
     )  # target-product flux at the perturbed state (if any)
+    mip_gap: float | None = None  # MIP optimality gap when status is "work_limit"
 
 
 class BatchComparisonResult(list[BatchComparisonRow]):
@@ -662,8 +748,8 @@ class BatchComparisonResult(list[BatchComparisonRow]):
     #: distance, so carrying both for every method leaves a column of NaN that reads like a
     #: failed run. They are dropped when the screen's method cannot produce them.
     _METHOD_ONLY_COLUMNS = {
-        "moma_l1": ("n_changed_reactions",),
-        "moma_l2": ("n_changed_reactions",),
+        "moma_l1": ("n_changed_reactions", "mip_gap"),
+        "moma_l2": ("n_changed_reactions", "mip_gap"),
         "room": ("distance", "distance_kind"),
     }
 
@@ -690,6 +776,85 @@ class BatchComparisonResult(list[BatchComparisonRow]):
         return frame.drop(columns=drop) if drop else frame
 
 
+_worker_model: Model | None = None
+
+
+def _init_worker(
+    sbml_path: str,
+    solver_name: str,
+    threads_per_worker: int | None,
+) -> None:
+    """Pool initializer: load the model once per worker process."""
+    global _worker_model  # noqa: PLW0603
+    import cobra
+
+    _worker_model = cobra.io.read_sbml_model(sbml_path)
+    _worker_model.solver = solver_name
+    if threads_per_worker is not None:
+        try:
+            _worker_model.solver.problem.Params.Threads = threads_per_worker
+        except Exception:
+            pass
+
+
+def _solve_one_perturbation(
+    pert: Perturbation,
+    *,
+    reference: FluxState,
+    method: ComparisonMethod,
+    room_use_case: RoomUseCase,
+    delta: float,
+    epsilon: float,
+    objective: str | None,
+    product_reaction: str | None,
+    work_limit: float | None = None,
+    room_linear: bool = False,
+) -> BatchComparisonRow:
+    """Solve one perturbation in a worker process.
+
+    The model is loaded once by :func:`_init_worker` and reused across all
+    perturbations in this worker.  ``with model:`` in :func:`_knockout_solve`
+    restores bounds after each solve.
+    """
+    assert _worker_model is not None
+
+    result = _knockout_solve(
+        _worker_model,
+        reference,
+        pert.reaction_ids,
+        method=method,
+        room_use_case=room_use_case,
+        delta=delta,
+        epsilon=epsilon,
+        with_provenance=False,
+        work_limit=work_limit,
+        room_linear=room_linear,
+    )
+    growth = (
+        float(result.fluxes.get(objective, float("nan")))
+        if (result.fluxes and objective is not None)
+        else float("nan")
+    )
+    product_flux = (
+        float(result.fluxes.get(product_reaction, float("nan")))
+        if (result.fluxes and product_reaction is not None)
+        else float("nan")
+    )
+    return BatchComparisonRow(
+        target_id=pert.target_id,
+        kind=pert.kind,
+        status=result.status,
+        objective_value=result.objective_value,
+        distance=result.distance,
+        distance_kind=result.distance_kind,
+        n_changed_reactions=result.n_changed_reactions,
+        objective=growth,
+        n_reactions=len(pert.reaction_ids),
+        product_flux=product_flux,
+        mip_gap=result.mip_gap,
+    )
+
+
 def batch_comparison(
     model: Model,
     reference: FluxState,
@@ -701,6 +866,10 @@ def batch_comparison(
     epsilon: float | None = None,
     objective_reaction: str | None = None,
     product_reaction: str | None = None,
+    processes: int = 1,
+    threads_per_worker: int | None = None,
+    room_work_limit: float | None = None,
+    room_linear: bool = False,
 ) -> BatchComparisonResult:
     """Run MOMA/ROOM for each perturbation against one reference, returning a batch table.
 
@@ -709,11 +878,22 @@ def batch_comparison(
     and collect the distance, the objective (growth) at the perturbed state, and the status.
     When ``product_reaction`` is given, each row also carries that reaction's perturbed flux.
 
+    When ``processes`` > 1, perturbations are distributed across worker processes using
+    ``multiprocessing.Pool``.  Each worker reconstructs the model from SBML bytes so that no
+    mutable state is shared.  ``threads_per_worker`` limits the number of solver threads in
+    each worker process (e.g. Gurobi ``Threads`` parameter); if ``None``, the solver's own
+    default applies.  Total CPU footprint is at most ``processes * threads_per_worker``.
+
     A knockout screen asks which deletions are lethal, so ``room_use_case`` defaults to
     Shlomi et al.'s **lethality** tolerance pair (delta 0.1, epsilon 1e-2) rather than their
     flux-prediction pair. Pass ``room_use_case="flux_prediction"`` to score the screen as a
     set of flux predictions instead; the two disagree by roughly a quarter of the switch
     count. The parameter has no effect on the MOMA methods.
+
+    When ``room_linear=True``, ROOM uses the LP relaxation instead of the full MILP.
+    The LP objective is a continuous lower bound on the switch count.  This is much faster
+    on genome-scale models and suitable as a first-pass screen; ``room_work_limit`` is
+    ignored when ``room_linear`` is set.
 
     Lethal knockouts stay in the table as ``status="infeasible"`` rows with NaN fluxes — the
     essentiality result is the point of the screen, not an error to filter out.
@@ -726,6 +906,20 @@ def batch_comparison(
     so the screen's coverage is reported rather than silently understated. A plain sequence of
     perturbations cannot know, and records ``None`` instead of a made-up zero.
     """
+
+    import time as _time
+
+    _t0 = _time.monotonic()
+    n_perts = len(perturbations)
+    label = method.upper().replace("_", "-")
+    if method == "room" and room_linear:
+        label += "-LP"
+    logger.info(
+        "batch_comparison: %s start (%d perturbations, %d workers)",
+        label,
+        n_perts,
+        min(processes, n_perts),
+    )
 
     if method not in {"moma_l1", "moma_l2", "room"}:
         raise ValueError("method must be 'moma_l1', 'moma_l2', or 'room'")
@@ -755,42 +949,101 @@ def batch_comparison(
         "epsilon": resolved_epsilon if is_room else None,
         "objective_reaction": objective,
         "product_reaction": product_reaction,
+        "processes": processes,
+        "threads_per_worker": threads_per_worker,
+        "room_work_limit": room_work_limit if is_room and not room_linear else None,
+        "room_linear": room_linear if is_room else None,
     }
-    rows: list[BatchComparisonRow] = []
-    for pert in perturbations:
-        result = _knockout_solve(
-            model,
-            reference,
-            pert.reaction_ids,
-            method=method,
-            room_use_case=room_use_case,
-            delta=resolved_delta,
-            epsilon=resolved_epsilon,
-            with_provenance=False,
-        )
-        growth = (
-            float(result.fluxes.get(objective, float("nan")))
-            if (result.fluxes and objective is not None)
-            else float("nan")
-        )
-        product_flux = (
-            float(result.fluxes.get(product_reaction, float("nan")))
-            if (result.fluxes and product_reaction is not None)
-            else float("nan")
-        )
-        rows.append(
-            BatchComparisonRow(
-                target_id=pert.target_id,
-                kind=pert.kind,
-                status=result.status,
-                objective_value=result.objective_value,
-                distance=result.distance,
-                distance_kind=result.distance_kind,
-                n_changed_reactions=result.n_changed_reactions,
-                objective=growth,
-                n_reactions=len(pert.reaction_ids),
-                product_flux=product_flux,
+
+    effective_work_limit = room_work_limit if is_room and not room_linear else None
+    effective_processes = min(processes, len(perturbations))
+    if effective_processes <= 1:
+        # ── Sequential path (original behaviour) ──
+        rows: list[BatchComparisonRow] = []
+        if threads_per_worker is not None:
+            try:
+                model.solver.problem.Params.Threads = threads_per_worker
+            except Exception:
+                pass
+        for pert in perturbations:
+            result = _knockout_solve(
+                model,
+                reference,
+                pert.reaction_ids,
+                method=method,
+                room_use_case=room_use_case,
+                delta=resolved_delta,
+                epsilon=resolved_epsilon,
+                with_provenance=False,
+                work_limit=effective_work_limit,
+                room_linear=room_linear,
             )
+            growth = (
+                float(result.fluxes.get(objective, float("nan")))
+                if (result.fluxes and objective is not None)
+                else float("nan")
+            )
+            product_flux = (
+                float(result.fluxes.get(product_reaction, float("nan")))
+                if (result.fluxes and product_reaction is not None)
+                else float("nan")
+            )
+            rows.append(
+                BatchComparisonRow(
+                    target_id=pert.target_id,
+                    kind=pert.kind,
+                    status=result.status,
+                    objective_value=result.objective_value,
+                    distance=result.distance,
+                    distance_kind=result.distance_kind,
+                    n_changed_reactions=result.n_changed_reactions,
+                    objective=growth,
+                    n_reactions=len(pert.reaction_ids),
+                    product_flux=product_flux,
+                    mip_gap=result.mip_gap,
+                )
+            )
+    else:
+        # ── Parallel path ──
+        import tempfile
+        import cobra
+
+        solver_name = str(model.solver.interface.__name__).split(".")[-1].replace(
+            "_interface", ""
         )
+        tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False)
+        try:
+            cobra.io.write_sbml_model(model, tmp.name)
+            tmp.close()
+
+            worker_fn = partial(
+                _solve_one_perturbation,
+                reference=reference,
+                method=method,
+                room_use_case=room_use_case,
+                delta=resolved_delta,
+                epsilon=resolved_epsilon,
+                objective=objective,
+                product_reaction=product_reaction,
+                work_limit=effective_work_limit,
+                room_linear=room_linear,
+            )
+            with multiprocessing.Pool(
+                processes=effective_processes,
+                initializer=_init_worker,
+                initargs=(tmp.name, solver_name, threads_per_worker),
+            ) as pool:
+                rows = pool.map(worker_fn, perturbations)
+        finally:
+            os.unlink(tmp.name)
+
     metadata["n_rows"] = len(rows)
+    _elapsed = _time.monotonic() - _t0
+    logger.info(
+        "batch_comparison: %s done (%d rows, %.1fs / %.1fmin)",
+        label,
+        len(rows),
+        _elapsed,
+        _elapsed / 60,
+    )
     return BatchComparisonResult(rows, metadata=metadata)

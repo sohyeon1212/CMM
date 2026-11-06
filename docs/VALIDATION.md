@@ -277,6 +277,17 @@ flux prediction, `batch_comparison` to lethality, and every result records the p
 Explicit `delta`/`epsilon` override the preset. The choice is not cosmetic — 531 against 401
 total switches over the same 35 gene knockouts, a 24% shift in the ranking score.
 
+**ROOM work limit in batch screens.** `batch_comparison` accepts a `room_work_limit` parameter
+(Gurobi deterministic work units; default `1000.0` in the production workflow). When a ROOM
+perturbation exhausts this budget without proving optimality, it returns `status="work_limit"`
+with the best feasible solution and its `mip_gap`. Deterministic work units are
+hardware-independent — unlike wall-clock `TimeLimit`, the same `WorkLimit` produces the same
+termination point on any machine, which is essential for cross-run reproducibility. On iML1515
+(1065 non-inert gene perturbations), benchmarking shows ~81% solve optimally within work < 500
+and ~19% remain non-optimal at work = 2000 (MIP gaps 8–59%), so a limit of 1000 captures every
+solvable problem. The limit applies only to batch ROOM; single `room()` and
+`knockout_comparison()` calls are unaffected.
+
 **Every result in this family carries the full `run_provenance` block**, alongside the
 reference identity and (for ROOM) the tolerance pair. `moma`, `room` and `knockout_comparison`
 fingerprint the model *as handed to the solver*, so a knockout's record is the fingerprint of

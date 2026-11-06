@@ -24,6 +24,8 @@ import shutil
 from numbers import Integral
 from typing import Literal, cast
 
+import logging
+
 from cobra import Model
 from cobra.io import read_sbml_model, write_sbml_model
 import numpy as np
@@ -63,6 +65,7 @@ from cmm.features import (
     fseof,
     fvseof,
     gene_perturbations,
+    reaction_perturbations,
     optknock,
     production_envelope,
     random_flux_sampling,
@@ -72,6 +75,8 @@ from cmm.features import (
 )
 from cmm.features._perturbation import apply_perturbation
 from cmm.features.strain_design import STRAIN_DESIGN_MAX_SECONDS, validate_max_seconds
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_ID = "cmm.production-target-discovery"
 SCHEMA_VERSION = 2
@@ -85,6 +90,7 @@ _STAGE_DIRECTORIES = (
     "06_amplification",
     "07_validation",
     "model",
+    "inputs",
     "figures",
     "scripts",
 )
@@ -192,7 +198,9 @@ class ProductionWorkflowConfig:
     reference_method: ReferenceMethod = "pfba"
     envelope_points: int = 20
     run_single_knockout: bool = True
+    knockout_level: Literal["gene", "reaction"] = "gene"
     single_knockout_genes: tuple[str, ...] | None = None
+    single_knockout_reactions: tuple[str, ...] | None = None
     top_single_knockouts_per_method: int = 5
     viability_fraction: float = 0.1
     product_improvement_tolerance: float = 1e-6
@@ -217,6 +225,10 @@ class ProductionWorkflowConfig:
     loopless_algorithm: LooplessAlgorithm = "fastSNP"
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     overwrite: bool = False
+    batch_processes: int = 0
+    batch_threads_per_worker: int = 6
+    room_work_limit: float | None = 500.0
+    gene_annotation_path: str | Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_path", Path(self.model_path))
@@ -228,6 +240,21 @@ class ProductionWorkflowConfig:
                 "single_knockout_genes",
                 tuple(str(gene) for gene in self.single_knockout_genes),
             )
+        if self.single_knockout_reactions is not None:
+            object.__setattr__(
+                self,
+                "single_knockout_reactions",
+                tuple(str(rxn) for rxn in self.single_knockout_reactions),
+            )
+        if self.gene_annotation_path is not None:
+            object.__setattr__(
+                self, "gene_annotation_path", Path(self.gene_annotation_path)
+            )
+        if self.batch_processes <= 0:
+            import os
+
+            detected = max(1, min(4, (os.cpu_count() or 1) // 6))
+            object.__setattr__(self, "batch_processes", detected)
         self.validate()
 
     def validate(self) -> None:
@@ -235,6 +262,14 @@ class ProductionWorkflowConfig:
             raise ValueError("model_path must not be empty")
         if not self.product:
             raise ValueError("product must not be empty")
+        if self.knockout_level not in {"gene", "reaction"}:
+            raise ValueError("knockout_level must be 'gene' or 'reaction'")
+        if self.knockout_level == "gene" and self.single_knockout_reactions is not None:
+            raise ValueError(
+                "single_knockout_reactions requires knockout_level='reaction'"
+            )
+        if self.knockout_level == "reaction" and self.single_knockout_genes is not None:
+            raise ValueError("single_knockout_genes requires knockout_level='gene'")
         if self.reference_method not in {"fba", "pfba"}:
             raise ValueError("reference_method must be 'fba' or 'pfba'")
         if self.envelope_points < 2:
@@ -318,7 +353,7 @@ class ProductionWorkflowConfig:
         if not isinstance(payload, Mapping):
             raise ValueError("production workflow JSON must contain an object")
         values = dict(payload)
-        for field_name in ("model_path", "output_dir"):
+        for field_name in ("model_path", "output_dir", "gene_annotation_path"):
             raw_path = values.get(field_name)
             if raw_path is None:
                 continue
@@ -345,6 +380,9 @@ class ProductionWorkflowConfig:
         genes = values.get("single_knockout_genes")
         if isinstance(genes, Sequence) and not isinstance(genes, (str, bytes)):
             values["single_knockout_genes"] = tuple(str(gene) for gene in genes)
+        rxns = values.get("single_knockout_reactions")
+        if isinstance(rxns, Sequence) and not isinstance(rxns, (str, bytes)):
+            values["single_knockout_reactions"] = tuple(str(r) for r in rxns)
         return cls(**values)  # type: ignore[arg-type]
 
 
@@ -362,6 +400,7 @@ class SingleKnockoutRecord:
 
     method: SingleKnockoutMethod
     target_id: str
+    kind: Literal["gene", "reaction"]
     blocked_reactions: tuple[str, ...]
     blocked_reaction_signature: str
     status: str
@@ -386,7 +425,7 @@ class SingleKnockoutRecord:
             "display_rank": self.display_rank,
             "selected": self.selected,
             "target_id": self.target_id,
-            "kind": "gene",
+            "kind": self.kind,
             "blocked_reactions": ";".join(self.blocked_reactions),
             "blocked_reaction_signature": self.blocked_reaction_signature,
             "status": self.status,
@@ -540,6 +579,47 @@ class SamplingValidation:
     def __post_init__(self) -> None:
         if self.comparison is not None:
             object.__setattr__(self, "comparison", self.comparison.copy())
+
+
+def _read_gene_annotation(path: Path) -> dict[str, str]:
+    """Read a gene id → display symbol table.
+
+    The id column stays text (``6487.10`` must not become ``6487.1``). The symbol column is the
+    one named ``symbol`` or, failing that, the second column. Blank symbols are dropped. The
+    values are display strings only and are escaped wherever they are rendered.
+    """
+
+    frame = pd.read_csv(path, sep=None, engine="python", dtype={0: str})
+    if frame.shape[1] < 2:
+        raise ProductionWorkflowError(
+            f"{path.name} needs a gene id column and a symbol column"
+        )
+    lowered = {str(column).strip().lower(): column for column in frame.columns}
+    symbol_column = lowered.get("symbol", frame.columns[1])
+    id_column = frame.columns[0]
+    if symbol_column == id_column:
+        raise ProductionWorkflowError(
+            f"{path.name}: the symbol column must not be the id column"
+        )
+    names: dict[str, str] = {}
+    for gene_id, symbol in zip(frame[id_column], frame[symbol_column], strict=True):
+        key = str(gene_id).strip()
+        value = "" if symbol != symbol else str(symbol).strip()  # NaN-safe
+        if key and value and key not in names:
+            names[key] = value
+    return names
+
+
+def _annotated_name(target_id: str, names: Mapping[str, str]) -> str:
+    """The symbol for a (possibly ``;``-joined) gene target, or ``""`` when none is known."""
+
+    parts = []
+    for piece in target_id.split(";"):
+        piece = piece.strip()
+        name = names.get(piece) or names.get(piece.split(".", 1)[0], "")
+        if name:
+            parts.append(name)
+    return ";".join(parts)
 
 
 def _validation_coverage(
@@ -770,7 +850,16 @@ def _run_production_target_discovery(
 ) -> ProductionWorkflowResult:
     """Loaded-model implementation used by the public file-backed runner and tests."""
 
+    import time as _time
+
+    _run_t0 = _time.monotonic()
+
+    def _stage(msg: str) -> None:
+        elapsed = _time.monotonic() - _run_t0
+        logger.info("[%6.1fs] %s", elapsed, msg)
+
     config.validate()
+    _stage("preflight: start")
     original_fingerprint = model_fingerprint(model)
     working = model.copy()
     if config.solver is not None:
@@ -780,6 +869,8 @@ def _run_production_target_discovery(
     gene_mapping = _gene_knockout_mapping(working)
     oxygen_uptake = _oxygen_exchange_uptake(working)
 
+    _stage("preflight: done")
+    _stage("reference: wild-type FBA")
     wild_type = fba(working)
     if wild_type.status != "optimal" or not wild_type.fluxes:
         raise ProductionWorkflowError(
@@ -793,6 +884,7 @@ def _run_production_target_discovery(
             "wild-type reference has no positive biomass flux under the applied condition"
         )
 
+    _stage("yield: theoretical yield + production envelope")
     yield_result = theoretical_yield(
         working,
         config.product,
@@ -815,15 +907,28 @@ def _run_production_target_discovery(
     single_records: tuple[SingleKnockoutRecord, ...] = ()
     single_metadata: dict[str, object] = {}
     if config.run_single_knockout:
-        enumerated = gene_perturbations(
-            working,
-            genes=config.single_knockout_genes,
-        )
+        _stage(f"single-{config.knockout_level}: enumerating perturbations")
+        if config.knockout_level == "reaction":
+            enumerated = reaction_perturbations(
+                working,
+                reactions=config.single_knockout_reactions,
+            )
+        else:
+            enumerated = gene_perturbations(
+                working,
+                genes=config.single_knockout_genes,
+            )
         if not enumerated:
             raise ProductionWorkflowError(
-                "single-gene screening found no gene knockout that blocks a reaction"
+                f"single-{config.knockout_level} screening found no knockout "
+                "that blocks a reaction"
             )
         perturbations = tuple(enumerated)
+        _stage(
+            f"single-{config.knockout_level}: {len(perturbations)} perturbations, "
+            f"MOMA-L2 batch ({config.batch_processes} workers × "
+            f"{config.batch_threads_per_worker} threads)"
+        )
         moma_screen = batch_comparison(
             working,
             reference,
@@ -831,6 +936,12 @@ def _run_production_target_discovery(
             method="moma_l2",
             objective_reaction=biomass,
             product_reaction=config.product,
+            processes=config.batch_processes,
+            threads_per_worker=config.batch_threads_per_worker,
+        )
+        _stage(
+            f"single-{config.knockout_level}: ROOM batch "
+            f"(work_limit={config.room_work_limit})"
         )
         room_screen = batch_comparison(
             working,
@@ -840,6 +951,9 @@ def _run_production_target_discovery(
             room_use_case="flux_prediction",
             objective_reaction=biomass,
             product_reaction=config.product,
+            processes=config.batch_processes,
+            threads_per_worker=config.batch_threads_per_worker,
+            room_work_limit=config.room_work_limit,
         )
         room_epsilon = float(cast(float, room_screen.metadata["epsilon"]))
         room_improvement_threshold = room_epsilon + config.product_improvement_tolerance
@@ -894,9 +1008,12 @@ def _run_production_target_discovery(
             },
         }
 
+    _stage("single-knockout: ranking done")
+
     optknock_result = None
     robustknock_result = None
     if config.run_strain_design:
+        _stage("strain-design: OptKnock start")
         optknock_result = optknock(
             working,
             config.product,
@@ -908,6 +1025,7 @@ def _run_production_target_discovery(
             seed=config.strain_design_seed,
             max_seconds=config.strain_design_max_seconds,
         )
+        _stage("strain-design: RobustKnock start")
         robustknock_result = robustknock(
             working,
             config.product,
@@ -923,6 +1041,7 @@ def _run_production_target_discovery(
     fseof_result = None
     fvseof_result = None
     if config.run_amplification:
+        _stage("amplification: FSEOF + FVSEOF start")
         fseof_result = fseof(
             working,
             config.product,
@@ -940,6 +1059,8 @@ def _run_production_target_discovery(
             fraction_max=config.scan_fraction_max,
             biomass_fraction=config.fvseof_biomass_fraction,
         )
+
+    _stage("amplification: FSEOF + FVSEOF done")
 
     loop_diagnostic = None
     if (
@@ -967,6 +1088,7 @@ def _run_production_target_discovery(
     response_results: tuple[FluxResponseValidation, ...] = ()
     sampling_results: tuple[SamplingValidation, ...] = ()
     if config.validation.enabled:
+        _stage("validation: start")
         validation_targets = _validation_targets(
             single_records,
             fseof_result,
@@ -977,6 +1099,7 @@ def _run_production_target_discovery(
             amplification_limit=config.top_amplification_targets_per_method,
             limit=config.validation.max_flux_response_targets,
         )
+        _stage(f"validation: flux-response ({len(validation_targets)} targets)")
         response_results = _run_flux_response_validation(
             working,
             config,
@@ -984,7 +1107,9 @@ def _run_production_target_discovery(
             validation_targets,
             reference,
         )
+        _stage("validation: flux-response done")
         if config.validation.sampling.enabled and config.run_single_knockout:
+            _stage("validation: sampling start")
             sampling_results = _run_sampling_validation(
                 working,
                 config,
@@ -994,6 +1119,9 @@ def _run_production_target_discovery(
                 perturbations,
             )
 
+    _stage("validation: done")
+
+    _stage("provenance: assembling result")
     provenance: dict[str, object] = {
         **run_provenance(
             working,
@@ -1164,8 +1292,11 @@ def _preflight_model(model: Model, config: ProductionWorkflowConfig) -> str:
         )
     biomass = _biomass_reaction(model, config.biomass)
     if config.run_single_knockout:
-        require("QP", model.solver.interface, feature="single-gene L2 MOMA screen")
-        require("MILP", model.solver.interface, feature="single-gene exact ROOM screen")
+        _ko_label = f"single-{config.knockout_level}"
+        require("QP", model.solver.interface, feature=f"{_ko_label} L2 MOMA screen")
+        require(
+            "MILP", model.solver.interface, feature=f"{_ko_label} exact ROOM screen"
+        )
     if config.run_strain_design:
         require("MILP", model.solver.interface, feature="OptKnock/RobustKnock")
         try:
@@ -1303,6 +1434,7 @@ def _rank_single_knockout_screen(
             SingleKnockoutRecord(
                 method=method,
                 target_id=row.target_id,
+                kind=perturbation.kind,
                 blocked_reactions=perturbation.reaction_ids,
                 blocked_reaction_signature=signature,
                 status=row.status,
@@ -2330,7 +2462,27 @@ def _export_result(
     for directory in _STAGE_DIRECTORIES:
         (root / directory).mkdir(parents=True, exist_ok=True)
 
+    annotation: dict[str, str] = {}
+    annotation_bytes: bytes | None = None
+    if result.config.gene_annotation_path is not None:
+        annotation_path = Path(result.config.gene_annotation_path)
+        annotation = _read_gene_annotation(annotation_path)
+        annotation_bytes = annotation_path.read_bytes()
+
     writer = _ArtifactWriter(root)
+
+    if annotation_bytes is not None:
+        suffix = Path(str(result.config.gene_annotation_path)).suffix or ".csv"
+        relative = f"inputs/gene_annotation{suffix}"
+        (root / "inputs").mkdir(parents=True, exist_ok=True)
+        (root / relative).write_bytes(annotation_bytes)
+        writer.existing(
+            relative,
+            stage="inputs",
+            role="gene_annotation",
+            media_type="text/tab-separated-values" if suffix == ".tsv" else "text/csv",
+        )
+
     writer.csv(
         "01_preflight/preflight.csv",
         pd.DataFrame([asdict(record) for record in result.preflight]),
@@ -2378,6 +2530,7 @@ def _export_result(
             SingleKnockoutRecord(
                 method="moma_l2",
                 target_id="",
+                kind=result.config.knockout_level,
                 blocked_reactions=(),
                 blocked_reaction_signature="",
                 status="",
@@ -2399,7 +2552,7 @@ def _export_result(
         ("room", "single_knockout_room.csv"),
     ):
         rows = [
-            _single_knockout_export_row(record, conditioned_model)
+            _single_knockout_export_row(record, conditioned_model, annotation or None)
             for record in result.single_knockouts
             if record.method == method
         ]
@@ -2419,6 +2572,7 @@ def _export_result(
     candidate_rows = _single_knockout_candidate_export_rows(
         result.single_knockouts,
         conditioned_model,
+        annotation or None,
     )
     candidate_columns = [
         *single_columns,
@@ -2773,6 +2927,11 @@ def _export_result(
     exported_config = _config_payload(result.config)
     exported_config["model_path"] = model_relative
     exported_config["output_dir"] = "."
+    if annotation_bytes is not None:
+        suffix = Path(str(result.config.gene_annotation_path)).suffix or ".csv"
+        exported_config["gene_annotation_path"] = f"inputs/gene_annotation{suffix}"
+    else:
+        exported_config.pop("gene_annotation_path", None)
     exported_provenance = _portable_run_provenance(
         result.provenance,
         model_relative=model_relative,
@@ -4331,6 +4490,7 @@ def _flux_frame(fluxes: Mapping[str, float]) -> pd.DataFrame:
 def _single_knockout_export_row(
     record: SingleKnockoutRecord,
     model: Model,
+    annotation: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Enrich a MOMA/ROOM row with reporter-ready, reaction-level identity fields."""
 
@@ -4345,9 +4505,14 @@ def _single_knockout_export_row(
         for reaction_id in record.blocked_reactions
         if reaction_id in model.reactions
     ]
+    display = ""
+    if annotation:
+        display = _annotated_name(record.target_id, annotation)
+    if not display:
+        display = str(gene.name or "") if gene is not None else ""
     row.update(
         {
-            "target_name": str(gene.name or "") if gene is not None else "",
+            "target_name": display,
             "blocked_reaction_names": ";".join(
                 str(reaction.name or "") for reaction in reactions
             ),
@@ -4366,6 +4531,7 @@ def _single_knockout_export_row(
 def _single_knockout_candidate_export_rows(
     records: Sequence[SingleKnockoutRecord],
     model: Model,
+    annotation: Mapping[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """Export every method-specific display candidate with its deduplicated run target."""
 
@@ -4373,7 +4539,7 @@ def _single_knockout_candidate_export_rows(
     for group in _single_knockout_validation_groups(records):
         representative_record = group.representative
         for record in group.display_records:
-            row = _single_knockout_export_row(record, model)
+            row = _single_knockout_export_row(record, model, annotation)
             row.update(
                 {
                     "candidate_scope": "all_display_ranked_candidates",

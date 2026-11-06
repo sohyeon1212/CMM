@@ -387,6 +387,16 @@ single_knockout_roles <- c("single_knockout_moma", "single_knockout_room", "summ
 if (artifact_available("reproduction_config")) {
   single_knockout_roles <- c(single_knockout_roles, "reproduction_config")
 }
+ko_kind <- "gene"
+if (artifact_available("single_knockout_moma")) {
+  .moma_rows <- read_artifact_csv("single_knockout_moma")
+  if ("kind" %in% names(.moma_rows) && nrow(.moma_rows) > 0L) {
+    .first_kind <- trimws(.moma_rows$kind[1L])
+    if (.first_kind %in% c("gene", "reaction")) ko_kind <- .first_kind
+  }
+  rm(.moma_rows)
+}
+ko_kind_label <- paste0("single-", ko_kind, "-knockout")
 render_panel(
   "fig02_single_knockout",
   "Figure 2",
@@ -1045,7 +1055,7 @@ render_panel(
     knockout_context <- if (knockout_is_current_scope) {
       paste0(
         "Knockout-derived panels are wild-type pre-deletion single-reaction titrations; ",
-        "their facet titles pair the representative gene with its scanned reaction."
+        "their facet titles pair the representative ", ko_kind, " with its scanned reaction."
       )
     } else {
       paste0(
@@ -1221,7 +1231,7 @@ render_panel(
         "declared candidate remains visible. Optimal points are connected in ",
         "target_flux scan order; all rows and failed execution reasons remain in ",
         "flux_response_tidy.csv and flux_response_index.csv.%s%s%s ",
-        "Gene IDs sharing one blocked-reaction signature share a simulation facet; the index ",
+        if (ko_kind == "gene") "Gene IDs" else "Reaction IDs", " sharing one blocked-reaction signature share a simulation facet; the index ",
         "and report table list every candidate alias."
       ),
       amplification_count + knockout_count,
@@ -1241,8 +1251,8 @@ render_panel(
 render_panel(
   "fig06_sampling_shift",
   "Figure 6",
-  "Paired feasible-flux distributions for the target-product exchange (top; mmol gDW⁻¹ h⁻¹) and biomass reaction (bottom; h⁻¹) before and after every completed display-ranked single-gene-knockout sampling analysis. Every completed analysis is shown. The main figure intentionally omits other reactions, which remain available in sampling_tidy.csv. Samples are feasible states, not biological replicates.",
-  "Multi-row product-flux and biomass-growth distributions for all completed display-ranked single-gene-knockout sampling analyses.",
+  sprintf("Paired feasible-flux distributions for the target-product exchange (top; mmol gDW⁻¹ h⁻¹) and biomass reaction (bottom; h⁻¹) before and after every completed display-ranked %s sampling analysis. Every completed analysis is shown. The main figure intentionally omits other reactions, which remain available in sampling_tidy.csv. Samples are feasible states, not biological replicates.", ko_kind_label),
+  sprintf("Multi-row product-flux and biomass-growth distributions for all completed display-ranked %s sampling analyses.", ko_kind_label),
   c(
     "sampling_tidy",
     "summary",
@@ -1329,11 +1339,11 @@ render_panel(
       paste0(
         "Paired feasible-flux distributions for the product exchange (top; mmol gDW⁻¹ h⁻¹) ",
         "and biomass reaction (bottom; h⁻¹) before and after all %d completed display-ranked ",
-        "single-gene-knockout sampling analyses, arranged in grids of at most five targets per ",
+        ko_kind_label, " sampling analyses, arranged in grids of at most five targets per ",
         "row. Every completed analysis is shown. The main figure ",
         "intentionally omits other reactions, which remain in sampling_tidy.csv; samples are ",
         "feasible states, not biological replicates. ",
-        "Gene IDs sharing one blocked-reaction signature share a simulation facet; the index ",
+        if (ko_kind == "gene") "Gene IDs" else "Reaction IDs", " sharing one blocked-reaction signature share a simulation facet; the index ",
         "and report table list every candidate alias."
       ),
       length(target_levels)

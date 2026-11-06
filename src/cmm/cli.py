@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 import json
+import logging
 from pathlib import Path
 import sys
 
@@ -243,6 +244,12 @@ def _run_report(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stderr,
+    )
     parser = build_parser()
     args = parser.parse_args(argv)
 

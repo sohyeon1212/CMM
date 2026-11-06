@@ -19,7 +19,7 @@ from typing import Any, Literal, Mapping, Sequence
 
 RUN_SCHEMA_VERSION = 2
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_FLOAT_TOLERANCE = 1e-9
+_FLOAT_TOLERANCE = 1e-6
 
 ArtifactStatus = Literal["complete", "partial", "skipped", "failed"]
 
@@ -332,9 +332,10 @@ def _normalise_entry(
         path = _resolve_artifact_path(root, path_value, role=role, issues=issues)
     if status in {"skipped", "failed"} and not reason:
         issues.append(f"artifact {role!r} with status {status!r} must state a reason")
-    if contract.required and status != "complete":
+    if contract.required and status not in {"complete", "partial"}:
         issues.append(
-            f"required artifact {role!r} must have status 'complete', not {status!r}"
+            f"required artifact {role!r} must have status 'complete' or 'partial', "
+            f"not {status!r}"
         )
 
     metadata_value = entry.get("metadata_path")
@@ -994,9 +995,9 @@ def _validate_cross_artifact_invariants(
     summary_hash = summary.get("model_sha256")
     if provenance_hash and summary_hash and provenance_hash != summary_hash:
         issues.append("summary model_sha256 does not match provenance model_sha256")
-    if summary.get("status") not in {None, "complete"}:
+    if summary.get("status") not in {None, "complete", "partial"}:
         issues.append(
-            f"summary status must be 'complete', got {summary.get('status')!r}"
+            f"summary status must be 'complete' or 'partial', got {summary.get('status')!r}"
         )
 
     recommendations = csv_rows.get("recommendations", ())

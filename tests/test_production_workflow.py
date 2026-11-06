@@ -85,6 +85,7 @@ def _candidate_record(
     return SingleKnockoutRecord(
         method=method,
         target_id=target_id,
+        kind="gene",
         blocked_reactions=(signature,),
         blocked_reaction_signature=signature,
         status="optimal",
@@ -892,6 +893,7 @@ def test_knockout_recommendation_requires_concordant_sampling_shifts() -> None:
     candidate = production.SingleKnockoutRecord(
         method="moma_l2",
         target_id="g1",
+        kind="gene",
         blocked_reactions=("KO",),
         blocked_reaction_signature="KO",
         status="optimal",

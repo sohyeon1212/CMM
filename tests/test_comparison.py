@@ -508,6 +508,7 @@ def test_batch_comparison_carries_one_provenance_block_for_the_screen(branched_m
         "objective",
         "n_reactions",
         "product_flux",
+        "mip_gap",
     ]
     assert set(frame["target_id"]) == {row.target_id for row in screen}
 

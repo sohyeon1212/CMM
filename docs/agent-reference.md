@@ -179,7 +179,8 @@ top_amplification_targets_per_method=10,
 scan_fraction_min=0.1, scan_fraction_max=0.9, fvseof_biomass_fraction=0.95,
 run_amplification_loop_diagnostic=True, amplification_loop_diagnostic_top_n=20,
 loopless_capacity_ratio_threshold=0.1, loopless_algorithm="fastSNP",
-validation=ValidationConfig(), overwrite=False)`.
+validation=ValidationConfig(), overwrite=False,
+batch_processes=0, batch_threads_per_worker=6, room_work_limit=1000.0)`.
 
 `ValidationConfig(enabled=True, max_flux_response_targets=30, flux_response_steps=20,
 flux_response_biomass_fraction=0.3, sampling_growth_fraction=0.1,
@@ -215,6 +216,23 @@ each method (10 per method by default); being present in both rankings is descri
 not a selection or recommendation prerequisite. Flux response covers the unique union of
 those two report-visible lists, including loop-flagged or unresolved candidates; loop status
 remains a separate support/recommendation eligibility field.
+
+`batch_processes` (default `0` = auto-detect: `max(1, min(4, cpu_count // 6))`) sets the
+number of parallel workers for the MOMA and ROOM batch screens. `batch_threads_per_worker`
+(default `6`) sets the Gurobi solver thread count per worker; the total CPU footprint is at
+most `batch_processes * batch_threads_per_worker`. These are performance settings and do not
+change the scientific result.
+
+`room_work_limit` (default `1000.0`; `null`/`None` = no limit) caps each individual ROOM MILP
+perturbation in the batch screen by Gurobi deterministic work units. Unlike wall-clock time
+limits, work units are hardware-independent, so the same limit produces the same termination
+point on any machine — this is critical for reproducibility. A perturbation that hits the limit
+returns `status="work_limit"` with the best feasible solution found and its `mip_gap` recorded.
+The limit applies only to batch ROOM screens; single `room()` and `knockout_comparison()` calls
+are unaffected. On the iML1515 genome-scale model, ~81% of perturbations solve optimally within
+work < 500, and the remaining ~19% do not reach optimality even at work = 2000 (MIP gaps
+8–59%), so a limit of 1000 captures all solvable problems without wasting time on intractable
+ones.
 
 `ProductionWorkflowConfig.from_json(path)` reads UTF-8 JSON; relative `model_path` and
 `output_dir` values resolve from the config file's directory. `from_mapping(...)` parses nested
@@ -496,7 +514,9 @@ knockout_comparison(model, reference, reaction_ids, *, method="moma_l2",
                     room_use_case="flux_prediction", delta=None, epsilon=None)
 batch_comparison(model, reference, perturbations, *, method="moma_l2",
                  room_use_case="lethality", delta=None, epsilon=None,
-                 objective_reaction=None, product_reaction=None)  # -> BatchComparisonResult
+                 objective_reaction=None, product_reaction=None,
+                 processes=0, threads_per_worker=None,
+                 room_work_limit=None)  # -> BatchComparisonResult
 moma(model, reference, *, linear=False)
 room(model, reference, *, linear=False, use_case="flux_prediction",
      delta=None, epsilon=None)
@@ -517,11 +537,15 @@ room(model, reference, *, linear=False, use_case="flux_prediction",
   `blocked_reactions_for_genes(model, ["b0726"])` resolves GPRs to reaction ids you can pass
   straight to `knockout_comparison`.
 - `ComparisonResult`: `.method`, `.status`, `.objective_value`, `.distance`, `.distance_kind`,
-  `.n_changed_reactions`, `.fluxes`, `.metadata`, `.to_flux_state()`.
+  `.n_changed_reactions`, `.fluxes`, `.metadata`, `.mip_gap`, `.to_flux_state()`.
+  `status` is `"optimal"`, `"infeasible"`, or `"work_limit"` (ROOM only, when the solver hit
+  the deterministic work limit with a feasible but non-optimal solution). `mip_gap` is `None`
+  for optimal/infeasible results and a float in [0, 1] for work_limit results.
 - `BatchComparisonRow`: `.target_id`, `.kind`, `.status`, `.objective_value`, `.distance`,
   `.distance_kind`, `.n_changed_reactions`, `.objective` (growth), `.n_reactions`,
-  `.product_flux` (NaN unless `product_reaction=` was given). Pass `product_reaction` whenever
-  you are screening for production — without it you only learn which knockouts hurt growth.
+  `.product_flux` (NaN unless `product_reaction=` was given), `.mip_gap` (`None` for MOMA
+  methods; `None` or float for ROOM). Pass `product_reaction` whenever you are screening for
+  production — without it you only learn which knockouts hurt growth.
 - **`batch_comparison` returns a `BatchComparisonResult`** — a `list` subclass, so iteration,
   `len()`, indexing and `sorted()` are exactly as before — that adds `.to_frame()` and
   `.metadata`. The provenance is on the container, not on the row: one screen shares one

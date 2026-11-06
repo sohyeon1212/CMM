@@ -901,7 +901,7 @@ def test_validator_aggregates_numeric_and_cross_method_scientific_failures(tmp_p
         run,
         manifest,
         "summary",
-        json.dumps({"status": "partial", "model_sha256": "b" * 64}) + "\n",
+        json.dumps({"status": "failed", "model_sha256": "b" * 64}) + "\n",
     )
     _replace_artifact(
         run,
@@ -1001,7 +1001,7 @@ def test_validator_aggregates_numeric_and_cross_method_scientific_failures(tmp_p
         validate_run(run)
     message = str(raised.value)
     for expected in (
-        "summary status must be 'complete'",
+        "summary status must be 'complete' or 'partial'",
         "summary model_sha256 does not match",
         "repeats reaction_id",
         "theoretical_yield status",

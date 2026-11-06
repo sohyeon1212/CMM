@@ -457,6 +457,16 @@ def _ko_display_ranks(
     return {index: rank for rank, (index, _, _, _) in enumerate(eligible[:5], 1)}
 
 
+def _knockout_kind(validated: ValidatedRun) -> str:
+    """Return ``'gene'`` or ``'reaction'`` from the first screen row's ``kind`` column."""
+    for role in ("single_knockout_moma", "single_knockout_room"):
+        for row in _rows(validated, role):
+            kind = row.get("kind", "").strip()
+            if kind in ("gene", "reaction"):
+                return kind
+    return "gene"
+
+
 def _ko_mapping_index(
     validated: ValidatedRun,
 ) -> dict[str, tuple[str, tuple[tuple[str, str, str, str], ...]]]:
@@ -485,10 +495,13 @@ def _ko_mapping_index(
     }
 
 
-def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
+def _screen_table(
+    validated: ValidatedRun, role: str, label: str, *, kind: str = "gene"
+) -> str:
     rows = _rows(validated, role)
     display_ranks = _ko_display_ranks(validated, rows)
     mapping = _ko_mapping_index(validated)
+    is_reaction = kind == "reaction"
 
     def finite_number(row: Mapping[str, str], column: str) -> float:
         try:
@@ -511,8 +524,8 @@ def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
     for index, row in ordered:
         target = row.get("target_id", "")
         mapped_name, mapped_reactions = mapping.get(target, ("", ()))
-        gene_name = row.get("target_name", row.get("gene_name", mapped_name))
-        gene_label = f"{target} ({gene_name})" if gene_name else target
+        target_name = row.get("target_name", row.get("gene_name", mapped_name))
+        target_label = f"{target} ({target_name})" if target_name else target
         blocked_ids = [
             value.strip()
             for value in row.get("blocked_reactions", "").split(";")
@@ -555,17 +568,23 @@ def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
             )
             or "—"
         )
+        gpr_context = row.get("blocked_reaction_gprs", "").strip() or "—"
         analysis_context = (
             "Beneficial outcome in this method"
             if _truthy(row.get("selected", ""))
             else "Display-ranked outcome"
         )
+        base_cells = (
+            f"D{display_ranks[index]}" if index in display_ranks else "—",
+            target_label,
+            reaction_context,
+            equation_context,
+        )
+        gpr_cells = (gpr_context,) if is_reaction else ()
         table_rows.append(
             (
-                f"D{display_ranks[index]}" if index in display_ranks else "—",
-                gene_label,
-                reaction_context,
-                equation_context,
+                *base_cells,
+                *gpr_cells,
                 row.get("status", ""),
                 _format_number(row.get("objective", "")),
                 _format_number(row.get("product_flux", "")),
@@ -577,7 +596,7 @@ def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
         "method-specific workflow display rank when exported; current exports choose one "
         "representative per blocked-reaction signature. For legacy runs without that field, "
         "the reporter selects the five highest-product feasible rows retaining the configured "
-        "viability fraction, with ties resolved by growth and gene ID. Display rank is a "
+        "viability fraction, with ties resolved by growth and target ID. Display rank is a "
         "method-specific visualization rank, not a combined verdict. These are the canonical "
         "D1–D5 forward-analysis candidates. The complete unmodified screen remains in the "
         "source CSV."
@@ -587,15 +606,21 @@ def _screen_table(validated: ValidatedRun, role: str, label: str) -> str:
         "and no screen-only rows; "
         f"the linked CSV contains all {len(rows)} screen outcomes."
     )
+    candidate_header = "Reaction candidate" if is_reaction else "Gene candidate"
+    base_headers: tuple[str, ...] = (
+        "Display rank",
+        candidate_header,
+        "Blocked reactions",
+        "Reaction equations",
+    )
+    gpr_headers: tuple[str, ...] = ("GPR",) if is_reaction else ()
     return (
         f"<h4>{_escape(label)}</h4>"
         + '<div class="table-scroll">'
         + _table(
             (
-                "Display rank",
-                "Gene candidate",
-                "Blocked reactions",
-                "Reaction equations",
+                *base_headers,
+                *gpr_headers,
                 "Status",
                 "Growth rate (h⁻¹)",
                 "Product flux (mmol gDW⁻¹ h⁻¹)",
@@ -1043,6 +1068,13 @@ def _mapping_table(validated: ValidatedRun) -> str:
     return table + f'<p class="muted">{note}</p>'
 
 
+def _mapping_section(validated: ValidatedRun, kind: str) -> str:
+    """Gene-to-reaction mapping section; omitted for reaction-level knockouts."""
+    if kind == "reaction":
+        return ""
+    return f"<h4>Gene-to-reaction interpretation</h4>\n{_mapping_table(validated)}"
+
+
 def _loop_table(validated: ValidatedRun) -> str:
     rows = _rows(validated, "amplification_loop_diagnostic")
     return _table(
@@ -1237,6 +1269,7 @@ def _coverage_cell(*, expected: int, indexed: int, exhaustive: bool) -> str:
 def _validation_execution_summary(validated: ValidatedRun) -> str:
     """Describe complete and unavailable candidate-level forward checks without promotion."""
 
+    ko_kind = _knockout_kind(validated)
     response_index = _rows(validated, "flux_response_validation_index")
     sampling_index = _rows(validated, "single_knockout_sampling_validation_index")
     response_rows = _rows(validated, "flux_response_tidy")
@@ -1330,13 +1363,13 @@ def _validation_execution_summary(validated: ValidatedRun) -> str:
             amplification_exhaustive,
         ),
         (
-            "Flux response — single-gene knockout signatures",
+            f"Flux response — single-{ko_kind} knockout signatures",
             response_knockout,
             len(display_signatures),
             response_ko_exhaustive,
         ),
         (
-            "Random sampling — single-gene knockout signatures",
+            f"Random sampling — single-{ko_kind} knockout signatures",
             sampling_knockout,
             len(display_signatures),
             sampling_exhaustive,
@@ -1606,6 +1639,7 @@ def _document(
         "single_knockout_moma",
         "single_knockout_room",
     )
+    ko_kind = _knockout_kind(validated)
 
     def figure(figure_id: str) -> str:
         value = figures.get(figure_id)
@@ -1683,9 +1717,8 @@ sampling are forward checks and do not turn a model prediction into an experimen
 Every D1–D5 display-ranked signature is shown as a forward-analysis candidate so the growth, product, response,
 and sampling results can be compared directly. Sources:
 {_source_refs(validated, single_sources, standalone=standalone)}.</p>
-{figure("fig02_single_knockout")}{_screen_table(validated, "single_knockout_moma", "MOMA")}
-{_screen_table(validated, "single_knockout_room", "ROOM")}<h4>Gene-to-reaction interpretation</h4>
-{_mapping_table(validated)}
+{figure("fig02_single_knockout")}{_screen_table(validated, "single_knockout_moma", "MOMA", kind=ko_kind)}
+{_screen_table(validated, "single_knockout_room", "ROOM", kind=ko_kind)}{_mapping_section(validated, ko_kind)}
 <h3>4.3 Multi-knockout strain designs</h3>
 <p>OptKnock and RobustKnock exported {optknock_count} and {robustknock_count} reaction-level outcomes,
 respectively. Their maximum product, guaranteed product, growth, and coupling fields are shown without selecting
